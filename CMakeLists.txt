@@ -20,14 +20,15 @@ include_directories(include)
 # Collect all source files
 file(GLOB SOURCES
     src/*.cpp
-    plugin.cpp
+    main.cpp
+    # plugin.cpp   # Uncomment if plugin.cpp should be part of basic_agent, otherwise leave it out
 )
 
 # Find libcurl
 find_package(CURL REQUIRED)
 
-# Create the executable
-add_executable(code_agent_plugin ${SOURCES})
+# Create the executable (note target name is basic_agent)
+add_executable(basic_agent ${SOURCES})
 
-# Link with curl
+# Link with curl (target name is basic_agent)
 target_link_libraries(basic_agent PRIVATE CURL::libcurl)

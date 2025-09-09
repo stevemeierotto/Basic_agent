@@ -83,12 +83,32 @@ void Memory::load() {
 
 
 void Memory::save() const {
+    namespace fs = std::filesystem;
+    fs::path filePathObj(filepath);
+
+    // Ensure directory exists
+    if (!fs::exists(filePathObj.parent_path())) {
+        std::error_code ec;
+        fs::create_directories(filePathObj.parent_path(), ec);
+        if (ec) {
+            std::cerr << "[Memory] Failed to create directory: " << filePathObj.parent_path()
+                      << " (" << ec.message() << ")\n";
+            return;
+        }
+    }
+
     std::ofstream out(filepath);
     if (!out.is_open()) {
         std::cerr << "[Memory] Could not open file for writing: " << filepath << "\n";
         return;
     }
     out << data.dump(4);
+    out.flush();
+    if (!out) {
+        std::cerr << "[Memory] Error occurred while writing to: " << filepath << "\n";
+    } else {
+        std::cerr << "[Memory] Saved memory to " << filepath << "\n";
+    }
 }
 
 
