@@ -16,16 +16,20 @@ CommandProcessor::CommandProcessor(Memory& mem, RAGPipeline& rag, LLMInterface& 
 
 std::string CommandProcessor::processQuery(const std::string& input) {
     // 1. Build a conversation + RAG prompt
+    std::cout << "[ProcessQuery] we begin! \n";
     std::string prompt = promptFactory.buildConversationPrompt(input);
-
+    std::cout << "[ProcessQuery] Prompt created , waiting for response. \n";
     // 2. Query the LLM
     std::string response = llm.query(prompt);
+    std::cout << "[ProcessQuery] response recieved. \n";
 
     // 3. Update memory
     memory.addMessage("user", input);
+    std::cout << "[ProcessQuery] addMessage user \n";
     memory.addMessage("assistant", response);
+    std::cout << "[ProcessQuery] addmessage assistant \n";
     memory.save();
-
+    std::cout << "[ProcessQuery] memory saved return response \n";
     return response;
 }
 

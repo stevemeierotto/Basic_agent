@@ -3,8 +3,11 @@
 #include "include/rag.h"
 #include "include/llm_interface.h"
 
+#include <filesystem>
+
 int main() {
-    Memory memory;
+    std::string absPath = (std::filesystem::current_path() / "memory.json").string();
+    Memory memory(absPath);
     RAGPipeline rag;
     LLMInterface llm;
 
@@ -12,3 +15,5 @@ int main() {
     cp.runLoop();
     return 0;
 }
+
+

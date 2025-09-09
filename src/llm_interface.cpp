@@ -44,7 +44,7 @@ std::string LLMInterface::askOllama(const std::string& prompt) {
         json payload;
         payload["model"] = "llama3.2:latest";
         payload["prompt"] = prompt;
-        payload["stream"] = true;
+        payload["stream"] = false;
 
         std::string jsonStr = payload.dump();
 

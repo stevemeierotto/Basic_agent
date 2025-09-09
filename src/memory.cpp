@@ -11,11 +11,23 @@ Memory::Memory(const std::string& path) {
     if (!path.empty()) {
         filepath = path;
     } else {
-        // Use the platform-agnostic default path
         filepath = getDefaultPath();
     }
+
+    // Only create parent directories if parent_path() is not empty
+    fs::path parent = fs::path(filepath).parent_path();
+    if (!parent.empty() && !fs::exists(parent)) {
+        std::error_code ec;
+        fs::create_directories(parent, ec);
+        if (ec) {
+            std::cerr << "[Memory] Failed to create directory: " << parent
+                      << " (" << ec.message() << ")\n";
+        }
+    }
+
     load();
 }
+
 
 
 std::string Memory::getDefaultPath() const {
@@ -61,7 +73,7 @@ void Memory::load() {
                 {"short_summary", ""},
                 {"extended_summary", ""}
             };
-            save(); // write defaults
+            //save(); // write defaults
         }
     } else {
         // File does not exist: create directories if needed and save defaults
@@ -76,22 +88,19 @@ void Memory::load() {
             {"short_summary", ""},
             {"extended_summary", ""}
         };
-        save(); // write defaults
+        //save(); // write defaults
         std::cerr << "[Memory] Initialized new memory at " << filepath << "\n";
     }
 }
 
 
 void Memory::save() const {
-    namespace fs = std::filesystem;
-    fs::path filePathObj(filepath);
-
-    // Ensure directory exists
-    if (!fs::exists(filePathObj.parent_path())) {
+    fs::path parent = fs::path(filepath).parent_path();
+    if (!parent.empty() && !fs::exists(parent)) {
         std::error_code ec;
-        fs::create_directories(filePathObj.parent_path(), ec);
+        fs::create_directories(parent, ec);
         if (ec) {
-            std::cerr << "[Memory] Failed to create directory: " << filePathObj.parent_path()
+            std::cerr << "[Memory] Failed to create directory: " << parent
                       << " (" << ec.message() << ")\n";
             return;
         }
@@ -103,12 +112,6 @@ void Memory::save() const {
         return;
     }
     out << data.dump(4);
-    out.flush();
-    if (!out) {
-        std::cerr << "[Memory] Error occurred while writing to: " << filepath << "\n";
-    } else {
-        std::cerr << "[Memory] Saved memory to " << filepath << "\n";
-    }
 }
 
 
@@ -117,7 +120,7 @@ void Memory::addMessage(const std::string& role, const std::string& content) {
         {"role", role},
         {"content", content}
     });
-    save();
+   // save();
 }
 
 std::vector<json> Memory::getConversation() const {
@@ -140,7 +143,7 @@ void Memory::clear() {
 void Memory::setSummary(const std::string& summary) {
     // For now, set the short summary directly
     data["short_summary"] = summary;
-    save();
+    //save();
 }
 
 std::string Memory::getSummary(bool useExtended /* = false */) const {
