@@ -1,6 +1,6 @@
 CMakeFiles/basic_agent.dir/src/rag.cpp.o: \
  /home/steve/basic_agent/src/rag.cpp /usr/include/stdc-predef.h \
- /home/steve/basic_agent/include/rag.h /usr/include/c++/13/string \
+ /home/steve/basic_agent/src/../include/rag.h /usr/include/c++/13/string \
  /usr/include/c++/13/bits/requires_hosted.h \
  /usr/include/x86_64-linux-gnu/c++/13/bits/c++config.h \
  /usr/include/x86_64-linux-gnu/c++/13/bits/os_defines.h \
@@ -125,9 +125,9 @@ CMakeFiles/basic_agent.dir/src/rag.cpp.o: \
  /usr/include/c++/13/bits/stl_vector.h \
  /usr/include/c++/13/bits/stl_bvector.h \
  /usr/include/c++/13/bits/vector.tcc \
- /home/steve/basic_agent/include/../include/vector_store.h \
+ /home/steve/basic_agent/src/../include/../include/vector_store.h \
  /usr/include/c++/13/utility /usr/include/c++/13/bits/stl_relops.h \
- /home/steve/basic_agent/include/file_handler.h \
+ /home/steve/basic_agent/src/../include/file_handler.h \
  /usr/include/c++/13/iostream /usr/include/c++/13/ostream \
  /usr/include/c++/13/ios /usr/include/c++/13/exception \
  /usr/include/c++/13/bits/exception_ptr.h \
