@@ -177,6 +177,30 @@ src/command_processor.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/basic_agent.dir/build.make CMakeFiles/basic_agent.dir/src/command_processor.cpp.s
 .PHONY : src/command_processor.cpp.s
 
+src/file_handler.o: src/file_handler.cpp.o
+.PHONY : src/file_handler.o
+
+# target to build an object file
+src/file_handler.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/basic_agent.dir/build.make CMakeFiles/basic_agent.dir/src/file_handler.cpp.o
+.PHONY : src/file_handler.cpp.o
+
+src/file_handler.i: src/file_handler.cpp.i
+.PHONY : src/file_handler.i
+
+# target to preprocess a source file
+src/file_handler.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/basic_agent.dir/build.make CMakeFiles/basic_agent.dir/src/file_handler.cpp.i
+.PHONY : src/file_handler.cpp.i
+
+src/file_handler.s: src/file_handler.cpp.s
+.PHONY : src/file_handler.s
+
+# target to generate assembly for a file
+src/file_handler.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/basic_agent.dir/build.make CMakeFiles/basic_agent.dir/src/file_handler.cpp.s
+.PHONY : src/file_handler.cpp.s
+
 src/llm_interface.o: src/llm_interface.cpp.o
 .PHONY : src/llm_interface.o
 
@@ -297,6 +321,30 @@ src/tools.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/basic_agent.dir/build.make CMakeFiles/basic_agent.dir/src/tools.cpp.s
 .PHONY : src/tools.cpp.s
 
+src/vector_store.o: src/vector_store.cpp.o
+.PHONY : src/vector_store.o
+
+# target to build an object file
+src/vector_store.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/basic_agent.dir/build.make CMakeFiles/basic_agent.dir/src/vector_store.cpp.o
+.PHONY : src/vector_store.cpp.o
+
+src/vector_store.i: src/vector_store.cpp.i
+.PHONY : src/vector_store.i
+
+# target to preprocess a source file
+src/vector_store.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/basic_agent.dir/build.make CMakeFiles/basic_agent.dir/src/vector_store.cpp.i
+.PHONY : src/vector_store.cpp.i
+
+src/vector_store.s: src/vector_store.cpp.s
+.PHONY : src/vector_store.s
+
+# target to generate assembly for a file
+src/vector_store.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/basic_agent.dir/build.make CMakeFiles/basic_agent.dir/src/vector_store.cpp.s
+.PHONY : src/vector_store.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -312,6 +360,9 @@ help:
 	@echo "... src/command_processor.o"
 	@echo "... src/command_processor.i"
 	@echo "... src/command_processor.s"
+	@echo "... src/file_handler.o"
+	@echo "... src/file_handler.i"
+	@echo "... src/file_handler.s"
 	@echo "... src/llm_interface.o"
 	@echo "... src/llm_interface.i"
 	@echo "... src/llm_interface.s"
@@ -327,6 +378,9 @@ help:
 	@echo "... src/tools.o"
 	@echo "... src/tools.i"
 	@echo "... src/tools.s"
+	@echo "... src/vector_store.o"
+	@echo "... src/vector_store.i"
+	@echo "... src/vector_store.s"
 .PHONY : help
 
 

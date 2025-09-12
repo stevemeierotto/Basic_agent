@@ -278,4 +278,5 @@ CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o: \
  /usr/include/c++/13/bits/stl_numeric.h \
  /usr/include/c++/13/pstl/glue_numeric_defs.h /usr/include/c++/13/any \
  /home/steve/basic_agent/src/../include/rag.h \
+ /home/steve/basic_agent/src/../include/../include/vector_store.h \
  /usr/include/c++/13/iostream

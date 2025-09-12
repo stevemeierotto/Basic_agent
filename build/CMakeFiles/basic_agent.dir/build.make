@@ -97,10 +97,24 @@ CMakeFiles/basic_agent.dir/src/command_processor.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/basic_agent.dir/src/command_processor.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/steve/basic_agent/src/command_processor.cpp -o CMakeFiles/basic_agent.dir/src/command_processor.cpp.s
 
+CMakeFiles/basic_agent.dir/src/file_handler.cpp.o: CMakeFiles/basic_agent.dir/flags.make
+CMakeFiles/basic_agent.dir/src/file_handler.cpp.o: /home/steve/basic_agent/src/file_handler.cpp
+CMakeFiles/basic_agent.dir/src/file_handler.cpp.o: CMakeFiles/basic_agent.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/basic_agent.dir/src/file_handler.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/basic_agent.dir/src/file_handler.cpp.o -MF CMakeFiles/basic_agent.dir/src/file_handler.cpp.o.d -o CMakeFiles/basic_agent.dir/src/file_handler.cpp.o -c /home/steve/basic_agent/src/file_handler.cpp
+
+CMakeFiles/basic_agent.dir/src/file_handler.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/basic_agent.dir/src/file_handler.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/steve/basic_agent/src/file_handler.cpp > CMakeFiles/basic_agent.dir/src/file_handler.cpp.i
+
+CMakeFiles/basic_agent.dir/src/file_handler.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/basic_agent.dir/src/file_handler.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/steve/basic_agent/src/file_handler.cpp -o CMakeFiles/basic_agent.dir/src/file_handler.cpp.s
+
 CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o: CMakeFiles/basic_agent.dir/flags.make
 CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o: /home/steve/basic_agent/src/llm_interface.cpp
 CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o: CMakeFiles/basic_agent.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o -MF CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o.d -o CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o -c /home/steve/basic_agent/src/llm_interface.cpp
 
 CMakeFiles/basic_agent.dir/src/llm_interface.cpp.i: cmake_force
@@ -114,7 +128,7 @@ CMakeFiles/basic_agent.dir/src/llm_interface.cpp.s: cmake_force
 CMakeFiles/basic_agent.dir/src/memory.cpp.o: CMakeFiles/basic_agent.dir/flags.make
 CMakeFiles/basic_agent.dir/src/memory.cpp.o: /home/steve/basic_agent/src/memory.cpp
 CMakeFiles/basic_agent.dir/src/memory.cpp.o: CMakeFiles/basic_agent.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/basic_agent.dir/src/memory.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/basic_agent.dir/src/memory.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/basic_agent.dir/src/memory.cpp.o -MF CMakeFiles/basic_agent.dir/src/memory.cpp.o.d -o CMakeFiles/basic_agent.dir/src/memory.cpp.o -c /home/steve/basic_agent/src/memory.cpp
 
 CMakeFiles/basic_agent.dir/src/memory.cpp.i: cmake_force
@@ -128,7 +142,7 @@ CMakeFiles/basic_agent.dir/src/memory.cpp.s: cmake_force
 CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o: CMakeFiles/basic_agent.dir/flags.make
 CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o: /home/steve/basic_agent/src/prompt_factory.cpp
 CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o: CMakeFiles/basic_agent.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o -MF CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o.d -o CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o -c /home/steve/basic_agent/src/prompt_factory.cpp
 
 CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.i: cmake_force
@@ -142,7 +156,7 @@ CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.s: cmake_force
 CMakeFiles/basic_agent.dir/src/rag.cpp.o: CMakeFiles/basic_agent.dir/flags.make
 CMakeFiles/basic_agent.dir/src/rag.cpp.o: /home/steve/basic_agent/src/rag.cpp
 CMakeFiles/basic_agent.dir/src/rag.cpp.o: CMakeFiles/basic_agent.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/basic_agent.dir/src/rag.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/basic_agent.dir/src/rag.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/basic_agent.dir/src/rag.cpp.o -MF CMakeFiles/basic_agent.dir/src/rag.cpp.o.d -o CMakeFiles/basic_agent.dir/src/rag.cpp.o -c /home/steve/basic_agent/src/rag.cpp
 
 CMakeFiles/basic_agent.dir/src/rag.cpp.i: cmake_force
@@ -156,7 +170,7 @@ CMakeFiles/basic_agent.dir/src/rag.cpp.s: cmake_force
 CMakeFiles/basic_agent.dir/src/tools.cpp.o: CMakeFiles/basic_agent.dir/flags.make
 CMakeFiles/basic_agent.dir/src/tools.cpp.o: /home/steve/basic_agent/src/tools.cpp
 CMakeFiles/basic_agent.dir/src/tools.cpp.o: CMakeFiles/basic_agent.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/basic_agent.dir/src/tools.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/basic_agent.dir/src/tools.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/basic_agent.dir/src/tools.cpp.o -MF CMakeFiles/basic_agent.dir/src/tools.cpp.o.d -o CMakeFiles/basic_agent.dir/src/tools.cpp.o -c /home/steve/basic_agent/src/tools.cpp
 
 CMakeFiles/basic_agent.dir/src/tools.cpp.i: cmake_force
@@ -167,30 +181,48 @@ CMakeFiles/basic_agent.dir/src/tools.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/basic_agent.dir/src/tools.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/steve/basic_agent/src/tools.cpp -o CMakeFiles/basic_agent.dir/src/tools.cpp.s
 
+CMakeFiles/basic_agent.dir/src/vector_store.cpp.o: CMakeFiles/basic_agent.dir/flags.make
+CMakeFiles/basic_agent.dir/src/vector_store.cpp.o: /home/steve/basic_agent/src/vector_store.cpp
+CMakeFiles/basic_agent.dir/src/vector_store.cpp.o: CMakeFiles/basic_agent.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/basic_agent.dir/src/vector_store.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/basic_agent.dir/src/vector_store.cpp.o -MF CMakeFiles/basic_agent.dir/src/vector_store.cpp.o.d -o CMakeFiles/basic_agent.dir/src/vector_store.cpp.o -c /home/steve/basic_agent/src/vector_store.cpp
+
+CMakeFiles/basic_agent.dir/src/vector_store.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/basic_agent.dir/src/vector_store.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/steve/basic_agent/src/vector_store.cpp > CMakeFiles/basic_agent.dir/src/vector_store.cpp.i
+
+CMakeFiles/basic_agent.dir/src/vector_store.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/basic_agent.dir/src/vector_store.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/steve/basic_agent/src/vector_store.cpp -o CMakeFiles/basic_agent.dir/src/vector_store.cpp.s
+
 # Object files for target basic_agent
 basic_agent_OBJECTS = \
 "CMakeFiles/basic_agent.dir/main.cpp.o" \
 "CMakeFiles/basic_agent.dir/src/command_processor.cpp.o" \
+"CMakeFiles/basic_agent.dir/src/file_handler.cpp.o" \
 "CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o" \
 "CMakeFiles/basic_agent.dir/src/memory.cpp.o" \
 "CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o" \
 "CMakeFiles/basic_agent.dir/src/rag.cpp.o" \
-"CMakeFiles/basic_agent.dir/src/tools.cpp.o"
+"CMakeFiles/basic_agent.dir/src/tools.cpp.o" \
+"CMakeFiles/basic_agent.dir/src/vector_store.cpp.o"
 
 # External object files for target basic_agent
 basic_agent_EXTERNAL_OBJECTS =
 
 basic_agent: CMakeFiles/basic_agent.dir/main.cpp.o
 basic_agent: CMakeFiles/basic_agent.dir/src/command_processor.cpp.o
+basic_agent: CMakeFiles/basic_agent.dir/src/file_handler.cpp.o
 basic_agent: CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o
 basic_agent: CMakeFiles/basic_agent.dir/src/memory.cpp.o
 basic_agent: CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o
 basic_agent: CMakeFiles/basic_agent.dir/src/rag.cpp.o
 basic_agent: CMakeFiles/basic_agent.dir/src/tools.cpp.o
+basic_agent: CMakeFiles/basic_agent.dir/src/vector_store.cpp.o
 basic_agent: CMakeFiles/basic_agent.dir/build.make
 basic_agent: /usr/lib/x86_64-linux-gnu/libcurl.so
 basic_agent: CMakeFiles/basic_agent.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Linking CXX executable basic_agent"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/steve/basic_agent/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Linking CXX executable basic_agent"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/basic_agent.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

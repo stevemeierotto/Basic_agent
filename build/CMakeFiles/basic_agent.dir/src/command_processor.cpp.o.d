@@ -278,6 +278,7 @@ CMakeFiles/basic_agent.dir/src/command_processor.cpp.o: \
  /usr/include/c++/13/bits/stl_numeric.h \
  /usr/include/c++/13/pstl/glue_numeric_defs.h /usr/include/c++/13/any \
  /home/steve/basic_agent/src/../include/rag.h \
+ /home/steve/basic_agent/src/../include/../include/vector_store.h \
  /home/steve/basic_agent/src/../include/prompt_factory.h \
  /home/steve/basic_agent/src/../include/llm_interface.h \
  /usr/include/x86_64-linux-gnu/curl/curl.h \

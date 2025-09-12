@@ -10,11 +10,13 @@ set(CMAKE_DEPENDS_LANGUAGES
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/steve/basic_agent/main.cpp" "CMakeFiles/basic_agent.dir/main.cpp.o" "gcc" "CMakeFiles/basic_agent.dir/main.cpp.o.d"
   "/home/steve/basic_agent/src/command_processor.cpp" "CMakeFiles/basic_agent.dir/src/command_processor.cpp.o" "gcc" "CMakeFiles/basic_agent.dir/src/command_processor.cpp.o.d"
+  "/home/steve/basic_agent/src/file_handler.cpp" "CMakeFiles/basic_agent.dir/src/file_handler.cpp.o" "gcc" "CMakeFiles/basic_agent.dir/src/file_handler.cpp.o.d"
   "/home/steve/basic_agent/src/llm_interface.cpp" "CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o" "gcc" "CMakeFiles/basic_agent.dir/src/llm_interface.cpp.o.d"
   "/home/steve/basic_agent/src/memory.cpp" "CMakeFiles/basic_agent.dir/src/memory.cpp.o" "gcc" "CMakeFiles/basic_agent.dir/src/memory.cpp.o.d"
   "/home/steve/basic_agent/src/prompt_factory.cpp" "CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o" "gcc" "CMakeFiles/basic_agent.dir/src/prompt_factory.cpp.o.d"
   "/home/steve/basic_agent/src/rag.cpp" "CMakeFiles/basic_agent.dir/src/rag.cpp.o" "gcc" "CMakeFiles/basic_agent.dir/src/rag.cpp.o.d"
   "/home/steve/basic_agent/src/tools.cpp" "CMakeFiles/basic_agent.dir/src/tools.cpp.o" "gcc" "CMakeFiles/basic_agent.dir/src/tools.cpp.o.d"
+  "/home/steve/basic_agent/src/vector_store.cpp" "CMakeFiles/basic_agent.dir/src/vector_store.cpp.o" "gcc" "CMakeFiles/basic_agent.dir/src/vector_store.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.
