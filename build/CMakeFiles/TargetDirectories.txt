@@ -1,3 +1,0 @@
-/home/steve/basic_agent/build/CMakeFiles/basic_agent.dir
-/home/steve/basic_agent/build/CMakeFiles/edit_cache.dir
-/home/steve/basic_agent/build/CMakeFiles/rebuild_cache.dir
