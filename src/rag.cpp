@@ -1,4 +1,5 @@
-#include "rag.h"
+#include "../include/rag.h"
+#include "../include/file_handler.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -8,76 +9,35 @@
 
 namespace fs = std::filesystem;
 
-// --- Helper: split file into chunks (function + optional line-based fallback) ---
-static std::vector<CodeChunk> parseChunks(const std::string& filePath, const std::string& content) {
-    std::vector<CodeChunk> chunks;
-    std::istringstream stream(content);
-    std::string line;
-    CodeChunk current;
-    int lineNum = 0;
-    bool inFunc = false;
-    int braceCount = 0;
-    std::regex funcRegex(R"(\s*[\w:<>\*&]+\s+(\w+)\s*\(.*\)\s*\{)");
 
-    current.startLine = 1;
-    current.fileName = filePath;
-    current.symbolName = "";
-    current.code = "";
+// Helper: return true if 'path' is inside 'directory'.
+// Both paths are converted to absolute + normalized before comparison.
+static bool pathIsUnderDirectory(const std::string& pathStr, const std::string& dirStr) {
+    try {
+        fs::path p = fs::absolute(pathStr).lexically_normal();
+        fs::path d = fs::absolute(dirStr).lexically_normal();
 
-    while (std::getline(stream, line)) {
-        lineNum++;
+        std::string pS = p.string();
+        std::string dS = d.string();
 
-        if (!inFunc) {
-            std::smatch match;
-            if (std::regex_search(line, match, funcRegex)) {
-                if (!current.code.empty()) {
-                    current.endLine = lineNum - 1;
-                    chunks.push_back(current);
-                }
-                current = {};
-                current.fileName = filePath;
-                current.startLine = lineNum;
-                current.symbolName = match[1];
-                current.code = line + "\n";
-                inFunc = true;
-                braceCount = std::count(line.begin(), line.end(), '{') -
-                             std::count(line.begin(), line.end(), '}');
-            } else {
-                // fallback: single-line chunk for global code
-                CodeChunk singleLineChunk;
-                singleLineChunk.fileName = filePath;
-                singleLineChunk.startLine = lineNum;
-                singleLineChunk.endLine = lineNum;
-                singleLineChunk.symbolName = "";
-                singleLineChunk.code = line + "\n";
-                chunks.push_back(singleLineChunk);
-            }
-        } else {
-            current.code += line + "\n";
-            braceCount += std::count(line.begin(), line.end(), '{');
-            braceCount -= std::count(line.begin(), line.end(), '}');
-
-            if (braceCount == 0) {
-                current.endLine = lineNum;
-                chunks.push_back(current);
-                current = {};
-                current.fileName = filePath;
-                current.startLine = lineNum + 1;
-                inFunc = false;
-            }
+        // ensure trailing separator on directory string so prefix-check is correct
+        if (!dS.empty() && dS.back() != fs::path::preferred_separator) {
+            dS.push_back(fs::path::preferred_separator);
         }
-    }
 
-    if (!current.code.empty()) {
-        current.endLine = lineNum;
-        chunks.push_back(current);
-    }
+        // also add separator to file path when comparing (safer)
+        if (!pS.empty() && pS.back() != fs::path::preferred_separator) {
+            // no-op, don't append separator to file paths
+        }
 
-    return chunks;
+        return pS.rfind(dS, 0) == 0; // starts with
+    } catch (...) {
+        return false;
+    }
 }
 
-// --- Case-insensitive find ---
-bool ci_find(const std::string &data, const std::string &toSearch) {
+// --- Case-insensitive search ---
+static bool ci_find(const std::string &data, const std::string &toSearch) {
     auto it = std::search(
         data.begin(), data.end(),
         toSearch.begin(), toSearch.end(),
@@ -86,148 +46,258 @@ bool ci_find(const std::string &data, const std::string &toSearch) {
     return it != data.end();
 }
 
-// --- API Implementations ---
-void RAGPipeline::init(const std::string& path) {
-    indexFilePath = path;
+// --- RAGPipeline API ---
+
+// Init pipeline (load index if exists)
+
+void RAGPipeline::init() {
+    FileHandler fh;
+    // default index file inside agent_workspace/rag
+    indexFilePath = fh.getRagPath("rag_index.bin");
     loadIndex(indexFilePath);
-}
 
-void RAGPipeline::indexFile(const std::string& filePath) {
-    std::ifstream file(filePath);
-    if (!file.is_open()) {
-        std::cerr << "[RAG] Failed to open file: " << filePath << std::endl;
-        return;
-    }
+    // After loading, prune any chunks that are NOT under the rag directory
+    std::string ragDir = fh.getRagDirectory();
 
-    if (filePath.find("/build/") != std::string::npos ||
-        filePath.find("json.hpp") != std::string::npos) {
-        return;
-    }
-
-    // Remove old chunks for this file
     chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
-        [&](const CodeChunk& c) { return c.fileName == filePath; }),
-        chunks.end());
+        [&](const CodeChunk& c){
+            // keep only chunks within ragDir
+            return !pathIsUnderDirectory(c.fileName, ragDir);
+        }), chunks.end());
 
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    auto newChunks = parseChunks(filePath, buffer.str());
-    chunks.insert(chunks.end(), newChunks.begin(), newChunks.end());
+    // Rebuild vector store from the remaining chunks (clear then add)
+    store.clear();
+    for (const auto &c : chunks) {
+        store.addDocument(c.code);
+    }
+
+    std::cout << "[RAG] init completed; indexFilePath=" << indexFilePath << ", entries=" << chunks.size() << "\n";
 }
 
-// --- Line-focused retrieval ---
-std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query, 
-                                                     const std::vector<int>& errorLines,
-                                                     int topK) {
-    // Tokenize query
-    std::vector<std::string> qtokens;
-    std::istringstream qstream(query);
-    std::string tok;
-    while (qstream >> tok) {
-        if (tok.size() >= 2) qtokens.push_back(tok);
+void RAGPipeline::init(const std::string& indexPath) {
+    // Respect provided indexPath override but still ensure ragDir pruning
+    FileHandler fh;
+    indexFilePath = indexPath.empty() ? fh.getRagPath("rag_index.bin") : indexPath;
+    loadIndex(indexFilePath);
+
+    std::string ragDir = fh.getRagDirectory();
+    chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
+        [&](const CodeChunk& c){
+            return !pathIsUnderDirectory(c.fileName, ragDir);
+        }), chunks.end());
+
+    store.clear();
+    for (const auto &c : chunks) {
+        store.addDocument(c.code);
     }
 
-    std::vector<CodeChunk> results;
-    if (qtokens.empty() || chunks.empty() || topK == 0) return results;
-    if (topK < 0) topK = static_cast<int>(chunks.size());
-
-    struct ScoredIdx { size_t idx; int score; };
-    std::vector<ScoredIdx> scored;
-    scored.reserve(chunks.size());
-
-    for (size_t i = 0; i < chunks.size(); ++i) {
-        const auto& c = chunks[i];
-
-        // skip chunks that don't overlap error lines
-        bool overlap = false;
-        for (int el : errorLines) {
-            if (el >= c.startLine && el <= c.endLine) { overlap = true; break; }
-        }
-        if (!overlap) continue;
-
-        int score = 0;
-        for (const auto& tok : qtokens) {
-            if (ci_find(c.code, tok)) score += 1;
-            if (!c.symbolName.empty() && ci_find(c.symbolName, tok)) score += 5;
-            if (!c.fileName.empty() && ci_find(c.fileName, tok)) score += 1;
-        }
-
-        if (score > 0) scored.push_back({i, score});
-    }
-
-    std::sort(scored.begin(), scored.end(),
-              [](const ScoredIdx& a, const ScoredIdx& b) { return a.score > b.score; });
-
-    results.reserve(std::min<int>(topK, static_cast<int>(scored.size())));
-    for (int k = 0; k < topK && k < static_cast<int>(scored.size()); ++k) {
-        results.push_back(chunks[scored[k].idx]);
-    }
-
-    std::cout << "[RAG] retrieveRelevant for query: \"" << query
-              << "\" returned " << results.size() << " chunk(s)."
-              << " (searched " << chunks.size() << " chunks)" << std::endl;
-
-    return results;
+    std::cout << "[RAG] init(path) completed; indexFilePath=" << indexFilePath << ", entries=" << chunks.size() << "\n";
 }
 
-// --- The rest of your RAG API (save/load, clear, indexProject) stays unchanged ---
-void RAGPipeline::saveIndex() { saveIndex(indexFilePath); }
-
-void RAGPipeline::saveIndex(const std::string& dbPath) {
-    std::ofstream out(dbPath, std::ios::binary | std::ios::trunc);
-    if (!out) { std::cerr << "[RAG] Failed to open " << dbPath << " for writing.\n"; return; }
-    size_t n = chunks.size();
-    out.write(reinterpret_cast<const char*>(&n), sizeof(n));
-    for (const auto& c : chunks) {
-        size_t len;
-        len = c.fileName.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(c.fileName.data(), len);
-        len = c.symbolName.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(c.symbolName.data(), len);
-        out.write(reinterpret_cast<const char*>(&c.startLine), sizeof(c.startLine));
-        out.write(reinterpret_cast<const char*>(&c.endLine), sizeof(c.endLine));
-        len = c.code.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(c.code.data(), len);
-    }
-}
-
-void RAGPipeline::loadIndex() { loadIndex(indexFilePath); }
-
-void RAGPipeline::loadIndex(const std::string& dbPath) {
-    std::ifstream in(dbPath, std::ios::binary);
-    if (!in) { std::cerr << "[RAG] No index found at " << dbPath << " (starting fresh).\n"; return; }
-    size_t n; in.read(reinterpret_cast<char*>(&n), sizeof(n));
-    chunks.clear(); chunks.reserve(n);
-    for (size_t i = 0; i < n; i++) {
-        CodeChunk c; size_t len;
-        in.read(reinterpret_cast<char*>(&len), sizeof(len)); c.fileName.resize(len);
-        in.read(&c.fileName[0], len);
-        in.read(reinterpret_cast<char*>(&len), sizeof(len)); c.symbolName.resize(len);
-        in.read(&c.symbolName[0], len);
-        in.read(reinterpret_cast<char*>(&c.startLine), sizeof(c.startLine));
-        in.read(reinterpret_cast<char*>(&c.endLine), sizeof(c.endLine));
-        in.read(reinterpret_cast<char*>(&len), sizeof(len)); c.code.resize(len);
-        in.read(&c.code[0], len);
-        chunks.push_back(std::move(c));
-    }
-}
-
-void RAGPipeline::clear() { chunks.clear(); std::cout << "[RAG] Cleared in-memory index" << std::endl; }
 
 void RAGPipeline::indexProject(const std::string& rootPath) {
     int count = 0;
+
+    // Remove old chunks from this path
     chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
-        [&](const CodeChunk& c) { return c.fileName.rfind(rootPath, 0) == 0; }),
+        [&](const CodeChunk& c){ return c.fileName.rfind(rootPath, 0) == 0; }),
         chunks.end());
 
-    for (auto& p : fs::recursive_directory_iterator(rootPath)) {
-        if (p.is_regular_file()) {
-            auto ext = p.path().extension().string();
-            if (ext == ".cpp" || ext == ".h" || ext == ".hpp" || ext == ".cxx") {
-                indexFile(p.path().string()); count++;
+    for (auto& entry : fs::recursive_directory_iterator(rootPath)) {
+        if (entry.is_regular_file()) {
+            auto ext = entry.path().extension().string();
+            if (ext == ".txt" || ext == ".md" || ext == ".epub" || ext == ".pdf") {
+                indexFile(entry.path().string());
+                count++;
             }
         }
     }
-    std::cout << "[RAG] Indexed project at " << rootPath << " (" << count << " files)" << std::endl;
+
+    std::cout << "[RAG] Indexed folder: " << fs::absolute(rootPath) 
+              << " (" << count << " files)\n";
 }
+
+// --- Query using VectorStore ---
+std::string RAGPipeline::query(const std::string& query) {
+    // Retrieve top 5 text chunks from vector store
+    auto results = store.retrieve(query, 5);
+
+    if (results.empty()) {
+        return "[No relevant context found]";
+    }
+
+    // Format retrieved chunks
+    std::ostringstream oss;
+    oss << "Top relevant context chunks:\n";
+    for (size_t i = 0; i < results.size(); ++i) {
+        const auto& [text, score] = results[i];
+        oss << "Chunk " << (i + 1) << " (score: " << score << "):\n";
+        oss << text.substr(0, 500) << "...\n"; // show first 500 chars
+        oss << "---\n";
+    }
+    return oss.str();
+}
+
+// --- Index a single file (store code chunks in VectorStore) ---
+// ----------------- indexFile -----------------
+void RAGPipeline::indexFile(const std::string& filePath) {
+    // Read the file contents; store absolute path
+    std::ifstream in(filePath, std::ios::binary);
+    if (!in) {
+        std::cerr << "[RAG] Failed to open file for indexing: " << filePath << "\n";
+        return;
+    }
+
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    std::string content = ss.str();
+
+    CodeChunk chunk;
+    chunk.fileName = fs::absolute(filePath).lexically_normal().string();
+    chunk.symbolName = "";
+    chunk.startLine = 1;
+    chunk.endLine = 0;
+    chunk.code = content;
+    // embedding left empty until you have a real embedder
+    chunk.embedding.clear();
+
+    // Add to in-memory list and to vector store immediately
+    chunks.push_back(chunk);
+    store.addDocument(chunk.code);
+}
+// --- Retrieve top-k relevant CodeChunks ---
+std::vector<CodeChunk> RAGPipeline::retrieveRelevant(
+    const std::string& query,
+    const std::vector<int>& errorLines,
+    int topK)
+{
+    std::vector<CodeChunk> matches;
+
+    // Retrieve top-k texts from VectorStore
+    auto results = store.retrieve(query, topK);
+
+    // Map each retrieved text back to its CodeChunk
+    for (auto& [text, score] : results) {
+        auto it = std::find_if(chunks.begin(), chunks.end(),
+            [&text](const CodeChunk& c) { return c.code == text; });
+        if (it != chunks.end()) {
+            matches.push_back(*it);
+        }
+    }
+
+    return matches;
+}
+
+// --- Save / Load ---
+
+
+void RAGPipeline::saveIndex() const {
+    FileHandler fh;
+    std::string path = fh.getRagPath("rag_index.bin");
+    saveIndex(path);
+}
+
+void RAGPipeline::saveIndex(const std::string& dbPath) const {
+    // Ensure parent folder exists
+    std::filesystem::create_directories(std::filesystem::path(dbPath).parent_path());
+
+    std::ofstream out(dbPath, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        std::cerr << "[basic_agent:RAG] Failed to open " << dbPath << " for writing.\n";
+        return;
+    }
+
+    size_t n = chunks.size();
+    out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+
+    for (const auto& c : chunks) {
+        size_t len;
+
+        len = c.fileName.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        out.write(c.fileName.data(), len);
+
+        len = c.symbolName.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        out.write(c.symbolName.data(), len);
+
+        out.write(reinterpret_cast<const char*>(&c.startLine), sizeof(c.startLine));
+        out.write(reinterpret_cast<const char*>(&c.endLine), sizeof(c.endLine));
+
+        len = c.code.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        out.write(c.code.data(), len);
+
+        // persist embeddings
+        size_t embSize = c.embedding.size();
+        out.write(reinterpret_cast<const char*>(&embSize), sizeof(embSize));
+        if (embSize > 0) {
+            out.write(reinterpret_cast<const char*>(c.embedding.data()), embSize * sizeof(float));
+        }
+    }
+
+    std::cout << "[basic_agent:RAG] Index saved to: " << dbPath << "\n";
+}
+
+void RAGPipeline::loadIndex() {
+    FileHandler fh;
+    std::string path = fh.getRagPath("rag_index.bin");
+    loadIndex(path);
+}
+
+
+// ----------------- loadIndex (reworked) -----------------
+void RAGPipeline::loadIndex(const std::string& dbPath) {
+    std::ifstream in(dbPath, std::ios::binary);
+    if (!in) {
+        std::cerr << "[basic_agent:RAG] No index found at " << dbPath << " (starting fresh).\n";
+        return;
+    }
+
+    size_t n;
+    in.read(reinterpret_cast<char*>(&n), sizeof(n));
+    chunks.clear(); chunks.reserve(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        CodeChunk c; size_t len;
+
+        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        c.fileName.resize(len);
+        in.read(&c.fileName[0], len);
+
+        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        c.symbolName.resize(len);
+        in.read(&c.symbolName[0], len);
+
+        in.read(reinterpret_cast<char*>(&c.startLine), sizeof(c.startLine));
+        in.read(reinterpret_cast<char*>(&c.endLine), sizeof(c.endLine));
+
+        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        c.code.resize(len);
+        in.read(&c.code[0], len);
+
+        size_t embSize;
+        in.read(reinterpret_cast<char*>(&embSize), sizeof(embSize));
+        c.embedding.resize(embSize);
+        if (embSize > 0) {
+            in.read(reinterpret_cast<char*>(c.embedding.data()), embSize * sizeof(float));
+        }
+
+        // normalize stored file path to absolute to make comparisons reliable
+        try {
+            c.fileName = fs::absolute(c.fileName).lexically_normal().string();
+        } catch (...) {
+            // if something goes wrong, keep original string
+        }
+
+        chunks.push_back(std::move(c));
+        // NOTE: we do NOT add to store here; we'll rebuild store after possible pruning
+    }
+
+    std::cout << "[basic_agent:RAG] Index loaded from: " << dbPath << " (raw entries=" << n << ")\n";
+}
+// --- Clear ---
+void RAGPipeline::clear() { 
+    chunks.clear(); 
+    std::cout << "[basic_agent:RAG] Cleared in-memory index" << std::endl; 
+}
+
+
 

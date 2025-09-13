@@ -7,16 +7,16 @@
  * Licensed under the MIT License
  * See LICENSE file in the project root for full license text
  */
-
 #pragma once
 #include <string>
+#include <vector>
 
-namespace Tools {
+class Tools {
+public:
+    virtual ~Tools() = default;
 
-    // Replace all occurrences of oldName with newName in file.
-    bool replaceName(const std::string& filePath,
-                     const std::string& oldName,
-                     const std::string& newName);
+    // Example virtual interface for all tools
+    virtual std::string summarizeText(const std::string& text, int numSentences = 3) = 0;
 
-}
-
+    // You can add generic methods, or keep them pure virtual for specialization
+};

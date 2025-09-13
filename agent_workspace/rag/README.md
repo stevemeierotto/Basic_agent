@@ -42,7 +42,8 @@ cmake --build .
 Usage
 
 After building, run the agent from the build/ directory.
-It will load memory from memory.json and respond to commands through your chosen interface.
+It will load memoag.indexProject("../");  // or agent_workspace/ or src/
+rag.saveIndex();ry from memory.json and respond to commands through your chosen interface.
 
 Example:
 

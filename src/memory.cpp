@@ -1,4 +1,5 @@
 #include "../include/memory.h"
+#include "../include/file_handler.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -11,7 +12,8 @@ Memory::Memory(const std::string& path) {
     if (!path.empty()) {
         filepath = path;
     } else {
-        filepath = getDefaultPath();
+        FileHandler fh;
+        filepath = fh.getMemoryPath();
     }
 
     // Only create parent directories if parent_path() is not empty
@@ -27,29 +29,22 @@ Memory::Memory(const std::string& path) {
 
     load();
 }
-
-
-
+/*
 std::string Memory::getDefaultPath() const {
     namespace fs = std::filesystem;
-#ifdef _WIN32
-    char appdata[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata))) {
-        fs::path base(appdata);
-        return (base / "CodeAgentPlugin" / "memory.json").string();
-    }
-    return "memory.json"; // fallback
-#else
-    const char* home = getenv("HOME");
-    fs::path base = home ? fs::path(home) : fs::current_path();
-    fs::path dir = base / "code_agent_plugin";
-    if (!fs::exists(dir)) {
-        fs::create_directories(dir);
-    }
-    return (dir / "memory.json").string();
-#endif
-}
 
+    // Get full path of the binary
+    fs::path exePath = fs::canonical("/proc/self/exe");
+    // Go up one level (from build/ to project root)
+    fs::path projectRoot = exePath.parent_path().parent_path();
+    // Always point into agent_workspace
+    fs::path memoryPath = projectRoot / "agent_workspace" / "memory.json";
+
+    std::cerr << "[Memory] Default path resolved to: " << memoryPath << "\n";
+
+    return memoryPath.string();
+}
+*/
 
 void Memory::load() {
     std::ifstream in(filepath);

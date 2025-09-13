@@ -14,6 +14,7 @@
 #include "rag.h"
 #include "prompt_factory.h"
 #include "llm_interface.h"
+#include "webscraperTools.h"
 
 class CommandProcessor {
 public:
@@ -32,7 +33,8 @@ private:
     Memory& memory;
     RAGPipeline& rag;
     LLMInterface& llm;
-    PromptFactory promptFactory;
+    PromptFactory promptFactory;   
+    WebScraperTools scraper;
 
     // helpers
     static std::string trim(const std::string& s);

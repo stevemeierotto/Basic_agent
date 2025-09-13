@@ -1,0 +1,278 @@
+#include "../include/webscraperTools.h"
+#include <curl/curl.h>
+#include <../include/json.hpp>
+#include <fstream>
+#include <iostream>
+#include <regex>
+#include <sstream>
+#include <cstdlib>
+
+using json = nlohmann::json;
+
+// Callback for libcurl
+static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    ((std::string*)userp)->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
+
+// --- CURL helper ---
+std::string WebScraperTools::performCurlRequest(const std::string& url, const std::string& userAgent) {
+    CURL* curl = curl_easy_init();
+    if (!curl) return "CURL initialization failed";
+
+    std::string readBuffer;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent.c_str());
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        return "Error fetching URL: " + std::string(curl_easy_strerror(res));
+    }
+
+    return readBuffer;
+}
+
+// --- Constructors ---
+WebScraperTools::WebScraperTools() {
+    const char* key = std::getenv("GOOGLE_API_KEY");
+    const char* cse = std::getenv("GOOGLE_CSE_ID");
+    if (!key || !cse) throw std::runtime_error("GOOGLE_API_KEY or GOOGLE_CSE_ID not set");
+    apiKey = key;
+    cseId = cse;
+}
+
+WebScraperTools::WebScraperTools(const std::string& apiKey_, const std::string& cseId_)
+    : apiKey(apiKey_), cseId(cseId_) {
+    if (this->apiKey.empty() || this->cseId.empty()) {
+        const char* key = std::getenv("GOOGLE_API_KEY");
+        const char* cse = std::getenv("GOOGLE_CSE_ID");
+        if (!key || !cse) throw std::runtime_error("GOOGLE_API_KEY or GOOGLE_CSE_ID not set");
+        this->apiKey = key;
+        this->cseId = cse;
+    }
+}
+
+// summarizeText already implemented
+std::string WebScraperTools::summarizeText(const std::string& text, int numSentences) {
+    std::regex sentenceRegex(R"(([^.!?]+[.!?]))"); 
+    auto words_begin = std::sregex_iterator(text.begin(), text.end(), sentenceRegex);
+    auto words_end = std::sregex_iterator();
+
+    std::string summary;
+    int count = 0;
+    for (auto i = words_begin; i != words_end && count < numSentences; ++i, ++count) {
+        summary += i->str() + " ";
+    }
+
+    if (summary.empty()) {
+        summary = text.substr(0, std::min<size_t>(200, text.size()));
+        summary += "...";
+    }
+
+    return summary;
+}
+
+// writeSummary already implemented
+bool WebScraperTools::writeSummary(const std::string& summary, const std::string& filename) {
+    std::ofstream outfile(filename);
+    if (!outfile) return false;
+    outfile << summary;
+    outfile.close();
+    return true;
+}
+
+std::string WebScraperTools::searchAndSummarize(const std::string& query, int numResults, int numSentences) {
+    // Step 1: Perform a web search (Google CSE or other method)
+    auto urls = webSearch(query, numResults);
+
+    // Step 2: Iterate through results and extract page text
+    std::string combinedSummary;
+    for (const auto& url : urls) {
+        std::string pageText = fetchAndExtract(url);
+
+        // Skip empty, blocked, or error pages
+        if (pageText.empty() || 
+            pageText.find("[Blocked") != std::string::npos || 
+            pageText.find("Error fetching URL") != std::string::npos) {
+            continue;
+        }
+
+        // Summarize extracted text
+        std::string pageSummary = summarizeText(pageText, numSentences);
+
+        // Collapse excessive whitespace in the summary
+        pageSummary = std::regex_replace(pageSummary, std::regex("\\s+"), " ");
+
+        // Add to combined output
+        combinedSummary += "From " + url + ":\n" + pageSummary + "\n\n";
+    }
+
+    // Step 3: Fallback if nothing could be summarized
+    if (combinedSummary.empty()) {
+        combinedSummary = "No results could be summarized for query: " + query;
+    }
+
+    return combinedSummary;
+}
+
+
+
+// --- Handle Scrape ---
+std::string WebScraperTools::handleScrape(const std::string& query, int results, int snippets) {
+    try {
+        std::cout << "Searching and summarizing: " << query << "...\n";
+        return searchAndSummarize(query, results, snippets);
+    } catch (const std::exception& e) {
+        return std::string("Error during scraping: ") + e.what();
+    }
+}
+
+// --- Fetch and Extract ---
+std::string WebScraperTools::fetchAndExtract(const std::string& url) {
+    std::string readBuffer = performCurlRequest(url, 
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36");
+
+    // Check for blocked page
+    std::string lowerContent = readBuffer;
+    std::transform(lowerContent.begin(), lowerContent.end(), lowerContent.begin(), ::tolower);
+    if (lowerContent.find("blocked") != std::string::npos ||
+        lowerContent.find("access denied") != std::string::npos ||
+        readBuffer.empty()) {
+        return "[Blocked or inaccessible page: " + url + "]";
+    }
+
+    // Strip HTML tags
+    std::string text = std::regex_replace(readBuffer, std::regex("<[^>]*>"), " ");
+    text = std::regex_replace(text, std::regex("\\s+"), " "); // collapse spaces
+
+    return text;
+}
+
+// --- Web Search ---
+std::vector<std::string> WebScraperTools::webSearch(const std::string& query, int maxResults) {
+    std::vector<std::string> urls;
+    std::ostringstream urlStream;
+    CURL* curl = curl_easy_init();
+    char* esc = curl_easy_escape(curl, query.c_str(), query.length());
+    urlStream << "https://www.googleapis.com/customsearch/v1?"
+              << "key=" << apiKey
+              << "&cx=" << cseId
+              << "&q=" << (esc ? esc : "")
+              << "&num=" << maxResults;
+    if (esc) curl_free(esc);
+    std::string readBuffer = performCurlRequest(urlStream.str(), "basic_agent/1.0");
+
+    try {
+        auto j = json::parse(readBuffer);
+        if (j.contains("items")) {
+            for (auto& item : j["items"]) {
+                if (item.contains("link")) {
+                    urls.push_back(item["link"]);
+                    if (urls.size() >= static_cast<size_t>(maxResults)) break;
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error parsing Google Search API response: " << e.what() << "\n";
+    }
+
+    return urls;
+}
+
+// --- Reddit API ---
+std::string WebScraperTools::fetchRedditPosts(const std::string& query, int limit) {
+    // Encode query for URL
+    CURL* curl = curl_easy_init();
+    if (!curl) return "CURL initialization failed";
+
+    char* escQuery = curl_easy_escape(curl, query.c_str(), query.length());
+    std::string url = "https://www.reddit.com/search.json?q=" + std::string(escQuery ? escQuery : "") +
+                      "&limit=" + std::to_string(limit);
+    if (escQuery) curl_free(escQuery);
+
+    // Perform request
+    std::string readBuffer = performCurlRequest(url, "basic_agent/1.0");
+    curl_easy_cleanup(curl);
+
+    try {
+        json j = json::parse(readBuffer);
+        std::ostringstream out;
+
+        if (!j.contains("data") || !j["data"].contains("children") || j["data"]["children"].empty()) {
+            return "[No Reddit posts found for query: " + query + "]";
+        }
+
+        for (auto& post : j["data"]["children"]) {
+            auto& data = post["data"];
+            std::string title = data.value("title", "");
+            std::string selftext = data.value("selftext", "");
+
+            if (!title.empty()) out << "Title: " << title << "\n";
+            if (!selftext.empty()) out << selftext << "\n";
+            out << "----\n";
+        }
+
+        std::string result = out.str();
+        if (result.empty()) return "[No textual content found for Reddit posts]";
+        return result;
+
+    } catch (const std::exception& e) {
+        return std::string("Error parsing Reddit JSON: ") + e.what();
+    }
+}
+
+// --- Other API stubs ---
+std::string WebScraperTools::fetchNewsArticles(const std::string& query, int limit) {
+    // Get API key from environment variable
+    const char* apiKeyEnv = std::getenv("NEWS_API_KEY");
+    if (!apiKeyEnv) return "[Error] NEWS_API_KEY not set in environment";
+    std::string apiKeyStr = apiKeyEnv;
+
+    // Build NewsAPI URL
+    std::ostringstream urlStream;
+    urlStream << "https://newsapi.org/v2/everything?"
+              << "q=" << curl_easy_escape(nullptr, query.c_str(), query.length())
+              << "&pageSize=" << limit
+              << "&apiKey=" << apiKeyStr;
+
+    std::string readBuffer = performCurlRequest(urlStream.str(), "basic_agent/1.0");
+
+    try {
+        json j = json::parse(readBuffer);
+        if (!j.contains("articles") || !j["articles"].is_array() || j["articles"].empty()) {
+            return "[No news articles found for query: " + query + "]";
+        }
+
+        std::ostringstream out;
+        int count = 0;
+        for (auto& article : j["articles"]) {
+            std::string title = article.value("title", "");
+            std::string description = article.value("description", "");
+            if (!title.empty()) out << "Title: " << title << "\n";
+            if (!description.empty()) out << description << "\n";
+            out << "----\n";
+            if (++count >= limit) break;
+        }
+
+        std::string result = out.str();
+        if (result.empty()) return "[No textual content found for news articles]";
+        return result;
+
+    } catch (const std::exception& e) {
+        return std::string("Error parsing NewsAPI JSON: ") + e.what();
+    }
+}
+
+std::string WebScraperTools::fetchYouTubeVideos(const std::string& query, int limit) {
+    return "[YouTube API stub] Fetching top " + std::to_string(limit) + " videos for query: \"" + query + "\"";
+}
+
+std::string WebScraperTools::fetchGoogleCSEResults(const std::string& query, int numResults) {
+    return "[Google CSE stub] Fetching top " + std::to_string(numResults) + " results for query: \"" + query + "\"";
+}
+
