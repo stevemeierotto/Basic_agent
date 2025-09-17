@@ -1,32 +1,40 @@
-#ifndef VECTOR_STORE_H
-#define VECTOR_STORE_H
+#pragma once
+#include "similarity.h"
+#include "embedding_engine.h"
 
 #include <string>
 #include <vector>
-#include <utility> // for std::pair
+#include <utility>
+#include <memory>
 
 class VectorStore {
 public:
-    // Add a document and its vector embedding
-    void addDocument(const std::string& text);
+    // non-owning pointer: RAGPipeline owns the engine via unique_ptr
+    explicit VectorStore(EmbeddingEngine* engine)
+        : embeddingEngine(engine) {}
 
-    // Clear in-memory store so it can be rebuilt from chunks
+    void addDocument(const std::string& text);
+    void addDocuments(const std::vector<std::string>& texts);
+
+    std::vector<std::vector<float>> embeddings;
+    bool loadEmbeddings(const std::string& path);
+    bool saveEmbeddings(const std::string& filepath) const;
+    void enforceMemoryLimit(size_t maxMemoryBytes);
+    size_t getMemoryUsage() const;
+
     void clear();
 
-    // Retrieve topK most similar documents for a query
+    void setSimilarity(std::unique_ptr<ISimilarity> sim);
+
     std::vector<std::pair<std::string, float>> retrieve(const std::string& query, int topK = 3);
 
 private:
-    // Stored raw text + embeddings
+    static constexpr float SIMILARITY_THRESHOLD = 0.1f;
+
     std::vector<std::string> documents;
-    std::vector<std::vector<float>> embeddings;
 
-    // Create embedding for a text (placeholder for now)
-    std::vector<float> embed(const std::string& text);
-
-    // Similarity function
-    float cosineSimilarity(const std::vector<float>& a, const std::vector<float>& b);
+    EmbeddingEngine* embeddingEngine;  // non-owning raw pointer
+    std::unique_ptr<ISimilarity> similarity =
+        std::make_unique<CosineSimilarity>();
 };
-
-#endif // VECTOR_STORE_H
 

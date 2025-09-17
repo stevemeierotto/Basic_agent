@@ -30,11 +30,33 @@ public:
     std::string processQuery(const std::string& input);
 
 private:
+    // Add to header
+private:
+    static constexpr size_t DEFAULT_MAX_QUERY_LENGTH = 10000;
+    static constexpr int DEFAULT_RAG_TOP_K = 5;
+    static constexpr int DEFAULT_SCRAPE_RESULTS = 3;
+    
+    size_t maxQueryLength = DEFAULT_MAX_QUERY_LENGTH;
+    bool initialized = false;
+
     Memory& memory;
     RAGPipeline& rag;
     LLMInterface& llm;
     PromptFactory promptFactory;   
     WebScraperTools scraper;
+
+    void ensureInitialized();
+    std::pair<std::string, std::string> parseCommand(const std::string& input);
+    void showHelp();
+    void clearMemory();
+
+    using CommandHandler = std::function<void(const std::string&)>;
+    std::unordered_map<std::string, CommandHandler> commandHandlers;
+    void initializeCommands();
+
+    void handleScrape(const std::string& args);
+    void handleRag(const std::string& args);
+    void handleBackend(const std::string& args);
 
     // helpers
     static std::string trim(const std::string& s);

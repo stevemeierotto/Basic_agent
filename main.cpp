@@ -3,6 +3,7 @@
 #include "include/rag.h"
 #include "include/llm_interface.h"
 #include "include/env_loader.h"
+#include "embedding_engine.h"
 
 #include <filesystem>
 #include <iostream>
@@ -10,12 +11,14 @@
 int main() {
     //std::string absPath = (std::filesystem::current_path() / "memory.json").string();
     Memory memory;
-    RAGPipeline rag;
     LLMInterface llm;
 
     if (!EnvLoader::loadEnvFile("../.env")) {
         std::cerr << "Warning: .env file not found. Using system environment variables.\n";
     }
+
+    auto engine = std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf);
+    RAGPipeline rag(std::move(engine));
 
     CommandProcessor cp(memory, rag, llm);
     cp.runLoop();

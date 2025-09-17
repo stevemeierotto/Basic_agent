@@ -1,0 +1,423 @@
+=== HEADER FILES ===
+
+./include/command_processor.h:
+```cpp
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * basic_agent - AI Agent with Memory and RAG Capabilities
+ * uses either Ollama lacal models or OpenAI API
+ *
+ * Licensed under the MIT License
+ * See LICENSE file in the project root for full license text
+ */
+
+#pragma once
+#include <string>
+#include "memory.h"
+#include "rag.h"
+#include "prompt_factory.h"
+#include "llm_interface.h"
+#include "webscraperTools.h"
+
+class CommandProcessor {
+public:
+    CommandProcessor(Memory& mem, RAGPipeline& rag, LLMInterface& llm);
+
+    // Starts a REPL loop
+    void runLoop();
+
+    // Handle a single line (used by runLoop, but also handy for tests)
+    void handleCommand(const std::string& input);
+
+    // NEW: Send query through Memory + RAG + LLM
+    std::string processQuery(const std::string& input);
+
+private:
+    Memory& memory;
+    RAGPipeline& rag;
+    LLMInterface& llm;
+    PromptFactory promptFactory;   
+    WebScraperTools scraper;
+
+    // helpers
+    static std::string trim(const std::string& s);
+    static std::string lstripSlash(const std::string& s);
+    static std::string toLower(std::string s);
+    static bool startsWith(const std::string& s, const std::string& prefix);
+};
+
+
+```
+
+./include/env_loader.h:
+```cpp
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * basic_agent - AI Agent with Memory and RAG Capabilities
+ * uses either Ollama lacal models or OpenAI API
+ *
+ * Licensed under the MIT License
+ * See LICENSE file in the project root for full license text
+ */
+
+
+#pragma once
+#include <string>
+
+namespace EnvLoader {
+    bool loadEnvFile(const std::string& filename = ".env");
+}
+
+
+```
+
+./include/file_handler.h:
+```cpp
+#pragma once
+#include <string>
+
+class FileHandler {
+public:
+    FileHandler() = default;
+
+    // Returns full path to agent_workspace with optional filename
+    std::string getAgentWorkspacePath(const std::string& filename = "") const;
+
+    // Convenience for memory file
+    std::string getMemoryPath() const;
+
+    // Returns full path to agent_workspace/rag with optional filename
+    std::string getRagPath(const std::string& filename = "") const;
+
+    // Returns just the rag directory path (no filename)
+    std::string getRagDirectory() const;
+};
+
+
+```
+
+./include/llm_interface.h:
+```cpp
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * basic_agent - AI Agent with Memory and RAG Capabilities
+ * uses either Ollama lacal models or OpenAI API
+ *
+ * Licensed under the MIT License
+ * See LICENSE file in the project root for full license text
+ */
+
+#pragma once
+#include <string>
+#include <curl/curl.h>
+
+enum class LLMBackend {
+    Ollama,
+    OpenAI
+};
+
+class LLMInterface {
+public:
+    LLMInterface(LLMBackend backend = LLMBackend::Ollama);
+    ~LLMInterface();
+    // Internal helpers
+    std::string askOllama(const std::string& prompt);
+    std::string askOpenAI(const std::string& prompt);
+
+    std::string query(const std::string& prompt);
+    
+    // Allow switching dynamically
+    void setBackend(LLMBackend backend);
+
+private:
+    CURL* curl = nullptr;
+    struct curl_slist* headers = nullptr;
+    LLMBackend backend;
+
+    static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+        ((std::string*)userp)->append((char*)contents, size * nmemb);
+        return size * nmemb;
+    }
+
+};
+
+
+```
+
+./include/memory.h:
+```cpp
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * basic_agent - AI Agent with Memory and RAG Capabilities
+ * uses either Ollama lacal models or OpenAI API
+ *
+ * Licensed under the MIT License
+ * See LICENSE file in the project root for full license text
+ */
+
+#pragma once
+#include <json.hpp>
+#include <string>
+#include <vector>
+
+using json = nlohmann::json;
+
+class Memory {
+private:
+    std::string filepath;
+    json data;
+
+    std::string getDefaultPath() const;
+
+public:
+    // Construct with optional path; defaults to ~/.code_agent_plugin/memory.json (Linux/macOS)
+    explicit Memory(const std::string& path = "");
+
+    // Persistence
+    void load();
+    void save() const;
+
+    // Conversation
+    void addMessage(const std::string& role, const std::string& content);
+    std::vector<json> getConversation() const;
+    void clear();
+
+    // Summaries
+    void setSummary(const std::string& summary);  // sets short_summary only
+    std::string getSummary(bool useExtended = false) const;
+    void updateSummary(const std::string& goal, const std::string& response);
+
+    // Debug helpers
+    std::string getFilePath() const { return filepath; }
+    void printSummaries() const;
+
+    // NOTE: In the future, you could integrate an LLM call here to generate
+    // smarter short/extended summaries automatically instead of truncating.
+};
+
+
+```
+
+./include/prompt_factory.h:
+```cpp
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * basic_agent - AI Agent with Memory and RAG Capabilities
+ * uses either Ollama lacal models or OpenAI API
+ *
+ * Licensed under the MIT License
+ * See LICENSE file in the project root for full license text
+ */
+
+#pragma once
+#include <string>
+#include "memory.h"
+#include "rag.h"
+
+class PromptFactory {
+private:
+    Memory& memory;
+    RAGPipeline& rag;
+    size_t recentMessages;
+
+public:
+    PromptFactory(Memory& mem, RAGPipeline& r, size_t lastN = 5);
+
+    // Build a prompt with memory + recent conversation
+    std::string buildConversationPrompt(const std::string& user_input,
+                                        bool useExtendedSummary = false);
+
+    // Build a prompt to query RAG for relevant code context
+    std::string buildRagQueryPrompt(const std::string& query);
+};
+
+
+```
+
+./include/rag.h:
+```cpp
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * basic_agent - AI Agent with Memory and RAG Capabilities
+ * Supports local embeddings and retrieval for C++ code.
+ *
+ * Licensed under the MIT License (see LICENSE in project root)
+ */
+
+#pragma once
+#include <string>
+#include <vector>
+#include "../include/vector_store.h"
+
+// Represents a chunk of code (function, class, or global block)
+struct CodeChunk {
+    std::string fileName;
+    std::string symbolName; 
+    int startLine;
+    int endLine;
+    std::string code;
+    std::vector<float> embedding; // reserved for later
+};
+
+// Core RAG pipeline manager
+class RAGPipeline {
+public:
+    RAGPipeline() = default;
+
+    // Initialize RAG pipeline and load any saved index
+    void init(const std::string& indexPath);
+    void init();
+
+    std::string query(const std::string& query);
+
+    // Index a single source file
+    void indexFile(const std::string& filePath);
+
+    // Index all source files in a project directory
+    void indexProject(const std::string& rootPath);
+
+    // Retrieve top-k relevant code chunks
+    std::vector<CodeChunk> retrieveRelevant(
+        const std::string& query,
+        const std::vector<int>& errorLines,
+        int topK = 3);
+
+    // Save/load the index
+    void saveIndex() const;
+    void saveIndex(const std::string& dbPath) const;
+    void loadIndex();
+    void loadIndex(const std::string& dbPath);
+
+    // Reset the in-memory store
+    void clear();
+
+private:
+    std::string indexFilePath;
+    std::vector<CodeChunk> chunks; 
+    VectorStore store;
+};
+
+
+```
+
+./include/tools.h:
+```cpp
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * basic_agent - AI Agent with Memory and RAG Capabilities
+ * uses either Ollama lacal models or OpenAI API
+ *
+ * Licensed under the MIT License
+ * See LICENSE file in the project root for full license text
+ */
+#pragma once
+#include <string>
+#include <vector>
+
+class Tools {
+public:
+    virtual ~Tools() = default;
+
+    // Example virtual interface for all tools
+    virtual std::string summarizeText(const std::string& text, int numSentences = 3) = 0;
+
+    // You can add generic methods, or keep them pure virtual for specialization
+};
+
+```
+
+./include/vector_store.h:
+```cpp
+#ifndef VECTOR_STORE_H
+#define VECTOR_STORE_H
+
+#include <string>
+#include <vector>
+#include <utility> // for std::pair
+
+class VectorStore {
+public:
+    // Add a document and its vector embedding
+    void addDocument(const std::string& text);
+
+    // Clear in-memory store so it can be rebuilt from chunks
+    void clear();
+
+    // Retrieve topK most similar documents for a query
+    std::vector<std::pair<std::string, float>> retrieve(const std::string& query, int topK = 3);
+
+private:
+    // Stored raw text + embeddings
+    std::vector<std::string> documents;
+    std::vector<std::vector<float>> embeddings;
+
+    // Create embedding for a text (placeholder for now)
+    std::vector<float> embed(const std::string& text);
+
+    // Similarity function
+    float cosineSimilarity(const std::vector<float>& a, const std::vector<float>& b);
+};
+
+#endif // VECTOR_STORE_H
+
+
+```
+
+./include/webscraperTools.h:
+```cpp
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * basic_agent - AI Agent with Memory and RAG Capabilities
+ * uses either Ollama lacal models or OpenAI API
+ *
+ * Licensed under the MIT License
+ * See LICENSE file in the project root for full license text
+ */
+
+#pragma once
+#include "tools.h"
+
+class WebScraperTools : public Tools {
+private:
+    std::string apiKey;
+    std::string cseId;
+
+    // --- CURL helper ---
+    std::string performCurlRequest(const std::string& url, const std::string& userAgent);
+
+public:
+    WebScraperTools();
+    WebScraperTools(const std::string& apiKey, const std::string& cseId);
+    std::string handleScrape(const std::string& query, int results=3, int snippets=3);
+
+    // Implement/override
+    std::string summarizeText(const std::string& text, int numSentences = 3) override;
+
+    std::vector<std::string> webSearch(const std::string& query, int maxResults = 5);
+    std::string fetchAndExtract(const std::string& url);
+    std::string searchAndSummarize(const std::string& query, int numResults = 5, int numSentences = 3);
+    bool writeSummary(const std::string& summary, const std::string& filename);
+    // --- Starter API Methods ---
+    
+    // Reddit API: fetch top posts from a subreddit
+    std::string fetchRedditPosts(const std::string& subreddit, int limit=5);
+
+    // News API: fetch top articles for a query
+    std::string fetchNewsArticles(const std::string& query, int limit=5);
+
+    // YouTube API: fetch video titles and descriptions for a search query
+    std::string fetchYouTubeVideos(const std::string& query, int limit=5);
+
+    // Google Custom Search API (already partially used)
+    std::string fetchGoogleCSEResults(const std::string& query, int numResults=5);
+};
+
+```

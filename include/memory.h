@@ -2,7 +2,7 @@
  * Copyright (c) 2025 Steve Meierotto
  * 
  * basic_agent - AI Agent with Memory and RAG Capabilities
- * uses either Ollama lacal models or OpenAI API
+ * Uses either Ollama local models or OpenAI API
  *
  * Licensed under the MIT License
  * See LICENSE file in the project root for full license text
@@ -12,6 +12,8 @@
 #include <json.hpp>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <chrono>
 
 using json = nlohmann::json;
 
@@ -20,18 +22,29 @@ private:
     std::string filepath;
     json data;
 
+    mutable std::mutex mtx;     // protects data and dirty state
+    mutable bool isDirty = false;
+    mutable std::chrono::steady_clock::time_point lastSave;
+    static constexpr auto AUTO_SAVE_INTERVAL = std::chrono::minutes(5);
+
     std::string getDefaultPath() const;
+    void markDirty() const;
+    void saveIfNeeded() const;
+    void saveUnlocked() const;
 
 public:
-    // Construct with optional path; defaults to ~/.code_agent_plugin/memory.json (Linux/macOS)
+    // Constructor / Destructor
     explicit Memory(const std::string& path = "");
+    ~Memory();
 
     // Persistence
-    void load();
-    void save() const;
+    void load();            // loads from disk (overwrites memory)
+    void save() const;      // flushes to disk if dirty
+    void flush() const;     // unconditional save, clears dirty flag
 
     // Conversation
     void addMessage(const std::string& role, const std::string& content);
+    void addMessages(const std::vector<std::pair<std::string, std::string>>& messages);
     std::vector<json> getConversation() const;
     void clear();
 
@@ -43,8 +56,5 @@ public:
     // Debug helpers
     std::string getFilePath() const { return filepath; }
     void printSummaries() const;
-
-    // NOTE: In the future, you could integrate an LLM call here to generate
-    // smarter short/extended summaries automatically instead of truncating.
 };
 

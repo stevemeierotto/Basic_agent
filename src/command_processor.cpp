@@ -15,16 +15,14 @@ namespace fs = std::filesystem;
 
 
 CommandProcessor::CommandProcessor(Memory& mem, RAGPipeline& rag, LLMInterface& llm)
-    : memory(mem), rag(rag), llm(llm), promptFactory(mem, rag), scraper() // uses default constructor
+    : memory(mem), rag(rag), llm(llm), promptFactory(mem, rag), scraper() 
 {
-    rag.init();
-    FileHandler fh;
-    rag.indexProject(fh.getRagDirectory());
-    rag.saveIndex();
+    initializeCommands();
 }
 
 
 std::string CommandProcessor::processQuery(const std::string& input) {
+    ensureInitialized();
     // 1. Retrieve relevant context from RAG
     std::vector<CodeChunk> contextChunks = rag.retrieveRelevant(input, {}, 5); // top 5
     std::ostringstream contextStream;
@@ -47,10 +45,18 @@ std::string CommandProcessor::processQuery(const std::string& input) {
     // 3. Query the LLM
     std::string response = llm.query(finalPrompt);
 
-    // 4. Update memory
-    memory.addMessage("user", input);
-    memory.addMessage("assistant", response);
-    memory.save();
+    // 4. Update memory with error handling
+    try {
+        memory.addMessage("user", input);
+        memory.addMessage("assistant", response);
+        memory.save();
+        
+        // Only update summary if everything succeeded
+        memory.updateSummary(input, response);
+    } catch (const std::exception& e) {
+        std::cerr << "[WARNING] Failed to save to memory: " << e.what() << std::endl;
+        // Don't fail the entire operation
+    }
 
     return response;
 }
@@ -80,6 +86,15 @@ bool CommandProcessor::startsWith(const std::string& s, const std::string& prefi
 void CommandProcessor::runLoop() {
     std::cout << "Basic Chat Agent . Type /help for commands. Type exit or quit to leave.\n";
     std::string line;
+
+    try {
+        ensureInitialized();
+        std::cout << "RAG system ready.\n";
+    } catch (const std::exception& e) {
+        std::cout << "Warning: RAG system initialization failed: " << e.what() << "\n";
+        std::cout << "Some features may be limited.\n";
+    }
+
     while (true) {
         std::cout << "<USER> " << std::flush;
         if (!std::getline(std::cin, line)) {
@@ -104,112 +119,140 @@ void CommandProcessor::runLoop() {
 
 void CommandProcessor::handleCommand(const std::string& input) {
     if (!startsWith(input, "/")) {
-        // Default path → send through memory + RAG + LLM
         std::string response = processQuery(input);
         std::cout << "Assistant: " << response << "\n";
-
-        // Update summaries after each exchange
         memory.updateSummary(input, response);
         return;
     }
 
-    std::string stripped = lstripSlash(input);
+    auto [cmd, args] = parseCommand(input);
+    
+    auto it = commandHandlers.find(cmd);
+    if (it != commandHandlers.end()) {
+        try {
+            it->second(args);
+        } catch (const std::exception& e) {
+            std::cout << "Error executing command: " << e.what() << "\n";
+        }
+    } else {
+        std::cout << "Unknown command '/" << cmd << "'. Try /help.\n";
+    }
+}
+
+std::pair<std::string, std::string> CommandProcessor::parseCommand(const std::string& input) {
+    std::string stripped = input;
+    if (!stripped.empty() && stripped[0] == '/')
+        stripped.erase(0, 1);  // remove leading slash
+
     std::istringstream iss(stripped);
     std::string cmd;
     std::getline(iss, cmd, ' ');
     std::string args;
     std::getline(iss, args);
-    cmd = toLower(cmd);
-    args = trim(args);
+    return { toLower(cmd), trim(args) };  // assumes trim() and toLower() exist
+}
 
-    if (cmd == "help" || cmd == "h" || cmd == "?") {
-        std::cout <<
-            "Built-ins:\n"
-            "  /help               Show this help\n"
-            "  /scrape             Scrape web and create summery."
-            "  /rag                Query knowledge with RAG\n"
-            "  /clear              Clears agent's memory and summaries\n"
-            "  /backend ollama     Switch to Ollama\n"
-            "  /backend openai     Switch to OpenAI\n"
-            "Also: type 'exit' or 'quit' to leave.\n";
-        return;
+void CommandProcessor::showHelp() {
+    std::cout <<
+        "Built-ins:\n"
+        "  /help               Show this help\n"
+        "  /scrape             Scrape web and create summary\n"
+        "  /rag                Query knowledge with RAG\n"
+        "  /clear              Clears agent's memory and summaries\n"
+        "  /backend ollama     Switch to Ollama\n"
+        "  /backend openai     Switch to OpenAI\n"
+        "Also: type 'exit' or 'quit' to leave.\n";
+}
+
+void CommandProcessor::clearMemory() {
+    memory.clear();
+    memory.save();
+    std::cout << "Memory cleared.\n";
+}
+
+void CommandProcessor::ensureInitialized() {
+    if (!initialized) {
+        rag.init();
+        FileHandler fh;
+        rag.indexProject(fh.getRagDirectory());
+        rag.saveIndex();
+        initialized = true;
     }
+}
 
-    if (cmd == "clear" || cmd == "reset") {
-        memory.clear();
-        memory.save();
-        std::cout << "Memory cleared.\n";
-        return;
-    }
+void CommandProcessor::initializeCommands() {
+    commandHandlers["help"] = [this](const std::string&) { showHelp(); };
+    commandHandlers["h"] = commandHandlers["help"];
+    commandHandlers["?"] = commandHandlers["help"];
+    
+    commandHandlers["clear"] = [this](const std::string&) { clearMemory(); };
+    commandHandlers["reset"] = commandHandlers["clear"];
+    
+    commandHandlers["scrape"] = [this](const std::string& args) { handleScrape(args); };
+    commandHandlers["rag"] = [this](const std::string& args) { handleRag(args); };
+    commandHandlers["backend"] = [this](const std::string& args) { handleBackend(args); };
+}
 
-if (cmd == "scrape") {
+void CommandProcessor::handleScrape(const std::string& args) {
     if (args.empty()) {
         std::cout << "Usage: /scrape <search term>\n";
-    } else {
-        try {
-            // Perform the search and summarization
-            std::string summary = scraper.handleScrape(args, 3, 3);
-            std::cout << "Fetching Reddit posts.\n";
-            // Fetch Reddit posts using the user’s search query
-            std::string redditRaw = scraper.fetchRedditPosts(args, 3);
+        return;
+    }
 
-            // Summarize each post individually
-            std::istringstream iss(redditRaw);
-            std::string line;
-            std::string redditSummary;
-            while (std::getline(iss, line, '\n')) {
-                if (!line.empty() && line.find("----") == std::string::npos) {
-                    redditSummary += scraper.summarizeText(line, 2) + " "; // summarize 2 sentences per line
-                }
+    try {
+        // Step 1: Perform search & summarization
+        std::string summary = scraper.handleScrape(args, 3, 3);
+
+        // Step 2: Fetch Reddit posts
+        std::string redditRaw = scraper.fetchRedditPosts(args, 3);
+
+        // Step 3: Summarize each Reddit post
+        std::istringstream iss(redditRaw);
+        std::string line;
+        std::string redditSummary;
+        while (std::getline(iss, line)) {
+            if (!line.empty() && line.find("----") == std::string::npos) {
+                redditSummary += scraper.summarizeText(line, 2) + " ";
             }
-            summary += "\n[Reddit Summary]\n" + redditSummary;
-            // Print the summary
-            std::cout << "----- Summary -----\n" << summary << "\n";
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << "\n";
         }
+        summary += "\n[Reddit Summary]\n" + redditSummary;
+
+        // Step 4: Print the summary
+        std::cout << "----- Summary -----\n" << summary << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << "Error during scraping: " << e.what() << "\n";
     }
-    return;  // Prevent fall-through to "Unknown command"
 }
 
-
-    if (cmd == "rag") {
-        if (args.empty()) {
-            std::cout << "Usage: /rag <your query>\n";
-            return;
-        }
-
-        auto chunks = rag.retrieveRelevant(args, {}, 5); // top 5
-        if (chunks.empty()) {
-            std::cout << "[RAG] No relevant context found.\n";
-            return;
-        }
-
-        std::cout << "[RAG] Top relevant chunks:\n";
-        int idx = 1;
-        for (auto& c : chunks) {
-            std::cout << "Chunk " << idx++ << " (" << c.fileName
-                      << " lines " << c.startLine << "-" << c.endLine << "):\n";
-            std::cout << c.code << "\n---\n";
-        }
+void CommandProcessor::handleRag(const std::string& args) {
+    if (args.empty()) {
+        std::cout << "Usage: /rag <your query>\n";
         return;
     }
 
-    if (cmd == "backend") {
-        if (args == "ollama") {
-            llm.setBackend(LLMBackend::Ollama);
-            std::cout << "Switched backend to Ollama\n";
-        } else if (args == "openai") {
-            llm.setBackend(LLMBackend::OpenAI);
-            std::cout << "Switched backend to OpenAI\n";
-        } else {
-            std::cout << "Usage: /backend [ollama|openai]\n";
-        }
+    auto chunks = rag.retrieveRelevant(args, {}, 5); // top 5
+    if (chunks.empty()) {
+        std::cout << "[RAG] No relevant context found.\n";
         return;
     }
 
-    std::cout << "Unknown command '/" << cmd << "'. Try /help.\n";
+    std::cout << "[RAG] Top relevant chunks:\n";
+    int idx = 1;
+    for (const auto& c : chunks) {
+        std::cout << "Chunk " << idx++ << " (" << c.fileName
+                  << " lines " << c.startLine << "-" << c.endLine << "):\n";
+        std::cout << c.code << "\n---\n";
+    }
 }
 
-
-
+void CommandProcessor::handleBackend(const std::string& args) {
+    if (args == "ollama") {
+        llm.setBackend(LLMBackend::Ollama);
+        std::cout << "Switched backend to Ollama\n";
+    } else if (args == "openai") {
+        llm.setBackend(LLMBackend::OpenAI);
+        std::cout << "Switched backend to OpenAI\n";
+    } else {
+        std::cout << "Usage: /backend [ollama|openai]\n";
+    }
+}

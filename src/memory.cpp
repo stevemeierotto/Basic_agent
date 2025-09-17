@@ -7,7 +7,12 @@
 
 namespace fs = std::filesystem;
 
-
+Memory::~Memory() {
+    flush();  // ensure all data saved
+}
+// ------------------------
+// Constructor
+// ------------------------
 Memory::Memory(const std::string& path) {
     if (!path.empty()) {
         filepath = path;
@@ -16,7 +21,7 @@ Memory::Memory(const std::string& path) {
         filepath = fh.getMemoryPath();
     }
 
-    // Only create parent directories if parent_path() is not empty
+    // Create parent directories if needed
     fs::path parent = fs::path(filepath).parent_path();
     if (!parent.empty() && !fs::exists(parent)) {
         std::error_code ec;
@@ -27,25 +32,87 @@ Memory::Memory(const std::string& path) {
         }
     }
 
+    lastSave = std::chrono::steady_clock::now();
     load();
 }
-/*
-std::string Memory::getDefaultPath() const {
-    namespace fs = std::filesystem;
 
-    // Get full path of the binary
-    fs::path exePath = fs::canonical("/proc/self/exe");
-    // Go up one level (from build/ to project root)
-    fs::path projectRoot = exePath.parent_path().parent_path();
-    // Always point into agent_workspace
-    fs::path memoryPath = projectRoot / "agent_workspace" / "memory.json";
+// ------------------------
+// Conversation
+// ------------------------
+void Memory::addMessage(const std::string& role, const std::string& content) {
+    std::lock_guard<std::mutex> lock(mtx);
+    data["conversation"].push_back({
+        {"role", role},
+        {"content", content},
+        {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()}
+    });
+    markDirty();
 
-    std::cerr << "[Memory] Default path resolved to: " << memoryPath << "\n";
-
-    return memoryPath.string();
+    // Auto-save every 10 messages or interval exceeded
+    if (data["conversation"].size() % 10 == 0) {
+        saveIfNeeded();
+    }
 }
-*/
 
+void Memory::addMessages(const std::vector<std::pair<std::string, std::string>>& messages) {
+    std::lock_guard<std::mutex> lock(mtx);
+    for (const auto& [role, content] : messages) {
+        data["conversation"].push_back({
+            {"role", role},
+            {"content", content},
+            {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()}
+        });
+    }
+    markDirty();
+}
+
+// ------------------------
+// Flush / Save
+// ------------------------
+void Memory::flush() const {
+    std::lock_guard<std::mutex> lock(mtx);
+    saveUnlocked();
+}
+
+void Memory::save() const {
+    std::lock_guard<std::mutex> lock(mtx);
+    saveIfNeeded();
+}
+
+// ------------------------
+// Private helpers
+// ------------------------
+void Memory::markDirty() const {
+    std::lock_guard<std::mutex> lock(mtx);
+    isDirty = true;
+}
+
+void Memory::saveIfNeeded() const {
+    std::lock_guard<std::mutex> lock(mtx);
+    auto now = std::chrono::steady_clock::now();
+    if (isDirty && (now - lastSave) > AUTO_SAVE_INTERVAL) {
+        saveUnlocked();
+    }
+}
+
+void Memory::saveUnlocked() const {
+    try {
+        std::ofstream out(filepath);
+        if (out) {
+            out << data.dump(4);  // pretty JSON
+            isDirty = false;
+            lastSave = std::chrono::steady_clock::now();
+        } else {
+            std::cerr << "[Memory] Failed to open file for saving: " << filepath << "\n";
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[Memory] Exception during save: " << e.what() << "\n";
+    }
+}
+//below is the original section before editting
+// ------------------------
+// Load memory from file
+// ------------------------
 void Memory::load() {
     std::ifstream in(filepath);
     if (in) {
@@ -68,11 +135,9 @@ void Memory::load() {
                 {"short_summary", ""},
                 {"extended_summary", ""}
             };
-            //save(); // write defaults
         }
     } else {
-        // File does not exist: create directories if needed and save defaults
-        namespace fs = std::filesystem;
+        // File does not exist: create directories if needed and initialize defaults
         fs::path filePathObj(filepath);
         if (!fs::exists(filePathObj.parent_path())) {
             fs::create_directories(filePathObj.parent_path());
@@ -83,69 +148,55 @@ void Memory::load() {
             {"short_summary", ""},
             {"extended_summary", ""}
         };
-        //save(); // write defaults
-        std::cerr << "[Memory] Initialized new memory at " << filepath << "\n";
     }
 }
 
-
-void Memory::save() const {
-    fs::path parent = fs::path(filepath).parent_path();
-    if (!parent.empty() && !fs::exists(parent)) {
-        std::error_code ec;
-        fs::create_directories(parent, ec);
-        if (ec) {
-            std::cerr << "[Memory] Failed to create directory: " << parent
-                      << " (" << ec.message() << ")\n";
-            return;
-        }
-    }
-
-    std::ofstream out(filepath);
-    if (!out.is_open()) {
-        std::cerr << "[Memory] Could not open file for writing: " << filepath << "\n";
-        return;
-    }
-    out << data.dump(4);
-}
-
-
-void Memory::addMessage(const std::string& role, const std::string& content) {
-    data["conversation"].push_back({
-        {"role", role},
-        {"content", content}
-    });
-   // save();
-}
-
+// ------------------------
+// Get conversation messages
+// ------------------------
 std::vector<json> Memory::getConversation() const {
+    std::lock_guard<std::mutex> lock(mtx);
     if (data.contains("conversation")) {
         return data["conversation"].get<std::vector<json>>();
     }
     return {};
 }
 
+// ------------------------
+// Clear memory
+// ------------------------
 void Memory::clear() {
+    std::lock_guard<std::mutex> lock(mtx);
     data = { 
         {"conversation", json::array()}, 
         {"short_summary", ""}, 
         {"extended_summary", ""} 
     };
-    save();
+    markDirty();
+    saveUnlocked();
 }
 
 
+
+// ------------------------
+// Set short summary
+// ------------------------
 void Memory::setSummary(const std::string& summary) {
-    // For now, set the short summary directly
+    std::lock_guard<std::mutex> lock(mtx);
     data["short_summary"] = summary;
-    //save();
+    markDirty();
+    saveIfNeeded();
 }
 
-std::string Memory::getSummary(bool useExtended /* = false */) const {
+// ------------------------
+// Get summary
+// ------------------------
+std::string Memory::getSummary(bool useExtended /*= false*/) const {
+    std::lock_guard<std::mutex> lock(mtx);
     try {
         if (useExtended && data.contains("extended_summary") && data["extended_summary"].is_string()) {
             return data["extended_summary"].get<std::string>();
-        } 
+        }
         if (data.contains("short_summary") && data["short_summary"].is_string()) {
             return data["short_summary"].get<std::string>();
         }
@@ -155,8 +206,12 @@ std::string Memory::getSummary(bool useExtended /* = false */) const {
     return "[Memory] No summary available.";
 }
 
-
+// ------------------------
+// Update short & extended summaries
+// ------------------------
 void Memory::updateSummary(const std::string& goal, const std::string& response) {
+    std::lock_guard<std::mutex> lock(mtx);
+
     // --- Short summary (always replaced) ---
     std::ostringstream shortOss;
     shortOss << "Last Goal: " << goal << "\n";
@@ -179,9 +234,8 @@ void Memory::updateSummary(const std::string& goal, const std::string& response)
 
     data["extended_summary"] = extended;
 
-    save();
-
-    // TODO: Later, replace the naive string truncation above with an LLM call
-    // that summarizes the conversation more intelligently.
+    markDirty();
+    saveIfNeeded();
 }
+
 
