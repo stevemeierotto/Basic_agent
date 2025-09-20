@@ -5,11 +5,25 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <iostream>
 
 void VectorStore::addDocument(const std::string& text) {
     documents.push_back(text);
-    embeddings.push_back(embeddingEngine->embed(text));
+
+    auto emb = embeddingEngine->embed(text);
+    std::cerr << "[DEBUG] Embedding generated, size=" << emb.size() << "\n";
+
+    if (emb.empty()) {
+        std::cerr << "[ERROR] Empty embedding for document! Text=\"" 
+                  << text.substr(0, 50) << (text.size() > 50 ? "..." : "") 
+                  << "\"\n";
+    }
+
+    embeddings.push_back(std::move(emb));
+    std::cerr << "[DEBUG] Added doc. Total docs=" << documents.size() 
+              << ", total embeddings=" << embeddings.size() << "\n";
 }
+
 
 void VectorStore::addDocuments(const std::vector<std::string>& texts) {
     for (const auto& t : texts) addDocument(t);
@@ -25,11 +39,22 @@ void VectorStore::setSimilarity(std::unique_ptr<ISimilarity> sim) {
 }
 
 std::vector<std::pair<std::string, float>> VectorStore::retrieve(const std::string& query, int topK) {
+    if (documents.empty() || embeddings.empty()) {
+        std::cerr << "[ERROR] retrieve() called but no documents/embeddings loaded.\n";
+        return {};
+    }
+
     auto queryVec = embeddingEngine->embed(query);
+    if (queryVec.empty()) {
+        std::cerr << "[ERROR] Query embedding failed! Query=\"" << query << "\"\n";
+        return {};
+    }
+    std::cerr << "[DEBUG] Query embedding size=" << queryVec.size() 
+              << ", docs=" << documents.size() << "\n";
 
     // Min-heap: smallest score at the top
     auto cmp = [](const std::pair<std::string, float>& a, const std::pair<std::string, float>& b) {
-        return a.second > b.second; // min-heap by score
+        return a.second > b.second;
     };
     std::priority_queue<
         std::pair<std::string, float>,
@@ -39,6 +64,8 @@ std::vector<std::pair<std::string, float>> VectorStore::retrieve(const std::stri
 
     for (size_t i = 0; i < documents.size(); ++i) {
         float score = (*similarity)(queryVec, embeddings[i]);
+        std::cerr << "[DEBUG] Doc " << i << " score=" << score << "\n";
+
         if (score < SIMILARITY_THRESHOLD) continue;
 
         if ((int)minHeap.size() < topK) {
@@ -49,16 +76,23 @@ std::vector<std::pair<std::string, float>> VectorStore::retrieve(const std::stri
         }
     }
 
-    // Extract results from heap into a vector (largest score first)
     std::vector<std::pair<std::string, float>> results;
     while (!minHeap.empty()) {
         results.push_back(minHeap.top());
         minHeap.pop();
     }
-    std::reverse(results.begin(), results.end()); // highest score first
+    std::reverse(results.begin(), results.end());
+
+    if (results.empty()) {
+        std::cerr << "[WARN] No relevant results found for query=\"" << query << "\"\n";
+    } else {
+        std::cerr << "[DEBUG] Retrieved " << results.size() << " results.\n";
+    }
 
     return results;
 }
+
+
 bool VectorStore::loadEmbeddings(const std::string& filepath) {
     try {
         std::ifstream in(filepath, std::ios::binary);
@@ -98,6 +132,11 @@ bool VectorStore::loadEmbeddings(const std::string& filepath) {
     } catch (...) {
         return false;
     }
+if (documents.size() != embeddings.size()) {
+    std::cerr << "[ERROR] Mismatch: documents=" << documents.size() 
+              << ", embeddings=" << embeddings.size() << "\n";
+}
+
 }
 
 
@@ -124,7 +163,11 @@ bool VectorStore::saveEmbeddings(const std::string& filepath) const {
                 out.write(reinterpret_cast<const char*>(embeddings[i].data()), 
                          embeddingSize * sizeof(float));
             }
-            
+            if (documents.size() != embeddings.size()) {
+    std::cerr << "[ERROR] Mismatch: documents=" << documents.size() 
+              << ", embeddings=" << embeddings.size() << "\n";
+}
+
             return true;
         } catch (...) {
             return false;

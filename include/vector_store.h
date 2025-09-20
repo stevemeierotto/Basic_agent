@@ -29,7 +29,7 @@ public:
     std::vector<std::pair<std::string, float>> retrieve(const std::string& query, int topK = 3);
 
 private:
-    static constexpr float SIMILARITY_THRESHOLD = 0.1f;
+    static constexpr float SIMILARITY_THRESHOLD = 0.01f;
 
     std::vector<std::string> documents;
 

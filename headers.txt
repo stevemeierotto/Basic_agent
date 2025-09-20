@@ -34,17 +34,91 @@ public:
     std::string processQuery(const std::string& input);
 
 private:
+    // Add to header
+private:
+    static constexpr size_t DEFAULT_MAX_QUERY_LENGTH = 10000;
+    static constexpr int DEFAULT_RAG_TOP_K = 5;
+    static constexpr int DEFAULT_SCRAPE_RESULTS = 3;
+    
+    size_t maxQueryLength = DEFAULT_MAX_QUERY_LENGTH;
+    bool initialized = false;
+
     Memory& memory;
     RAGPipeline& rag;
     LLMInterface& llm;
     PromptFactory promptFactory;   
     WebScraperTools scraper;
 
+    void ensureInitialized();
+    std::pair<std::string, std::string> parseCommand(const std::string& input);
+    void showHelp();
+    void clearMemory();
+
+    using CommandHandler = std::function<void(const std::string&)>;
+    std::unordered_map<std::string, CommandHandler> commandHandlers;
+    void initializeCommands();
+
+    void handleScrape(const std::string& args);
+    void handleRag(const std::string& args);
+    void handleBackend(const std::string& args);
+
     // helpers
     static std::string trim(const std::string& s);
     static std::string lstripSlash(const std::string& s);
     static std::string toLower(std::string s);
     static bool startsWith(const std::string& s, const std::string& prefix);
+};
+
+
+```
+
+./include/embedding_engine.h:
+```cpp
+#pragma once
+#include <string>
+#include <vector>
+#include <unordered_map>
+
+class EmbeddingEngine {
+public:
+    enum class Method {
+        Simple,
+        TfIdf,
+        WordHash,
+        External
+    };
+
+    EmbeddingEngine(Method method = Method::TfIdf);
+
+    void setMethod(Method method);
+
+    // Create embedding vector for text
+    std::vector<float> embed(const std::string& text);
+
+    // Save/load engine state (method + TF-IDF vocab/stats)
+    bool saveState(const std::string& filepath) const;
+    bool loadState(const std::string& filepath);
+
+private:
+    Method method;
+    static constexpr size_t VOCAB_SIZE = 10000;
+    std::vector<std::string> documents; // tracks all indexed texts
+    // TF-IDF state
+    std::unordered_map<std::string, float> globalTermFreq;
+    std::unordered_map<std::string, size_t> documentFreq;
+
+    // Embedding implementations
+    std::vector<float> embedSimple(const std::string& text);
+    std::vector<float> embedTfIdf(const std::string& text);
+    std::vector<float> embedWordHash(const std::string& text);
+    std::vector<float> embedExternal(const std::string& text);
+
+    // Helpers
+    std::vector<std::string> tokenize(const std::string& text) const;
+    size_t hashToIndex(const std::string& term) const;
+    float calculateIdf(const std::string& term) const;
+    void updateVocabulary(const std::string& text);
+    std::vector<float> normalizeVector(std::vector<float> vec) const;
 };
 
 
@@ -153,7 +227,7 @@ private:
  * Copyright (c) 2025 Steve Meierotto
  * 
  * basic_agent - AI Agent with Memory and RAG Capabilities
- * uses either Ollama lacal models or OpenAI API
+ * Uses either Ollama local models or OpenAI API
  *
  * Licensed under the MIT License
  * See LICENSE file in the project root for full license text
@@ -163,6 +237,8 @@ private:
 #include <json.hpp>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <chrono>
 
 using json = nlohmann::json;
 
@@ -171,18 +247,29 @@ private:
     std::string filepath;
     json data;
 
+    mutable std::mutex mtx;     // protects data and dirty state
+    mutable bool isDirty = false;
+    mutable std::chrono::steady_clock::time_point lastSave;
+    static constexpr auto AUTO_SAVE_INTERVAL = std::chrono::minutes(5);
+
     std::string getDefaultPath() const;
+    void markDirty() const;
+    void saveIfNeeded() const;
+    void saveUnlocked() const;
 
 public:
-    // Construct with optional path; defaults to ~/.code_agent_plugin/memory.json (Linux/macOS)
+    // Constructor / Destructor
     explicit Memory(const std::string& path = "");
+    ~Memory();
 
     // Persistence
-    void load();
-    void save() const;
+    void load();            // loads from disk (overwrites memory)
+    void save() const;      // flushes to disk if dirty
+    void flush() const;     // unconditional save, clears dirty flag
 
     // Conversation
     void addMessage(const std::string& role, const std::string& content);
+    void addMessages(const std::vector<std::pair<std::string, std::string>>& messages);
     std::vector<json> getConversation() const;
     void clear();
 
@@ -194,9 +281,6 @@ public:
     // Debug helpers
     std::string getFilePath() const { return filepath; }
     void printSummaries() const;
-
-    // NOTE: In the future, you could integrate an LLM call here to generate
-    // smarter short/extended summaries automatically instead of truncating.
 };
 
 
@@ -213,27 +297,42 @@ public:
  * Licensed under the MIT License
  * See LICENSE file in the project root for full license text
  */
-
 #pragma once
 #include <string>
 #include "memory.h"
 #include "rag.h"
 
 class PromptFactory {
+public:
+    struct PromptConfig {
+        size_t maxRecentMessages = 5;
+        size_t maxContextLength = 4000;
+        bool includeTimestamps = false;
+        bool includeRoleLabels = true;
+        std::string systemPrompt = "";
+        std::string conversationSeparator = "\n";
+    };
+
 private:
     Memory& memory;
     RAGPipeline& rag;
-    size_t recentMessages;
+    PromptConfig config;
 
 public:
-    PromptFactory(Memory& mem, RAGPipeline& r, size_t lastN = 5);
+    // Overloaded constructors
+    PromptFactory(Memory& mem, RAGPipeline& r);  
+    PromptFactory(Memory& mem, RAGPipeline& r, const PromptConfig& cfg);
 
-    // Build a prompt with memory + recent conversation
+    void setConfig(const PromptConfig& cfg) { config = cfg; }
+    PromptConfig getConfig() const { return config; }
+
     std::string buildConversationPrompt(const std::string& user_input,
                                         bool useExtendedSummary = false);
 
-    // Build a prompt to query RAG for relevant code context
     std::string buildRagQueryPrompt(const std::string& query);
+
+private:
+    std::string truncateToLimit(const std::string& input, size_t maxLen) const;
 };
 
 
@@ -251,9 +350,15 @@ public:
  */
 
 #pragma once
+#include "vector_store.h"
+#include "embedding_engine.h"
+#include "file_handler.h"
+#include <unordered_map>
 #include <string>
 #include <vector>
-#include "../include/vector_store.h"
+#include <memory>
+#include <set>
+#include <shared_mutex>
 
 // Represents a chunk of code (function, class, or global block)
 struct CodeChunk {
@@ -268,40 +373,117 @@ struct CodeChunk {
 // Core RAG pipeline manager
 class RAGPipeline {
 public:
-    RAGPipeline() = default;
-
+    // constructor that owns the engine
+    explicit RAGPipeline(std::unique_ptr<EmbeddingEngine> engine);
+    
     // Initialize RAG pipeline and load any saved index
-    void init(const std::string& indexPath);
-    void init();
-
+    void init(const std::string& indexPath = "");
+    
     std::string query(const std::string& query);
-
+    
     // Index a single source file
     void indexFile(const std::string& filePath);
-
+    
     // Index all source files in a project directory
     void indexProject(const std::string& rootPath);
-
+    
     // Retrieve top-k relevant code chunks
     std::vector<CodeChunk> retrieveRelevant(
         const std::string& query,
         const std::vector<int>& errorLines,
         int topK = 3);
-
+    
     // Save/load the index
     void saveIndex() const;
     void saveIndex(const std::string& dbPath) const;
     void loadIndex();
     void loadIndex(const std::string& dbPath);
-
+    
     // Reset the in-memory store
     void clear();
 
 private:
+    mutable std::shared_mutex chunksMutex;  // protects chunks and codeToChunkIndex
+    // Constants
+    static constexpr size_t MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+    static constexpr size_t MAX_CHUNK_SIZE = 4096; // 4KB chunks
+    static constexpr size_t MAX_CHUNKS = 10000;
+    static constexpr size_t MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
+    
+    inline static const std::set<std::string> SUPPORTED_EXTENSIONS = {
+        ".txt", ".md", ".epub", ".pdf", ".cpp", ".h", ".hpp", ".c"
+    };
+    
+    // Member variables
     std::string indexFilePath;
     std::vector<CodeChunk> chunks; 
-    VectorStore store;
+    std::unique_ptr<EmbeddingEngine> engine; // owns engine
+    VectorStore store;                       // non-owning use of engine
+    std::unordered_map<std::string, size_t> codeToChunkIndex;
+    
+    // Helper functions
+    void addChunkToIndex(CodeChunk&& chunk);
+    std::string limitText(const std::string& text, size_t maxChars);
+    void rebuildInternalStructures();
+    void removeChunksFromPath(const std::string& rootPath);
+    
+    bool isSupportedExtension(const std::string& ext) {
+        return SUPPORTED_EXTENSIONS.find(ext) != SUPPORTED_EXTENSIONS.end();
+    }
+    
+    // Memory management
+    size_t getCurrentMemoryUsage() const;
+    void enforceMemoryLimits();
+    
+    // Chunking strategies
+    std::vector<CodeChunk> createSmartChunks(const std::string& filePath, const std::string& content);
+    std::vector<CodeChunk> chunkByParagraphs(const std::string& filePath, const std::string& content);
+    std::vector<CodeChunk> chunkByFunctions(const std::string& filePath, const std::string& content);
+    std::vector<CodeChunk> chunkBySize(const std::string& filePath, const std::string& content);
 };
+
+```
+
+./include/similarity.h:
+```cpp
+// include/similarity.h
+#ifndef SIMILARITY_H
+#define SIMILARITY_H
+
+#include <vector>
+
+class ISimilarity {
+public:
+    virtual ~ISimilarity() = default;
+    virtual float operator()(const std::vector<float>& a,
+                             const std::vector<float>& b) const = 0;
+};
+
+class CosineSimilarity : public ISimilarity {
+public:
+    float operator()(const std::vector<float>& a,
+                     const std::vector<float>& b) const override;
+};
+
+class EuclideanSimilarity : public ISimilarity {
+public:
+    float operator()(const std::vector<float>& a,
+                     const std::vector<float>& b) const override;
+};
+
+class DotProductSimilarity : public ISimilarity {
+public:
+    float operator()(const std::vector<float>& a,
+                     const std::vector<float>& b) const override;
+};
+
+class JaccardSimilarity : public ISimilarity {
+public:
+    float operator()(const std::vector<float>& a,
+                     const std::vector<float>& b) const override;
+};
+
+#endif // SIMILARITY_H
 
 
 ```
@@ -335,37 +517,45 @@ public:
 
 ./include/vector_store.h:
 ```cpp
-#ifndef VECTOR_STORE_H
-#define VECTOR_STORE_H
+#pragma once
+#include "similarity.h"
+#include "embedding_engine.h"
 
 #include <string>
 #include <vector>
-#include <utility> // for std::pair
+#include <utility>
+#include <memory>
 
 class VectorStore {
 public:
-    // Add a document and its vector embedding
-    void addDocument(const std::string& text);
+    // non-owning pointer: RAGPipeline owns the engine via unique_ptr
+    explicit VectorStore(EmbeddingEngine* engine)
+        : embeddingEngine(engine) {}
 
-    // Clear in-memory store so it can be rebuilt from chunks
+    void addDocument(const std::string& text);
+    void addDocuments(const std::vector<std::string>& texts);
+
+    std::vector<std::vector<float>> embeddings;
+    bool loadEmbeddings(const std::string& path);
+    bool saveEmbeddings(const std::string& filepath) const;
+    void enforceMemoryLimit(size_t maxMemoryBytes);
+    size_t getMemoryUsage() const;
+
     void clear();
 
-    // Retrieve topK most similar documents for a query
+    void setSimilarity(std::unique_ptr<ISimilarity> sim);
+
     std::vector<std::pair<std::string, float>> retrieve(const std::string& query, int topK = 3);
 
 private:
-    // Stored raw text + embeddings
+    static constexpr float SIMILARITY_THRESHOLD = 0.1f;
+
     std::vector<std::string> documents;
-    std::vector<std::vector<float>> embeddings;
 
-    // Create embedding for a text (placeholder for now)
-    std::vector<float> embed(const std::string& text);
-
-    // Similarity function
-    float cosineSimilarity(const std::vector<float>& a, const std::vector<float>& b);
+    EmbeddingEngine* embeddingEngine;  // non-owning raw pointer
+    std::unique_ptr<ISimilarity> similarity =
+        std::make_unique<CosineSimilarity>();
 };
-
-#endif // VECTOR_STORE_H
 
 
 ```

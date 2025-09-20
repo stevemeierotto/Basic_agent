@@ -83,12 +83,10 @@ void Memory::save() const {
 // Private helpers
 // ------------------------
 void Memory::markDirty() const {
-    std::lock_guard<std::mutex> lock(mtx);
     isDirty = true;
 }
 
 void Memory::saveIfNeeded() const {
-    std::lock_guard<std::mutex> lock(mtx);
     auto now = std::chrono::steady_clock::now();
     if (isDirty && (now - lastSave) > AUTO_SAVE_INTERVAL) {
         saveUnlocked();

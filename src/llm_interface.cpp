@@ -6,10 +6,19 @@
 
 using json = nlohmann::json;
 
-LLMInterface::LLMInterface(LLMBackend b) : backend(b) {
+
+LLMInterface::LLMInterface(LLMBackend b)
+    : backend(b), curl(nullptr), headers(nullptr) 
+{
     if (backend == LLMBackend::Ollama) {
         curl = curl_easy_init();
+        if (!curl) {
+            throw std::runtime_error("Failed to initialize CURL handle");
+        }
+
+        headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
+
         curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/generate");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
@@ -17,12 +26,40 @@ LLMInterface::LLMInterface(LLMBackend b) : backend(b) {
 }
 
 LLMInterface::~LLMInterface() {
-    if (curl) curl_easy_cleanup(curl);
-    if (headers) curl_slist_free_all(headers);
+    if (headers) {
+        curl_slist_free_all(headers);
+        headers = nullptr;
+    }
+    if (curl) {
+        curl_easy_cleanup(curl);
+        curl = nullptr;
+    }
 }
 
 void LLMInterface::setBackend(LLMBackend b) {
     backend = b;
+
+    // Clean up old handles if switching backends
+    if (curl) {
+        curl_easy_cleanup(curl);
+        curl = nullptr;
+    }
+    if (headers) {
+        curl_slist_free_all(headers);
+        headers = nullptr;
+    }
+
+    if (backend == LLMBackend::Ollama) {
+        curl = curl_easy_init();
+        if (!curl) {
+            throw std::runtime_error("Failed to re-initialize CURL handle");
+        }
+        headers = curl_slist_append(nullptr, "Content-Type: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/generate");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    }
 }
 
 std::string LLMInterface::query(const std::string& prompt) {
@@ -36,37 +73,54 @@ std::string LLMInterface::query(const std::string& prompt) {
 // ---- Ollama backend ----
 
 std::string LLMInterface::askOllama(const std::string& prompt) {
-    if (!curl) return "CURL not initialized.";
-
     std::string readBuffer;
 
-    try {
-        json payload;
-        payload["model"] = "llama3.2:latest";
-        payload["prompt"] = prompt;
-        payload["stream"] = false;
+    if (!curl) return "CURL not initialized.";
 
-        std::string jsonStr = payload.dump();
+    json payload;
+    payload["model"] = "qwen3:0.6b";
+    payload["prompt"] = prompt;
+    payload["stream"] = false;
 
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+    std::string jsonStr = payload.dump();   // keep alive!
 
-        CURLcode res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-            return std::string("CURL error: ") + curl_easy_strerror(res);
-        }
+    // Reset headers each call
+    struct curl_slist* localHeaders = nullptr;
+    localHeaders = curl_slist_append(localHeaders, "Content-Type: application/json");
 
-        json j = json::parse(readBuffer);
-        if (j.contains("response")) return j["response"].get<std::string>();
+    curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/generate");
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, localHeaders);
 
-    } catch (const std::exception& e) {
-        return std::string("Exception: ") + e.what();
-    } catch (...) {
-        return "Unknown error parsing Ollama response.";
+    // ✅ Use the *stable* string
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, jsonStr.size());
+
+    // ✅ Hook up callback
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+
+    CURLcode res = curl_easy_perform(curl);
+
+    curl_slist_free_all(localHeaders);
+
+    if (res != CURLE_OK) {
+        return std::string("CURL error: ") + curl_easy_strerror(res);
     }
 
-    return "No response from Ollama.";
+    try {
+        auto j = json::parse(readBuffer);
+        if (j.contains("response")) {
+            return j["response"].get<std::string>();
+        }
+    } catch (const std::exception& e) {
+        return std::string("JSON parse error: ") + e.what() + "\nRaw: " + readBuffer;
+    }
+
+    return "No response from Ollama.\nRaw: " + readBuffer;
 }
+
+
 // ---- OpenAI backend ----
 std::string LLMInterface::askOpenAI(const std::string& prompt) {
     CURL* curl = curl_easy_init();

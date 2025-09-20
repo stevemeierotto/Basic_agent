@@ -155,7 +155,6 @@ void RAGPipeline::indexProject(const std::string& rootPath) {
     std::cout << "[RAG] Indexed " << fs::absolute(rootPath) 
               << " - Success: " << successCount << ", Errors: " << errorCount << "\n";
 }
-
 // --- Query using VectorStore ---
 std::string RAGPipeline::query(const std::string& query) {
     auto results = store.retrieve(query, 5);
@@ -209,19 +208,47 @@ void RAGPipeline::indexFile(const std::string& filePath) {
     ss << in.rdbuf();
     std::string content = ss.str();
 
-    CodeChunk chunk;
-    chunk.fileName = fs::absolute(filePath).lexically_normal().string();
-    chunk.symbolName = "";
-    chunk.startLine = 1;
-    chunk.endLine = 0;
-    chunk.code = content;
-    // embedding left empty until you have a real embedder
-    chunk.embedding.clear();
+    // Skip empty files
+    if (content.empty()) {
+        std::cerr << "[RAG] File is empty, skipping: " << filePath << "\n";
+        return;
+    }
 
-    // Add to in-memory list and to vector store immediately
-    chunks.push_back(chunk);
-    store.addDocument(chunk.code);
+    // Chunk the file intelligently
+    auto chunksVec = createSmartChunks(filePath, content);
+
+    if (chunksVec.empty()) {
+        // fallback: add the whole file as a single chunk
+        CodeChunk fallbackChunk;
+        fallbackChunk.fileName = fs::absolute(filePath).lexically_normal().string();
+        fallbackChunk.symbolName = "";
+        fallbackChunk.startLine = 1;
+        fallbackChunk.endLine = 0;
+        fallbackChunk.code = content;
+        fallbackChunk.embedding = engine->embed(content);
+
+        addChunkToIndex(std::move(fallbackChunk));
+        store.addDocument(content);
+        std::cerr << "[DEBUG] Added fallback chunk for file: " << filePath << "\n";
+        return;
+    }
+
+    // Process each chunk
+    for (auto& chunk : chunksVec) {
+        // Create embedding
+        chunk.embedding = engine->embed(chunk.code);
+
+        // Add to RAG in-memory index
+        addChunkToIndex(std::move(chunk));
+
+        // Also add text to VectorStore
+        store.addDocument(chunksVec.back().code);
+    }
+
+    std::cerr << "[DEBUG] Indexed file with " << chunksVec.size() 
+              << " chunk(s): " << filePath << "\n";
 }
+
 // --- Retrieve top-k relevant CodeChunks ---
 std::vector<CodeChunk> RAGPipeline::retrieveRelevant(
     const std::string& query,
@@ -435,6 +462,12 @@ std::vector<CodeChunk> RAGPipeline::createSmartChunks(const std::string& filePat
 
 // --- Add single chunk safely ---
 void RAGPipeline::addChunkToIndex(CodeChunk&& chunk) {
+        std::cerr << "[DEBUG] Adding chunk: file=" << chunk.fileName
+              << ", symbol=" << chunk.symbolName
+              << ", start=" << chunk.startLine
+              << ", end=" << chunk.endLine
+              << ", code size=" << chunk.code.size()
+              << ", embedding size=" << chunk.embedding.size() << "\n";
     std::unique_lock lock(chunksMutex);
     size_t index = chunks.size();
     chunks.push_back(std::move(chunk));

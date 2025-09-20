@@ -39,7 +39,7 @@ std::string CommandProcessor::processQuery(const std::string& input) {
     } else {
         finalPrompt = convPrompt;
     }
-
+    std::cout << "FINALPROMPT!!!!! " << finalPrompt << "\n";
     std::cout << "[ProcessQuery] Prompt created with RAG context, waiting for response.\n";
 
     // 3. Query the LLM
