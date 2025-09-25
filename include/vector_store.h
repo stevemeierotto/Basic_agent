@@ -35,6 +35,6 @@ private:
 
     EmbeddingEngine* embeddingEngine;  // non-owning raw pointer
     std::unique_ptr<ISimilarity> similarity =
-        std::make_unique<CosineSimilarity>();
+        std::make_unique<DotProductSimilarity>();
 };
 

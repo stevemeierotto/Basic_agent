@@ -17,18 +17,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Include directories
 include_directories(include)
 
-# Collect all source files
-file(GLOB SOURCES
+# Collect all source files recursively from src/ and include main.cpp
+file(GLOB_RECURSE SOURCES
     src/*.cpp
     main.cpp
-    # plugin.cpp   # Uncomment if plugin.cpp should be part of basic_agent, otherwise leave it out
+    # plugin.cpp   # Uncomment if plugin.cpp should be part of basic_agent
 )
 
 # Find libcurl
 find_package(CURL REQUIRED)
 
-# Create the executable (note target name is basic_agent)
+# Create the executable
 add_executable(basic_agent ${SOURCES})
 
-# Link with curl (target name is basic_agent)
+# Link with curl
 target_link_libraries(basic_agent PRIVATE CURL::libcurl)
+

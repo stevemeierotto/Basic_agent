@@ -1,6 +1,7 @@
-#include "../include/command_processor.h"
-#include "../include/file_handler.h"
-#include "../include/webscraperTools.h"
+#include "command_processor.h"
+#include "file_handler.h"
+#include "webscraperTools.h"
+#include "index_manager.h"
 
 #include <algorithm>
 #include <cctype>
@@ -9,15 +10,23 @@
 #include <regex>
 #include <filesystem>
 #include <fstream>
-#include <string>
 
 namespace fs = std::filesystem;
 
-
-CommandProcessor::CommandProcessor(Memory& mem, RAGPipeline& rag, LLMInterface& llm)
-    : memory(mem), rag(rag), llm(llm), promptFactory(mem, rag), scraper() 
+CommandProcessor::CommandProcessor(Memory& mem, 
+                                   RAGPipeline& ragPipeline, 
+                                   LLMInterface& llmInterface,
+                                   Config* cfg)  // added config pointer
+    : memory(mem),
+      rag(ragPipeline),
+      llm(llmInterface),
+      config(cfg),                  // store config
+      promptFactory(mem, ragPipeline),
+      scraper(),
+      indexManager(ragPipeline.getIndexManager()) // pointer getter
 {
     initializeCommands();
+    
 }
 
 
@@ -117,6 +126,22 @@ void CommandProcessor::runLoop() {
     }
 }
 
+void CommandProcessor::showConfig() const {
+    if(config) config->printConfig();
+    else std::cout << "No config connected.\n";
+}
+
+void CommandProcessor::setConfig(const std::string& key, const std::string& value) {
+    if(config) {
+        if(config->set(key, value))
+            std::cout << "Updated " << key << " to " << value << "\n";
+        else
+            std::cout << "Failed to update key: " << key << "\n";
+    } else {
+        std::cout << "No config connected.\n";
+    }
+}
+
 void CommandProcessor::handleCommand(const std::string& input) {
     if (!startsWith(input, "/")) {
         std::string response = processQuery(input);
@@ -126,7 +151,32 @@ void CommandProcessor::handleCommand(const std::string& input) {
     }
 
     auto [cmd, args] = parseCommand(input);
-    
+
+    // Handle Config commands first
+    if (cmd == "show" && args == "config") {
+        if (config) config->printConfig();
+        else std::cout << "No config connected.\n";
+        return;
+    }
+
+    if (cmd == "set") {
+        std::istringstream iss(args);
+        std::string key, value;
+        iss >> key >> value;
+        if (key.empty() || value.empty()) {
+            std::cout << "Usage: /set <key> <value>\n";
+        } else if (config) {
+            if(config->set(key, value))
+                std::cout << "Updated " << key << " to " << value << "\n";
+            else
+                std::cout << "Failed to update key: " << key << "\n";
+        } else {
+            std::cout << "No config connected.\n";
+        }
+        return;
+    }
+
+    // Fallback to existing command handlers
     auto it = commandHandlers.find(cmd);
     if (it != commandHandlers.end()) {
         try {
@@ -138,6 +188,7 @@ void CommandProcessor::handleCommand(const std::string& input) {
         std::cout << "Unknown command '/" << cmd << "'. Try /help.\n";
     }
 }
+
 
 std::pair<std::string, std::string> CommandProcessor::parseCommand(const std::string& input) {
     std::string stripped = input;
@@ -172,10 +223,11 @@ void CommandProcessor::clearMemory() {
 
 void CommandProcessor::ensureInitialized() {
     if (!initialized) {
-        rag.init();
         FileHandler fh;
-        rag.indexProject(fh.getRagDirectory());
-        rag.saveIndex();
+        indexManager->init(fh.getRagDirectory());
+        
+        indexManager->indexProject(fh.getRagDirectory());
+        indexManager->saveIndex();
         initialized = true;
     }
 }

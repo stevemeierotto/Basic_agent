@@ -15,22 +15,24 @@
 #include "prompt_factory.h"
 #include "llm_interface.h"
 #include "webscraperTools.h"
+#include "index_manager.h"
+#include "config.h"
 
 class CommandProcessor {
 public:
-    CommandProcessor(Memory& mem, RAGPipeline& rag, LLMInterface& llm);
+    CommandProcessor(Memory& mem, 
+                                   RAGPipeline& ragPipeline, 
+                                   LLMInterface& llmInterface,
+                                   Config* cfg);
 
     // Starts a REPL loop
     void runLoop();
 
-    // Handle a single line (used by runLoop, but also handy for tests)
     void handleCommand(const std::string& input);
 
     // NEW: Send query through Memory + RAG + LLM
     std::string processQuery(const std::string& input);
 
-private:
-    // Add to header
 private:
     static constexpr size_t DEFAULT_MAX_QUERY_LENGTH = 10000;
     static constexpr int DEFAULT_RAG_TOP_K = 5;
@@ -44,7 +46,11 @@ private:
     LLMInterface& llm;
     PromptFactory promptFactory;   
     WebScraperTools scraper;
+    IndexManager * indexManager;
+    Config* config;
 
+    void showConfig() const;
+    void setConfig(const std::string& key, const std::string& value);
     void ensureInitialized();
     std::pair<std::string, std::string> parseCommand(const std::string& input);
     void showHelp();

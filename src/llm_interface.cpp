@@ -7,8 +7,9 @@
 using json = nlohmann::json;
 
 
-LLMInterface::LLMInterface(LLMBackend b)
-    : backend(b), curl(nullptr), headers(nullptr) 
+// Constructor
+LLMInterface::LLMInterface(LLMBackend b, Config* cfg)
+    : backend(b), curl(nullptr), headers(nullptr), config(cfg) // store Config pointer
 {
     if (backend == LLMBackend::Ollama) {
         curl = curl_easy_init();
@@ -24,6 +25,7 @@ LLMInterface::LLMInterface(LLMBackend b)
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     }
 }
+
 
 LLMInterface::~LLMInterface() {
     if (headers) {
@@ -61,14 +63,20 @@ void LLMInterface::setBackend(LLMBackend b) {
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     }
 }
-
+// query method
 std::string LLMInterface::query(const std::string& prompt) {
+    // Read dynamic parameters from Config if available
+    double temperature = config ? config->temperature : 0.7;
+    double topP       = config ? config->top_p : 1.0;
+    int maxTokens     = config ? config->max_tokens : 512;
+
     if (backend == LLMBackend::Ollama) {
         return askOllama(prompt);
     } else {
         return askOpenAI(prompt);
     }
 }
+
 
 // ---- Ollama backend ----
 
@@ -77,10 +85,20 @@ std::string LLMInterface::askOllama(const std::string& prompt) {
 
     if (!curl) return "CURL not initialized.";
 
+    // Pull dynamic parameters from Config if available
+    double temperature = config ? config->temperature : 0.7;
+    double topP       = config ? config->top_p : 1.0;
+    int maxTokens     = config ? config->max_tokens : 512;
+
     json payload;
     payload["model"] = "qwen3:0.6b";
     payload["prompt"] = prompt;
     payload["stream"] = false;
+
+    // Inject LLM control parameters
+    payload["temperature"] = temperature;
+    payload["top_p"] = topP;
+    payload["max_tokens"] = maxTokens;
 
     std::string jsonStr = payload.dump();   // keep alive!
 
@@ -92,7 +110,7 @@ std::string LLMInterface::askOllama(const std::string& prompt) {
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, localHeaders);
 
-    // ✅ Use the *stable* string
+    // ✅ Use the stable string
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, jsonStr.size());
 
@@ -101,7 +119,6 @@ std::string LLMInterface::askOllama(const std::string& prompt) {
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
 
     CURLcode res = curl_easy_perform(curl);
-
     curl_slist_free_all(localHeaders);
 
     if (res != CURLE_OK) {

@@ -11,6 +11,7 @@
 #pragma once
 #include <string>
 #include <curl/curl.h>
+#include "config.h"
 
 enum class LLMBackend {
     Ollama,
@@ -19,8 +20,12 @@ enum class LLMBackend {
 
 class LLMInterface {
 public:
-    LLMInterface(LLMBackend backend = LLMBackend::Ollama);
+    //LLMInterface(LLMBackend backend = LLMBackend::Ollama);
+
+
+     LLMInterface(LLMBackend backend = LLMBackend::Ollama, Config* cfg = nullptr);
     ~LLMInterface();
+
     // Internal helpers
     std::string askOllama(const std::string& prompt);
     std::string askOpenAI(const std::string& prompt);
@@ -34,6 +39,7 @@ private:
     CURL* curl = nullptr;
     struct curl_slist* headers = nullptr;
     LLMBackend backend;
+    Config* config;
 
     static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
         ((std::string*)userp)->append((char*)contents, size * nmemb);
