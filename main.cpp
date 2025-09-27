@@ -8,26 +8,30 @@
 
 #include <iostream>
 int main() {
-    Memory memory;
-    LLMInterface llm;
+    // 1. Load config from JSON
     Config agentConfig;
     agentConfig.loadFromJson("config.json");
 
+    // 2. Load .env file early so environment is set for all components
     if (!EnvLoader::loadEnvFile("../.env")) {
         std::cerr << "Warning: .env file not found. Using system environment variables.\n";
     }
 
-    auto engine = std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf);
+    // 3. Core objects
+    Memory memory;
+    LLMInterface llm(LLMBackend::Ollama, &agentConfig);
 
-    // Create IndexManager with a non-owning pointer to engine
+    // 4. Embedding engine and index manager
+    auto engine = std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf);
     IndexManager indexManager(engine.get());
 
-    // Pass both engine (ownership) and indexManager pointer to RAGPipeline
+    // 5. RAG pipeline with ownership of engine
     RAGPipeline rag(std::move(engine), &indexManager, &agentConfig);
 
-    // Now use rag and indexManager as needed
-    //CommandProcessor cp(memory, rag, llm);
+    // 6. Command processor
     CommandProcessor cp(memory, rag, llm, &agentConfig);
     cp.runLoop();
+
     return 0;
 }
+

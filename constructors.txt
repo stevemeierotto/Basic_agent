@@ -1,0 +1,149 @@
+class LLMInterface {
+public:
+     LLMInterface(LLMBackend backend = LLMBackend::Ollama, Config* cfg = nullptr);
+    ~LLMInterface();
+
+LLMInterface::LLMInterface(LLMBackend b, Config* cfg)
+    : backend(b),
+      curl(nullptr),
+      headers(nullptr),
+      config(cfg),
+      selectedModel("qwen3:0.6b") // default model
+{
+    if (backend == LLMBackend::Ollama) {
+        curl = curl_easy_init();
+        if (!curl) throw std::runtime_error("Failed to initialize CURL handle");
+
+        // Only set static headers once
+        headers = curl_slist_append(nullptr, "Content-Type: application/json");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        // Only set static write callback once
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    }
+}
+
+LLMInterface::~LLMInterface() {
+    if (headers) curl_slist_free_all(headers);
+    if (curl) curl_easy_cleanup(curl);
+    headers = nullptr;
+    curl = nullptr;
+}
+
+class CommandProcessor {
+public:
+    CommandProcessor(Memory& mem, 
+                                   RAGPipeline& ragPipeline, 
+                                   LLMInterface& llmInterface,
+                                   Config* cfg);
+
+CommandProcessor::CommandProcessor(Memory& mem, 
+                                   RAGPipeline& ragPipeline, 
+                                   LLMInterface& llmInterface,
+                                   Config* cfg)  // added config pointer
+    : memory(mem),
+      rag(ragPipeline),
+      llm(llmInterface),
+      config(cfg),                  // store config
+      promptFactory(mem, ragPipeline),
+      scraper(),
+      indexManager(ragPipeline.getIndexManager()) // pointer getter
+{
+    initializeCommands();
+    
+}
+
+
+class VectorStore {
+public:
+    // non-owning pointer: RAGPipeline owns the engine via unique_ptr
+    explicit VectorStore(EmbeddingEngine* engine)
+        : embeddingEngine(engine) {}
+
+void VectorStore::setSimilarity(std::unique_ptr<ISimilarity> sim) {
+    if(sim) similarity = std::move(sim);
+}
+
+class Config {
+public:
+    Config();
+
+Config::Config()
+    : temperature(0.7),
+      top_p(1.0),
+      max_tokens(512),
+      max_results(5),            // default topK for RAG
+      similarity_threshold(0.7)  // optional
+{}
+
+class IndexManager {
+public:
+        explicit IndexManager(EmbeddingEngine* eng)
+        : engine(eng), store(eng) {}
+
+class EmbeddingEngine {
+public:
+    enum class Method {
+        Simple,
+        TfIdf,
+        WordHash,
+        External
+    };
+
+    EmbeddingEngine(Method method = Method::TfIdf);
+
+EmbeddingEngine::EmbeddingEngine(Method method) : method(method) {}
+
+class FileHandler {
+public:
+    FileHandler() = default;
+clas Memory{
+    public:
+    // Constructor / Destructor
+    explicit Memory(const std::string& path = "");
+    ~Memory();
+
+Memory::Memory(const std::string& path) {
+    if (!path.empty()) {
+        filepath = path;
+    } else {
+        FileHandler fh;
+        filepath = fh.getMemoryPath();
+    }
+
+    // Create parent directories if needed
+    fs::path parent = fs::path(filepath).parent_path();
+    if (!parent.empty() && !fs::exists(parent)) {
+        std::error_code ec;
+        fs::create_directories(parent, ec);
+        if (ec) {
+            std::cerr << "[Memory] Failed to create directory: " << parent
+                      << " (" << ec.message() << ")\n";
+        }
+    }
+
+    lastSave = std::chrono::steady_clock::now();
+    load();
+}
+
+class PromptFactory{
+    public:
+    // Overloaded constructors
+    PromptFactory(Memory& mem, RAGPipeline& r);  
+    PromptFactory(Memory& mem, RAGPipeline& r, const PromptConfig& cfg);
+
+PromptFactory::PromptFactory(Memory& mem, RAGPipeline& r)
+    : PromptFactory(mem, r, PromptConfig()) {}
+
+// Constructor with explicit config
+PromptFactory::PromptFactory(Memory& mem, RAGPipeline& r, const PromptConfig& cfg)
+    : memory(mem), rag(r), config(cfg) {}
+
+class RAGPipeline {
+public:
+    explicit RAGPipeline(std::unique_ptr<EmbeddingEngine> eng, IndexManager* idxMgr, Config* cfg);
+
+RAGPipeline::RAGPipeline(std::unique_ptr<EmbeddingEngine> eng, IndexManager* idxMgr, Config* cfg)
+    : engine(std::move(eng)), indexManager(idxMgr), config(cfg) {}
+
+

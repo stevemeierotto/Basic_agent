@@ -12,7 +12,7 @@
 class IndexManager {
 public:
         explicit IndexManager(EmbeddingEngine* eng)
-        : engine(eng), store(eng) {}
+        : store(eng) ,engine(eng){}
 
     void init(const std::string& indexPath);
 
@@ -34,6 +34,10 @@ public:
     void loadIndex(const std::string& dbPath);
 
     void clear();
+    VectorStore store;
+    std::vector<std::pair<std::string,float>> retrieveChunks(const std::string& query, int topK) {
+        return store.retrieve(query, topK);
+    }
 private:
         // Constants
     static constexpr size_t MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -53,7 +57,6 @@ private:
 
     std::vector<CodeChunk> chunks;
     EmbeddingEngine* engine;
-    VectorStore store;
     std::shared_mutex chunksMutex;
 
     void addChunk(CodeChunk&& chunk);

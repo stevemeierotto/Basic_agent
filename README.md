@@ -1,7 +1,8 @@
 # basic_agent
 
-**basic_agent** is an AI-powered agent written in C++ that supports memory, retrieval-augmented generation (RAG), embeddings, and modular toolchains.  
-It is designed as a foundation for building intelligent assistants that can reason, recall, and take action through pluggable tools and workflows.
+**basic_agent** is an AI-powered agent written in **C++20** that supports memory, retrieval-augmented generation (RAG), embeddings, and modular toolchains.  
+It is designed as a foundation for building intelligent assistants that can reason, recall, and take action through pluggable tools and workflows.  
+⚠️ **Note:** Some features are experimental and may not work yet — for example, the web scraping tool can cause faults in certain environments.
 
 ---
 
@@ -14,52 +15,73 @@ It is designed as a foundation for building intelligent assistants that can reas
 
 - **Retrieval-Augmented Generation (RAG)**
   - Embedding-based search across documents and code
-  - Flexible backends (local vector store, external DBs in the future)
+  - Pluggable similarity backends (cosine, dot-product, etc.)
+  - Flexible design for swapping in external vector DBs in the future
 
-- **Toolchain & Workflows**
+- **LLM Integration**
+  - `LLMInterface` abstraction layer
+  - Configurable backend (default: Ollama; supports OpenAI)
+  - Pulls API keys from `.env` or system environment
+  - Uses libcurl for HTTP-based backends
+
+- **Toolchain & Tools**
   - Modular tools: web search, summarization, command execution
-  - Extensible workflows (decision trees/roadmaps for solving tasks)
-  - Supports chaining tools together (e.g., Search → Summarize → Store in memory)
+  - Tools can be chained (e.g., Search → Summarize → Store in memory)
+  - Web scraping helper (experimental — see Known Issues)
 
 - **Embeddings**
-  - Local embedding engine for C++ code and text
-  - Cosine similarity–based vector retrieval
+  - Local embedding engine (`TfIdf`, `WordHash`, `Simple`, `External`)
+  - Vector store with pluggable similarity metrics
+  - Configurable thresholds and limits
 
 - **File Handling**
   - Handles text (`.txt`), markdown (`.md`), JSON, and project source code
-  - Extensible to support PDFs, EPUBs, and more
+  - Extensible to support PDFs, EPUBs, and other formats
 
-- **Configurable Environment**
-  - `.env` file support for API keys (OpenAI, Google CSE, etc.)
-  - CMake-based build system
+- **Config & Environment**
+  - `.env` loader for API keys and secrets (EnvLoader)
+  - `Config` object for runtime parameters: temperature, top_p, max_tokens, similarity threshold, verbosity
+  - CMake-based build system (C++20)
 
 ---
 
 ## 📂 Project Structure
 
-```
+~~~text
 basic_agent/
 ├── CMakeLists.txt         # CMake build configuration
 ├── include/               # Header files
 │   ├── command_processor.h
+│   ├── config.h
 │   ├── embedding_engine.h
+│   ├── env_loader.h
+│   ├── llm_interface.h
 │   ├── memory.h
+│   ├── prompt_factory.h
 │   ├── rag.h
-│   ├── tools.h
+│   ├── index_manager.h
+│   ├── webscraperTools.h
 │   └── vector_store.h
 ├── src/                   # Source code
 │   ├── command_processor.cpp
+│   ├── config.cpp
 │   ├── embedding_engine.cpp
+│   ├── env_loader.cpp
+│   ├── llm_interface.cpp
 │   ├── main.cpp
 │   ├── memory.cpp
+│   ├── prompt_factory.cpp
 │   ├── rag.cpp
-│   ├── tools.cpp
+│   ├── index_manager.cpp
+│   ├── webscraperTools.cpp
 │   └── vector_store.cpp
 ├── agent_workspace/       # Runtime workspace
 │   ├── memory.json        # Persistent agent memory
 │   └── rag_index.json     # Vector store index
+├── config.json            # Runtime configuration
+├── .env.example           # Example env (API keys - DO NOT COMMIT real keys)
 └── README.md              # Project documentation
-```
+~~~
 
 ---
 
@@ -67,14 +89,16 @@ basic_agent/
 
 ### Prerequisites
 
-- C++17 or later
-- CMake 3.15+
+- **C++20** (required)
+- CMake 3.15+ (3.16+ recommended)
 - A modern compiler (GCC, Clang, MSVC)
-- (Optional) API keys for web search or external embeddings, stored in `.env`
+- `nlohmann/json` (header-only)
+- libcurl (for HTTP/LLM backends)
+- (Optional) API keys for OpenAI / Google CSE stored in `.env`
 
 ### Build Steps
 
-```bash
+~~~bash
 # Clone the repository
 git clone https://github.com/yourusername/basic_agent.git
 cd basic_agent
@@ -82,104 +106,162 @@ cd basic_agent
 # Create build directory
 mkdir build && cd build
 
-# Run CMake
-cmake ..
+# Configure (explicitly request C++20 if needed)
+cmake -DCMAKE_CXX_STANDARD=20 ..
 
 # Build
 make -j4
-```
+~~~
+
+> Alternatively set `set(CMAKE_CXX_STANDARD 20)` in the top-level `CMakeLists.txt`.
 
 ---
 
 ## 🚀 Usage
 
-```bash
+~~~bash
+# Run the built agent
 ./basic_agent
-```
+~~~
 
-On startup, the agent will:
+On startup the agent will:
 
-1. Load persistent memory (`agent_workspace/memory.json`)
-2. Initialize RAG vector index (`agent_workspace/rag_index.json`)
-3. Be ready for input commands
+1. Load runtime configuration (`config.json`)
+2. Load `.env` for API keys (if present)
+3. Initialize persistent memory (`agent_workspace/memory.json`)
+4. Initialize RAG index (`agent_workspace/rag_index.json`)
+5. Launch an interactive command loop (see Example Commands below)
 
 ---
 
 ## 🛠️ Tools & Workflows
 
-The agent supports modular tools that can be chained into workflows:
+The agent is designed around a small set of modular tools which can be combined:
 
-- **Web Search Tool**
-  - Queries external search APIs
-  - Extracts and summarizes results
+- **Web Search Tool (experimental)**
+  - Uses `WebScraperTools` to query and fetch web content
+  - Extracts and summarizes search results
+  - ⚠️ Experimental: web scraping has caused faults in some runs; see Known Issues
 
 - **Summarization Tool**
-  - Condenses long text into key insights
-  - Stores summaries in memory
+  - Condenses long web pages or documents into short summaries
+  - Summaries can be stored into memory for later recall
 
 - **Command Execution Tool**
-  - Runs shell commands safely
-  - Returns outputs for further processing
+  - Runs shell commands in a controlled way and returns outputs for processing
 
 ### Example Workflow
 
-```
+~~~text
 User: "Find me info on vector databases"
 Agent:
   1. Uses WebSearchTool with query
-  2. Runs SummarizationTool on results
-  3. Stores summary into memory
-  4. Returns concise answer
-```
+  2. Summarizes top results with SummarizationTool
+  3. Stores condensed summary into Memory
+  4. Returns short, actionable answer to the user
+~~~
 
 ---
 
 ## 📦 Memory & RAG
 
 - **Memory (`memory.json`)**
-  - Stores past conversations and important data
-  - Structured for retrieval and context injection
+  - Stores past conversations, summaries, and key facts
+  - Used by PromptFactory to build context-aware prompts
 
 - **RAG Index (`rag_index.json`)**
-  - Stores vector embeddings of text/code
-  - Enables similarity-based search
-  - Powered by **cosine similarity**
+  - Stores embeddings of text and code
+  - VectorStore and IndexManager provide chunking, saving, and retrieval
+  - Retrieval returns top-k relevant `CodeChunk`s for composing prompts
 
 ---
 
 ## 🔧 Configuration
 
-Environment variables are loaded from `.env`:
+### `config.json` (example keys)
 
-```
-OPENAI_API_KEY=your_api_key_here
-GOOGLE_CSE_ID=your_cse_id_here
-GOOGLE_API_KEY=your_google_api_key_here
-```
+~~~json
+{
+  "temperature": 0.7,
+  "top_p": 1.0,
+  "max_tokens": 512,
+  "max_results": 5,
+  "similarity_threshold": 0.7,
+  "verbosity": 1,
+  "allow_web": true,
+  "memory_limit_mb": 256,
+  "disk_quota_mb": 512
+}
+~~~
+
+### `.env` (example)
+
+~~~env
+OPENAI_API_KEY=sk-xxxx...
+GOOGLE_CSE_ID=your_cse_id
+GOOGLE_API_KEY=your_google_api_key
+~~~
+
+- Place a `.env` in the repo root (or parent) before running to populate environment variables via `EnvLoader`.
+- If `.env` is missing, the process will fall back to system environment variables.
+
+---
+
+## ⚠️ Known Issues & Experimental Parts
+
+> Please treat these as **work-in-progress**. If you rely on the agent for important tasks, test carefully.
+
+- **Web scraping/search (WebScraperTools)**  
+  - Experimental and may crash or throw parsing errors in certain network/content edge cases.  
+  - If scraping causes faults, disable web access by setting `"allow_web": false` in `config.json` or avoid the scrape commands.
+  - Debugging tips: enable higher verbosity (`"verbosity": 2`) and inspect `src/webscraperTools.cpp` for parsing error handling.
+
+- **External API integrations (YouTube, Reddit, News)**  
+  - Starter implementations exist but require API keys and more robust error handling.
+
+- **Embedding backends**  
+  - TF-IDF is the default local implementation — external/backed models are planned but may require additional configuration.
+
+- **Platform quirks**  
+  - `.env` loading uses `setenv` on POSIX and `_putenv_s` on Windows. Behavior may vary with shells/CI.
+
+If you encounter a bug, please open an issue with:
+- Steps to reproduce
+- `config.json` (redact secrets)
+- Any stack trace or logs (increase verbosity if needed)
 
 ---
 
 ## 🧩 Roadmap
 
 - [x] Persistent memory
-- [x] RAG embeddings with cosine similarity
-- [x] Toolchain (web search, summarize, execute)
-- [ ] PDF/EPUB ingestion
-- [ ] Vector database backend (e.g., SQLite + FAISS, Pinecone)
-- [ ] Advanced workflows (decision trees, planning)
+- [x] RAG embeddings with pluggable similarity
+- [x] Toolchain: web search, summarization, command execution (web scraping experimental)
+- [x] `.env` loader for API keys
+- [x] `Config` object for runtime parameters
+- [x] `LLMInterface` abstraction for multiple LLM backends
+- [ ] PDF / EPUB ingestion
+- [ ] Vector DB backend (SQLite + FAISS / Pinecone)
+- [ ] Advanced multi-step planning & orchestration
 - [ ] Multi-agent collaboration
+- [ ] Hardened, stable scraping tool
 
 ---
 
 ## 📝 License
 
-This project is licensed under the MIT License.  
-See the [LICENSE](LICENSE) file for details.
+This project is licensed under the **MIT License**. See the `LICENSE` file for details.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome!  
-Please fork the repo and submit a pull request.
+Contributions are welcome! A few requests to keep the repo healthy:
+
+- Run the build/tests locally before PRs
+- Keep secrets out of commits (use `.env` and `.env.example`)
+- Open issues for reproducible crashes and include `config.json` (sensitive values redacted)
+- Keep changes scoped and add tests where appropriate
+
+Thank you — happy hacking!
 

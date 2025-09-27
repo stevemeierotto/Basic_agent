@@ -9,13 +9,13 @@
 #include <algorithm>
 #include <filesystem>
 #include <mutex>
-
+#include <iomanip>
 
 namespace fs = std::filesystem;
 
-
 // --- Case-insensitive search ---
-static bool ci_find(const std::string &data, const std::string &toSearch) {
+
+[[maybe_unused]] static bool ci_find(const std::string &data, const std::string &toSearch) {
     auto it = std::search(
         data.begin(), data.end(),
         toSearch.begin(), toSearch.end(),
@@ -27,11 +27,9 @@ static bool ci_find(const std::string &data, const std::string &toSearch) {
 // --- RAGPipeline API ---
 // Constructor
 RAGPipeline::RAGPipeline(std::unique_ptr<EmbeddingEngine> eng, IndexManager* idxMgr, Config* cfg)
-    : engine(std::move(eng)), store(engine.get()), indexManager(idxMgr), config(cfg) {}
+    : engine(std::move(eng)), indexManager(idxMgr), config(cfg) {}
 
-
-
-// retrieveRelevant
+// Retrieve top-K relevant chunks
 std::vector<CodeChunk> RAGPipeline::retrieveRelevant(
     const std::string& query, 
     const std::vector<int>& errorLines, 
@@ -39,24 +37,30 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(
 {
     std::vector<CodeChunk> matches;
 
-    // Read topK dynamically from Config if available
     int effectiveTopK = config ? config->max_results : topK;
-
-    auto results = store.retrieve(query, effectiveTopK);
 
     std::shared_lock lock(chunksMutex);
     const auto& chunks = indexManager->getChunks();
 
-    for (auto& [text, score] : results) {
+    if (chunks.empty()) return matches;
+
+    // Use helper function in IndexManager to access VectorStore
+    auto results = indexManager->retrieveChunks(query, effectiveTopK);
+
+    for (const auto& [text, score] : results) {
         auto it = std::find_if(chunks.begin(), chunks.end(),
                                [&text](const CodeChunk& c){ return c.code == text; });
         if (it != chunks.end()) matches.push_back(*it);
     }
+
     return matches;
 }
 
-std::string RAGPipeline::query(const std::string& query) {
-    auto results = store.retrieve(query, 5);
+// Query with formatted output
+std::string RAGPipeline::query(const std::string& queryStr) {
+    if (!indexManager) return "[No IndexManager available]";
+
+    auto results = indexManager->retrieveChunks(queryStr, 5);
     if (results.empty()) return "[No relevant context found]";
 
     std::ostringstream oss;
@@ -80,16 +84,13 @@ std::string RAGPipeline::query(const std::string& query) {
     return oss.str();
 }
 
-
+// Clear all data
 void RAGPipeline::clear() {
     std::shared_lock lock(chunksMutex);
-    store.clear();
-    if (indexManager) indexManager->clear();  // implement clear in IndexManager
+    if (indexManager) indexManager->clear();
 }
 
-
-
-// ERROR 2: Fix class name typos (RagPipeline -> RAGPipeline)
+// Helper to limit text length
 std::string RAGPipeline::limitText(const std::string& text, size_t maxChars) {
     if (text.length() <= maxChars) return text;
     
@@ -100,3 +101,4 @@ std::string RAGPipeline::limitText(const std::string& text, size_t maxChars) {
     
     return text.substr(0, cutoff) + "...";
 }
+

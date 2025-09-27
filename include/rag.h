@@ -43,9 +43,8 @@ public:
 private:
     Config* config;
     mutable std::shared_mutex chunksMutex;
-    VectorStore store; // non-owning
+    //VectorStore store; // non-owning
     std::string indexFilePath;
-
     std::string limitText(const std::string& text, size_t maxChars);
 };
 

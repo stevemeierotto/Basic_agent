@@ -14,7 +14,6 @@
 #include "rag.h"
 #include "prompt_factory.h"
 #include "llm_interface.h"
-#include "webscraperTools.h"
 #include "index_manager.h"
 #include "config.h"
 
@@ -29,6 +28,7 @@ public:
     void runLoop();
 
     void handleCommand(const std::string& input);
+    void handleSimilarityCommand(const std::string& args);
 
     // NEW: Send query through Memory + RAG + LLM
     std::string processQuery(const std::string& input);
@@ -36,7 +36,6 @@ public:
 private:
     static constexpr size_t DEFAULT_MAX_QUERY_LENGTH = 10000;
     static constexpr int DEFAULT_RAG_TOP_K = 5;
-    static constexpr int DEFAULT_SCRAPE_RESULTS = 3;
     
     size_t maxQueryLength = DEFAULT_MAX_QUERY_LENGTH;
     bool initialized = false;
@@ -45,7 +44,6 @@ private:
     RAGPipeline& rag;
     LLMInterface& llm;
     PromptFactory promptFactory;   
-    WebScraperTools scraper;
     IndexManager * indexManager;
     Config* config;
 
@@ -60,7 +58,6 @@ private:
     std::unordered_map<std::string, CommandHandler> commandHandlers;
     void initializeCommands();
 
-    void handleScrape(const std::string& args);
     void handleRag(const std::string& args);
     void handleBackend(const std::string& args);
 

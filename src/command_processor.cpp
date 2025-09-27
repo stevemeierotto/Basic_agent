@@ -1,6 +1,5 @@
 #include "command_processor.h"
 #include "file_handler.h"
-#include "webscraperTools.h"
 #include "index_manager.h"
 
 #include <algorithm>
@@ -20,13 +19,41 @@ CommandProcessor::CommandProcessor(Memory& mem,
     : memory(mem),
       rag(ragPipeline),
       llm(llmInterface),
-      config(cfg),                  // store config
       promptFactory(mem, ragPipeline),
-      scraper(),
       indexManager(ragPipeline.getIndexManager()) // pointer getter
 {
     initializeCommands();
     
+}
+
+void CommandProcessor::handleSimilarityCommand(const std::string& args) {
+    // Available options
+    std::unordered_map<std::string, std::unique_ptr<ISimilarity>> options;
+    options["dot"] = std::make_unique<DotProductSimilarity>();
+    options["cosine"] = std::make_unique<CosineSimilarity>();
+    options["euclidean"] = std::make_unique<EuclideanSimilarity>();
+    options["jaccard"] = std::make_unique<JaccardSimilarity>();
+
+    std::string chosen = toLower(trim(args));
+
+    // If no argument passed, interactively prompt
+    if (chosen.empty()) {
+        std::cout << "Available similarity methods:\n";
+        for (auto& [name, _] : options) std::cout << "  " << name << "\n";
+        std::cout << "Enter choice: ";
+        std::getline(std::cin, chosen);
+        chosen = toLower(trim(chosen));
+    }
+
+    auto it = options.find(chosen);
+    if (it == options.end()) {
+        std::cout << "Unknown similarity: " << chosen << "\n";
+        return;
+    }
+
+    // Apply the chosen similarity
+    rag.getIndexManager()->store.setSimilarity(std::move(it->second));
+    std::cout << "Similarity set to " << chosen << "\n";
 }
 
 
@@ -132,15 +159,17 @@ void CommandProcessor::showConfig() const {
 }
 
 void CommandProcessor::setConfig(const std::string& key, const std::string& value) {
-    if(config) {
-        if(config->set(key, value))
+    if (config) {
+        if (config->set(key, value)) {
             std::cout << "Updated " << key << " to " << value << "\n";
-        else
+        } else {
             std::cout << "Failed to update key: " << key << "\n";
+        }
     } else {
         std::cout << "No config connected.\n";
     }
 }
+
 
 void CommandProcessor::handleCommand(const std::string& input) {
     if (!startsWith(input, "/")) {
@@ -207,11 +236,13 @@ void CommandProcessor::showHelp() {
     std::cout <<
         "Built-ins:\n"
         "  /help               Show this help\n"
-        "  /scrape             Scrape web and create summary\n"
         "  /rag                Query knowledge with RAG\n"
         "  /clear              Clears agent's memory and summaries\n"
         "  /backend ollama     Switch to Ollama\n"
         "  /backend openai     Switch to OpenAI\n"
+        "  /similarity         Switch Similarity\n"
+        "  /config             Show config values"
+        "  /set temerature     0.5 etc less than 1\n"
         "Also: type 'exit' or 'quit' to leave.\n";
 }
 
@@ -239,41 +270,13 @@ void CommandProcessor::initializeCommands() {
     
     commandHandlers["clear"] = [this](const std::string&) { clearMemory(); };
     commandHandlers["reset"] = commandHandlers["clear"];
-    
-    commandHandlers["scrape"] = [this](const std::string& args) { handleScrape(args); };
     commandHandlers["rag"] = [this](const std::string& args) { handleRag(args); };
     commandHandlers["backend"] = [this](const std::string& args) { handleBackend(args); };
-}
+    commandHandlers["similarity"] = [this](const std::string& args) {
+    handleSimilarityCommand(args); };
+    commandHandlers["config"] = [this](const std::string&) { showConfig(); };
 
-void CommandProcessor::handleScrape(const std::string& args) {
-    if (args.empty()) {
-        std::cout << "Usage: /scrape <search term>\n";
-        return;
-    }
 
-    try {
-        // Step 1: Perform search & summarization
-        std::string summary = scraper.handleScrape(args, 3, 3);
-
-        // Step 2: Fetch Reddit posts
-        std::string redditRaw = scraper.fetchRedditPosts(args, 3);
-
-        // Step 3: Summarize each Reddit post
-        std::istringstream iss(redditRaw);
-        std::string line;
-        std::string redditSummary;
-        while (std::getline(iss, line)) {
-            if (!line.empty() && line.find("----") == std::string::npos) {
-                redditSummary += scraper.summarizeText(line, 2) + " ";
-            }
-        }
-        summary += "\n[Reddit Summary]\n" + redditSummary;
-
-        // Step 4: Print the summary
-        std::cout << "----- Summary -----\n" << summary << "\n";
-    } catch (const std::exception& e) {
-        std::cerr << "Error during scraping: " << e.what() << "\n";
-    }
 }
 
 void CommandProcessor::handleRag(const std::string& args) {

@@ -9,66 +9,54 @@ using json = nlohmann::json;
 
 // Constructor
 LLMInterface::LLMInterface(LLMBackend b, Config* cfg)
-    : backend(b), curl(nullptr), headers(nullptr), config(cfg) // store Config pointer
+    : backend(b),
+      config(cfg),
+      curl(nullptr),
+      headers(nullptr),
+      selectedModel("qwen3:0.6b") // default model
 {
     if (backend == LLMBackend::Ollama) {
         curl = curl_easy_init();
-        if (!curl) {
-            throw std::runtime_error("Failed to initialize CURL handle");
-        }
+        if (!curl) throw std::runtime_error("Failed to initialize CURL handle");
 
-        headers = nullptr;
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-
-        curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/generate");
+        // Only set static headers once
+        headers = curl_slist_append(nullptr, "Content-Type: application/json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        // Only set static write callback once
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     }
 }
 
-
 LLMInterface::~LLMInterface() {
-    if (headers) {
-        curl_slist_free_all(headers);
-        headers = nullptr;
-    }
-    if (curl) {
-        curl_easy_cleanup(curl);
-        curl = nullptr;
-    }
+    if (headers) curl_slist_free_all(headers);
+    if (curl) curl_easy_cleanup(curl);
+    headers = nullptr;
+    curl = nullptr;
 }
 
 void LLMInterface::setBackend(LLMBackend b) {
+    if (backend == b) return; // no-op if same backend
     backend = b;
 
-    // Clean up old handles if switching backends
-    if (curl) {
-        curl_easy_cleanup(curl);
-        curl = nullptr;
-    }
-    if (headers) {
-        curl_slist_free_all(headers);
-        headers = nullptr;
-    }
+    // Clean up old handles if switching to a different backend
+    if (curl) curl_easy_cleanup(curl);
+    if (headers) curl_slist_free_all(headers);
+
+    curl = nullptr;
+    headers = nullptr;
 
     if (backend == LLMBackend::Ollama) {
         curl = curl_easy_init();
-        if (!curl) {
-            throw std::runtime_error("Failed to re-initialize CURL handle");
-        }
-        headers = curl_slist_append(nullptr, "Content-Type: application/json");
+        if (!curl) throw std::runtime_error("Failed to initialize CURL handle");
 
-        curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/generate");
+        headers = curl_slist_append(nullptr, "Content-Type: application/json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     }
 }
-// query method
+
 std::string LLMInterface::query(const std::string& prompt) {
-    // Read dynamic parameters from Config if available
-    double temperature = config ? config->temperature : 0.7;
-    double topP       = config ? config->top_p : 1.0;
-    int maxTokens     = config ? config->max_tokens : 512;
 
     if (backend == LLMBackend::Ollama) {
         return askOllama(prompt);
@@ -78,58 +66,42 @@ std::string LLMInterface::query(const std::string& prompt) {
 }
 
 
-// ---- Ollama backend ----
-
 std::string LLMInterface::askOllama(const std::string& prompt) {
-    std::string readBuffer;
-
     if (!curl) return "CURL not initialized.";
 
-    // Pull dynamic parameters from Config if available
+    // Pull dynamic parameters from Config
     double temperature = config ? config->temperature : 0.7;
-    double topP       = config ? config->top_p : 1.0;
-    int maxTokens     = config ? config->max_tokens : 512;
+    double topP        = config ? config->top_p : 1.0;
+    int maxTokens      = config ? config->max_tokens : 512;
+    std::string model  = !selectedModel.empty() ? selectedModel : "qwen3:0.6b";
 
+    // Prepare JSON payload
     json payload;
-    payload["model"] = "qwen3:0.6b";
+    payload["model"] = model;
     payload["prompt"] = prompt;
     payload["stream"] = false;
-
-    // Inject LLM control parameters
     payload["temperature"] = temperature;
     payload["top_p"] = topP;
     payload["max_tokens"] = maxTokens;
+    std::string jsonStr = payload.dump();
 
-    std::string jsonStr = payload.dump();   // keep alive!
-
-    // Reset headers each call
-    struct curl_slist* localHeaders = nullptr;
-    localHeaders = curl_slist_append(localHeaders, "Content-Type: application/json");
-
+    // Only dynamic options are set per request
     curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/generate");
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, localHeaders);
-
-    // ✅ Use the stable string
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, jsonStr.size());
 
-    // ✅ Hook up callback
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    std::string readBuffer;
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
 
     CURLcode res = curl_easy_perform(curl);
-    curl_slist_free_all(localHeaders);
-
     if (res != CURLE_OK) {
         return std::string("CURL error: ") + curl_easy_strerror(res);
     }
 
     try {
         auto j = json::parse(readBuffer);
-        if (j.contains("response")) {
-            return j["response"].get<std::string>();
-        }
+        if (j.contains("response")) return j["response"].get<std::string>();
     } catch (const std::exception& e) {
         return std::string("JSON parse error: ") + e.what() + "\nRaw: " + readBuffer;
     }

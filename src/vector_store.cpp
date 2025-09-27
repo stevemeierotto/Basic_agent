@@ -7,6 +7,11 @@
 #include <functional>
 #include <iostream>
 
+void VectorStore::setSimilarity(std::unique_ptr<ISimilarity> sim) {
+    if(sim) similarity = std::move(sim);
+}
+
+
 void VectorStore::addDocument(const std::string& text) {
     documents.push_back(text);
 
@@ -32,10 +37,6 @@ void VectorStore::addDocuments(const std::vector<std::string>& texts) {
 void VectorStore::clear() {
     documents.clear();
     embeddings.clear();
-}
-
-void VectorStore::setSimilarity(std::unique_ptr<ISimilarity> sim) {
-    similarity = std::move(sim);
 }
 
 std::vector<std::pair<std::string, float>> VectorStore::retrieve(const std::string& query, int topK) {

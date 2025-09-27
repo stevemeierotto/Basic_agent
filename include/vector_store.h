@@ -13,6 +13,8 @@ public:
     explicit VectorStore(EmbeddingEngine* engine)
         : embeddingEngine(engine) {}
 
+
+    void setSimilarity(std::unique_ptr<ISimilarity> sim);
     void addDocument(const std::string& text);
     void addDocuments(const std::vector<std::string>& texts);
 
@@ -24,7 +26,6 @@ public:
 
     void clear();
 
-    void setSimilarity(std::unique_ptr<ISimilarity> sim);
 
     std::vector<std::pair<std::string, float>> retrieve(const std::string& query, int topK = 3);
 

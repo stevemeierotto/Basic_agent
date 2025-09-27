@@ -9,9 +9,10 @@ public:
     // Core LLM parameters
     double temperature = 0.7;
     double top_p = 1.0;
-    double similarity_threshold =0.7;
+    
     int max_tokens = 512;
     int max_results = 5;
+    double similarity_threshold =0.6;
 
     // Runtime parameters
     int verbosity = 1;  // 0 = silent, 1 = normal, 2 = debug

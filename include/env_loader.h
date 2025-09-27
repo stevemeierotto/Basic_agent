@@ -8,11 +8,12 @@
  * See LICENSE file in the project root for full license text
  */
 
-
 #pragma once
 #include <string>
 
 namespace EnvLoader {
-    bool loadEnvFile(const std::string& filename = ".env");
-}
+
+[[nodiscard]] bool loadEnvFile(const std::string& filename = ".env");
+
+} // namespace EnvLoader
 
