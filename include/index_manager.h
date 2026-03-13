@@ -7,12 +7,13 @@
 #include <memory>
 #include <shared_mutex>
 #include <set>
+#include <unordered_map>
 
 
 class IndexManager {
 public:
         explicit IndexManager(EmbeddingEngine* eng)
-        : store(eng) ,engine(eng){}
+        : store(eng) ,engine(eng), localTfIdfEngine(std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf)) {}
 
     void init(const std::string& indexPath);
 
@@ -26,6 +27,10 @@ public:
 
     // Access indexed chunks
     const std::vector<CodeChunk>& getChunks() const;
+    
+    // Get chunk by code text using hash map (O(1) lookup)
+    // Returns nullptr if not found, otherwise returns pointer to chunk
+    const CodeChunk* getChunkByCode(const std::string& codeText) const;
 
     // Save/load the index
     void saveIndex() const;
@@ -34,10 +39,16 @@ public:
     void loadIndex(const std::string& dbPath);
 
     void clear();
+    void addChunkToIndex(CodeChunk&& chunk);
     VectorStore store;
+    std::string getCurrentCommitHash() const;
+    bool shouldReindexFile(const std::string& filePath);
     std::vector<std::pair<std::string,float>> retrieveChunks(const std::string& query, int topK) {
         return store.retrieve(query, topK);
     }
+
+    EmbeddingEngine* getTfIdfEngine() const { return localTfIdfEngine.get(); }
+
 private:
         // Constants
     static constexpr size_t MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -57,17 +68,20 @@ private:
 
     std::vector<CodeChunk> chunks;
     EmbeddingEngine* engine;
-    std::shared_mutex chunksMutex;
+    std::unique_ptr<EmbeddingEngine> localTfIdfEngine;
+    mutable std::shared_mutex chunksMutex;
 
     void addChunk(CodeChunk&& chunk);
     void enforceMemoryLimits();
     std::string indexFilePath;
 
     // Helper functions
-    void addChunkToIndex(CodeChunk&& chunk);
     std::string limitText(const std::string& text, size_t maxChars);
     void rebuildInternalStructures();
     void removeChunksFromPath(const std::string& rootPath);
+    void removeChunksForFile(const std::string& filePath);
     size_t getCurrentMemoryUsage() const;
+
+    std::unordered_map<std::string, std::uint64_t> indexedFileFingerprints;
 };
 

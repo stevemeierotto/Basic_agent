@@ -9,8 +9,8 @@ It is designed as a foundation for building intelligent assistants that can reas
 ## ✨ Features
 
 - **Memory System**
-  - Persistent JSON-based long-term memory
-  - Episodic recall of past interactions
+  - Persistent SQLite-based episodic memory
+  - Transactional and incremental recall of past interactions
   - RAG indexing and retrieval
 
 - **Retrieval-Augmented Generation (RAG)**
@@ -76,7 +76,7 @@ basic_agent/
 │   ├── webscraperTools.cpp
 │   └── vector_store.cpp
 ├── agent_workspace/       # Runtime workspace
-│   ├── memory.json        # Persistent agent memory
+│   ├── memory.db        # Persistent agent memory
 │   └── rag_index.json     # Vector store index
 ├── config.json            # Runtime configuration
 ├── .env.example           # Example env (API keys - DO NOT COMMIT real keys)
@@ -128,7 +128,7 @@ On startup the agent will:
 
 1. Load runtime configuration (`config.json`)
 2. Load `.env` for API keys (if present)
-3. Initialize persistent memory (`agent_workspace/memory.json`)
+3. Initialize persistent memory (`agent_workspace/memory.db`)
 4. Initialize RAG index (`agent_workspace/rag_index.json`)
 5. Launch an interactive command loop (see Example Commands below)
 
@@ -165,7 +165,7 @@ Agent:
 
 ## 📦 Memory & RAG
 
-- **Memory (`memory.json`)**
+- **Memory (`memory.db`)**
   - Stores past conversations, summaries, and key facts
   - Used by PromptFactory to build context-aware prompts
 

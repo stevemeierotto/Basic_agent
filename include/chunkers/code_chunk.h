@@ -1,3 +1,4 @@
+#pragma once
 #include <string>
 #include <vector>
 
@@ -9,5 +10,13 @@ struct CodeChunk {
     int startLine;
     int endLine;
     std::string code;
-    std::vector<float> embedding; // reserved for later
+    std::vector<float> embedding;
+
+    // Phase 6 Integrity Metadata
+    int64_t last_modified = 0;
+    std::string commit_hash;
+    int embedding_version = 1;
+
+    // Phase 3.1: Hybrid Reranking
+    float keyword_score = 0.0f; // TF-IDF keyword relevance
 };

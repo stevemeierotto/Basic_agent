@@ -28,15 +28,18 @@ public:
     std::string askOpenAI(const std::string& prompt);
 
     std::string query(const std::string& prompt);
+    LLMBackend getBackend() const { return backend; }
     
     // Allow switching dynamically
     void setBackend(LLMBackend backend);
+    void setConfig(Config* cfg) { config = cfg; }
 
     void useModel(const std::string& model) { selectedModel = model; }
     const std::string& getSelectedModel() const { return selectedModel; }
 
 private:
-    
+    std::string detectOllamaModel();
+    std::string resolveOllamaModel();
 
     LLMBackend backend;
     Config* config;

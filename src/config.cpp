@@ -11,7 +11,8 @@ Config::Config()
       top_p(1.0),
       max_tokens(512),
       max_results(5),            // default topK for RAG
-      similarity_threshold(0.7)  // optional
+      similarity_threshold(0.7),  // optional
+      similarity_metric("cosine")  // default similarity metric
 {}
 
 bool Config::loadFromJson(const std::string& path) {
@@ -20,17 +21,37 @@ bool Config::loadFromJson(const std::string& path) {
     if (!file.is_open()) return false;
 
     json j;
-    file >> j;
+    try {
+        file >> j;
+    } catch (...) {
+        return false;
+    }
 
     if (j.contains("temperature")) temperature = j["temperature"];
     if (j.contains("top_p")) top_p = j["top_p"];
     if (j.contains("max_tokens")) max_tokens = j["max_tokens"];
     if (j.contains("verbosity")) verbosity = j["verbosity"];
     if (j.contains("max_retries")) max_retries = j["max_retries"];
+    if (j.contains("grag_directional")) grag_directional = j["grag_directional"];
+    if (j.contains("log_level") && j["log_level"].is_string()) log_level = j["log_level"];
+    if (j.contains("log_to_console")) log_to_console = j["log_to_console"];
+    if (j.contains("log_rotate_max_bytes")) log_rotate_max_bytes = j["log_rotate_max_bytes"];
+    if (j.contains("log_rotate_max_files")) log_rotate_max_files = j["log_rotate_max_files"];
+    if (j.contains("log_max_string_length")) log_max_string_length = j["log_max_string_length"];
     if (j.contains("memory_limit_mb")) memory_limit_mb = j["memory_limit_mb"];
     if (j.contains("disk_quota_mb")) disk_quota_mb = j["disk_quota_mb"];
+    if (j.contains("database_path") && j["database_path"].is_string()) {
+        database_path = j["database_path"];
+    }
+    if (j.contains("enable_tools")) enable_tools = j["enable_tools"];
+    if (j.contains("allow_network")) allow_network = j["allow_network"];
+    if (j.contains("allow_shell_exec")) allow_shell_exec = j["allow_shell_exec"];
     if (j.contains("allow_web")) allow_web = j["allow_web"];
     if (j.contains("allow_file_io")) allow_file_io = j["allow_file_io"];
+    if (j.contains("similarity_metric") && j["similarity_metric"].is_string()) {
+        similarity_metric = j["similarity_metric"];
+    }
+    if (j.contains("similarity_threshold")) similarity_threshold = j["similarity_threshold"];
 
     return true;
 }
@@ -42,12 +63,64 @@ bool Config::saveToJson(const std::string& path) const {
     j["temperature"] = temperature;
     j["top_p"] = top_p;
     j["max_tokens"] = max_tokens;
+    j["max_results"] = max_results;
+    j["similarity_threshold"] = similarity_threshold;
+    j["similarity_metric"] = similarity_metric;
     j["verbosity"] = verbosity;
     j["max_retries"] = max_retries;
+    j["grag_directional"] = grag_directional;
+    j["log_level"] = log_level;
+    j["log_to_console"] = log_to_console;
+    j["log_rotate_max_bytes"] = log_rotate_max_bytes;
+    j["log_rotate_max_files"] = log_rotate_max_files;
+    j["log_max_string_length"] = log_max_string_length;
     j["memory_limit_mb"] = memory_limit_mb;
     j["disk_quota_mb"] = disk_quota_mb;
+    j["database_path"] = database_path;
+    j["enable_tools"] = enable_tools;
+    j["allow_network"] = allow_network;
+    j["allow_shell_exec"] = allow_shell_exec;
     j["allow_web"] = allow_web;
     j["allow_file_io"] = allow_file_io;
+
+    std::ofstream file(path);
+    if (!file.is_open()) return false;
+    file << j.dump(4);
+    return true;
+}
+
+bool Config::loadRetrievalConfig(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mtx);
+    std::ifstream file(path);
+    if (!file.is_open()) return false;
+
+    json j;
+    try {
+        file >> j;
+    } catch (...) {
+        return false;
+    }
+
+    if (j.contains("retrieval_weights")) {
+        auto rw = j["retrieval_weights"];
+        if (rw.contains("query")) wq = rw["query"];
+        if (rw.contains("direction")) wd = rw["direction"];
+        if (rw.contains("trajectory")) wt = rw["trajectory"];
+        if (rw.contains("keyword")) keyword_weight = rw["keyword"];
+    }
+
+    return true;
+}
+
+bool Config::saveRetrievalConfig(const std::string& path) const {
+    std::lock_guard<std::mutex> lock(mtx);
+    json j;
+    j["retrieval_weights"] = {
+        {"query", wq},
+        {"direction", wd},
+        {"trajectory", wt},
+        {"keyword", keyword_weight}
+    };
 
     std::ofstream file(path);
     if (!file.is_open()) return false;
@@ -60,12 +133,29 @@ std::string Config::get(const std::string& key) const {
     if (key == "temperature") return std::to_string(temperature);
     if (key == "top_p") return std::to_string(top_p);
     if (key == "max_tokens") return std::to_string(max_tokens);
+    if (key == "max_results") return std::to_string(max_results);
+    if (key == "similarity_threshold") return std::to_string(similarity_threshold);
+    if (key == "similarity_metric") return similarity_metric;
     if (key == "verbosity") return std::to_string(verbosity);
     if (key == "max_retries") return std::to_string(max_retries);
+    if (key == "grag_directional") return grag_directional ? "true" : "false";
+    if (key == "log_level") return log_level;
+    if (key == "log_to_console") return log_to_console ? "true" : "false";
+    if (key == "log_rotate_max_bytes") return std::to_string(log_rotate_max_bytes);
+    if (key == "log_rotate_max_files") return std::to_string(log_rotate_max_files);
+    if (key == "log_max_string_length") return std::to_string(log_max_string_length);
     if (key == "memory_limit_mb") return std::to_string(memory_limit_mb);
     if (key == "disk_quota_mb") return std::to_string(disk_quota_mb);
+    if (key == "database_path") return database_path;
+    if (key == "enable_tools") return enable_tools ? "true" : "false";
+    if (key == "allow_network") return allow_network ? "true" : "false";
+    if (key == "allow_shell_exec") return allow_shell_exec ? "true" : "false";
     if (key == "allow_web") return allow_web ? "true" : "false";
     if (key == "allow_file_io") return allow_file_io ? "true" : "false";
+    if (key == "wq") return std::to_string(wq);
+    if (key == "wd") return std::to_string(wd);
+    if (key == "wt") return std::to_string(wt);
+    if (key == "keyword_weight") return std::to_string(keyword_weight);
     return "<unknown>";
 }
 
@@ -75,12 +165,29 @@ bool Config::set(const std::string& key, const std::string& value) {
         if (key == "temperature") temperature = std::stod(value);
         else if (key == "top_p") top_p = std::stod(value);
         else if (key == "max_tokens") max_tokens = std::stoi(value);
+        else if (key == "max_results") max_results = std::stoi(value);
+        else if (key == "similarity_threshold") similarity_threshold = std::stod(value);
+        else if (key == "similarity_metric") similarity_metric = value;
         else if (key == "verbosity") verbosity = std::stoi(value);
         else if (key == "max_retries") max_retries = std::stoi(value);
+        else if (key == "grag_directional") grag_directional = (value == "true");
+        else if (key == "log_level") log_level = value;
+        else if (key == "log_to_console") log_to_console = (value == "true");
+        else if (key == "log_rotate_max_bytes") log_rotate_max_bytes = std::stoull(value);
+        else if (key == "log_rotate_max_files") log_rotate_max_files = std::stoull(value);
+        else if (key == "log_max_string_length") log_max_string_length = std::stoull(value);
         else if (key == "memory_limit_mb") memory_limit_mb = std::stoul(value);
         else if (key == "disk_quota_mb") disk_quota_mb = std::stoul(value);
+        else if (key == "database_path") database_path = value;
+        else if (key == "enable_tools") enable_tools = (value == "true");
+        else if (key == "allow_network") allow_network = (value == "true");
+        else if (key == "allow_shell_exec") allow_shell_exec = (value == "true");
         else if (key == "allow_web") allow_web = (value == "true");
         else if (key == "allow_file_io") allow_file_io = (value == "true");
+        else if (key == "wq") wq = std::stof(value);
+        else if (key == "wd") wd = std::stof(value);
+        else if (key == "wt") wt = std::stof(value);
+        else if (key == "keyword_weight") keyword_weight = std::stof(value);
         else return false;
     } catch (...) {
         return false;
@@ -91,14 +198,31 @@ bool Config::set(const std::string& key, const std::string& value) {
 void Config::printConfig() const {
     std::lock_guard<std::mutex> lock(mtx);
     std::cout << "--- Agent Config ---\n";
-    std::cout << "temperature     : " << temperature << "\n";
-    std::cout << "top_p           : " << top_p << "\n";
-    std::cout << "max_tokens      : " << max_tokens << "\n";
-    std::cout << "verbosity       : " << verbosity << "\n";
-    std::cout << "max_retries     : " << max_retries << "\n";
-    std::cout << "memory_limit_mb : " << memory_limit_mb << "\n";
-    std::cout << "disk_quota_mb   : " << disk_quota_mb << "\n";
-    std::cout << "allow_web       : " << (allow_web ? "true" : "false") << "\n";
-    std::cout << "allow_file_io   : " << (allow_file_io ? "true" : "false") << "\n";
+    std::cout << "temperature         : " << temperature << "\n";
+    std::cout << "top_p               : " << top_p << "\n";
+    std::cout << "max_tokens          : " << max_tokens << "\n";
+    std::cout << "max_results         : " << max_results << "\n";
+    std::cout << "similarity_threshold: " << similarity_threshold << "\n";
+    std::cout << "similarity_metric   : " << similarity_metric << "\n";
+    std::cout << "verbosity           : " << verbosity << "\n";
+    std::cout << "max_retries         : " << max_retries << "\n";
+    std::cout << "grag_directional    : " << (grag_directional ? "true" : "false") << "\n";
+    std::cout << "log_level           : " << log_level << "\n";
+    std::cout << "log_to_console      : " << (log_to_console ? "true" : "false") << "\n";
+    std::cout << "log_rotate_max_bytes: " << log_rotate_max_bytes << "\n";
+    std::cout << "log_rotate_max_files: " << log_rotate_max_files << "\n";
+    std::cout << "log_max_string_len  : " << log_max_string_length << "\n";
+    std::cout << "memory_limit_mb      : " << memory_limit_mb << "\n";
+    std::cout << "disk_quota_mb       : " << disk_quota_mb << "\n";
+    std::cout << "database_path       : " << database_path << "\n";
+    std::cout << "enable_tools        : " << (enable_tools ? "true" : "false") << "\n";
+    std::cout << "allow_network       : " << (allow_network ? "true" : "false") << "\n";
+    std::cout << "allow_shell_exec    : " << (allow_shell_exec ? "true" : "false") << "\n";
+    std::cout << "allow_web           : " << (allow_web ? "true" : "false") << "\n";
+    std::cout << "allow_file_io       : " << (allow_file_io ? "true" : "false") << "\n";
+    std::cout << "wq                  : " << wq << "\n";
+    std::cout << "wd                  : " << wd << "\n";
+    std::cout << "wt                  : " << wt << "\n";
+    std::cout << "keyword_weight      : " << keyword_weight << "\n";
 }
 

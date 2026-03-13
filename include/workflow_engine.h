@@ -1,0 +1,74 @@
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * Thoth — WorkflowEngine Phase 1
+ *
+ * Licensed under the MIT License (see LICENSE in project root)
+ */
+
+#pragma once
+
+#include <future>
+#include <mutex>
+#include <memory>
+#include "plan.h"
+#include "json.hpp"
+
+// Forward declarations
+class ToolRegistry;
+class RAGPipeline;
+class Memory;
+
+namespace Thoth {
+
+class StepMetricsRepository;
+
+/**
+ * @brief Represents the outcome of a single PlanStep execution.
+ */
+struct StepResult {
+    std::string step_id;            // ID of the step that produced this result
+    bool success = false;
+    nlohmann::json data;            // The structured output of the step
+    std::string error_message;      // Human-readable error if failed
+    int final_retry_count = 0;      // How many retries were actually performed
+    int64_t latency_ms = 0;         // Execution duration
+};
+
+/**
+ * @brief The WorkflowEngine is the execution harness for Thoth.
+ */
+class WorkflowEngine {
+public:
+    WorkflowEngine(
+        std::shared_ptr<ToolRegistry> toolRegistry,
+        std::shared_ptr<RAGPipeline> ragPipeline,
+        std::shared_ptr<Memory> memory,
+        std::shared_ptr<StepMetricsRepository> metricsRepo);
+    virtual ~WorkflowEngine() = default;
+
+    /**
+     * @brief Executes a single PlanStep synchronously.
+     */
+    virtual StepResult executeStep(const PlanStep& step, const std::string& planId = "");
+
+    /**
+     * @brief Executes a single PlanStep asynchronously with timeout.
+     */
+    virtual std::future<StepResult> executeStepAsync(const PlanStep& step, const std::string& planId = "");
+
+private:
+    StepResult executeTool(const PlanStep& step);
+    StepResult executeRetrieval(const PlanStep& step, const std::string& planId = "");
+    StepResult executeNode(const PlanStep& step);
+    StepResult executeLLM(const PlanStep& step, const std::string& planId = "");
+
+    bool validateInput(const nlohmann::json& input, const nlohmann::json& schema, std::string& error);
+
+    std::shared_ptr<ToolRegistry> toolRegistry_;
+    std::shared_ptr<RAGPipeline> ragPipeline_;
+    std::shared_ptr<Memory> memory_;
+    std::shared_ptr<StepMetricsRepository> metricsRepo_;
+};
+
+} // namespace Thoth

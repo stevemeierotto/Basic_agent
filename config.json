@@ -4,6 +4,7 @@
   "max_tokens": 512,
   "max_results": 5,
   "similarity_threshold": 0.7,
-  "verbosity": 1
+  "verbosity": 1,
+  "enable_tools": true
 }
 

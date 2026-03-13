@@ -3,6 +3,8 @@
 #define SIMILARITY_H
 
 #include <vector>
+#include <memory>
+#include <string>
 
 class ISimilarity {
 public:
@@ -34,6 +36,10 @@ public:
     float operator()(const std::vector<float>& a,
                      const std::vector<float>& b) const override;
 };
+
+// Factory function to create similarity metric from string name
+// Returns nullptr if name is invalid
+std::unique_ptr<ISimilarity> createSimilarity(const std::string& name);
 
 #endif // SIMILARITY_H
 

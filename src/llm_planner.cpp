@@ -1,0 +1,182 @@
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ * 
+ * Thoth — Cognate Phase 1.2
+ *
+ * Licensed under the MIT License (see LICENSE in project root)
+ */
+
+#include "../include/llm_planner.h"
+#include "../include/logger.h"
+#include "../include/plan_parser.h"
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
+LLMPlanner::LLMPlanner(std::shared_ptr<Memory> memory, 
+                       std::shared_ptr<RAGPipeline> rag, 
+                       std::shared_ptr<PromptFactory> prompt_factory,
+                       LLMInterface* llm) 
+    : memory_(memory), rag_(rag), prompt_factory_(prompt_factory), llm_(llm) {}
+
+static int64_t nowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::string LLMPlanner::generate_uuid() {
+    static int counter = 0;
+    std::ostringstream oss;
+    oss << "plan-" << nowMs() << "-" << ++counter;
+    return oss.str();
+}
+
+Plan LLMPlanner::create_plan(const std::string& goal) {
+    Plan plan;
+    plan.plan_id = generate_uuid();
+    plan.goal = goal;
+    plan.created_at_ms = nowMs();
+    plan.updated_at_ms = plan.created_at_ms;
+    plan.status = PlanStatus::ACTIVE;
+
+    if (!prompt_factory_ || !llm_) {
+        plan.status = PlanStatus::FAILED;
+        return plan;
+    }
+
+    // Phase 3.2, 3.3, 7.5, 8.2: Gather context for the prompt
+    std::string strategy_context;
+    std::string past_experience;
+    
+    if (rag_ && rag_->engine && memory_) {
+        auto goal_embedding = rag_->engine->embed(goal);
+        
+        // 1. Past Trajectories (Phase 7.5)
+        auto trajectories = memory_->retrieveSimilarTrajectories(goal_embedding, 3);
+        std::ostringstream traj_oss;
+        for (const auto& t : trajectories) {
+            traj_oss << "- Goal: " << t.goal << "\n  Trajectory: " << t.trajectory_json << "\n\n";
+        }
+        past_experience = traj_oss.str();
+
+        // 2. Emerged Strategies (Phase 8.2)
+        auto strats = memory_->getAllStrategies();
+        std::ostringstream strat_oss;
+        for (const auto& s : strats) {
+            strat_oss << "- Strategy: " << s.description << "\n  Pattern: " << s.step_pattern_json << "\n\n";
+        }
+        strategy_context = strat_oss.str();
+    }
+
+    std::string prompt = prompt_factory_->buildPlanPrompt(goal, strategy_context, past_experience);
+    std::string llm_response = llm_->query(prompt);
+
+    auto parsed_plan = Thoth::PlanParser::parse(llm_response, plan.plan_id);
+    
+    // Step 9.4 Retry logic
+    if (!parsed_plan.has_value()) {
+        StructuredLogger::instance().log(LogLevel::Warn, "planner", "plan_parse_failed", "First plan parsing attempt failed, retrying...", {{"llm_response", llm_response}});
+        
+        std::string retry_prompt = prompt + "\n\nERROR: Your previous response was not a valid JSON plan. Please correct it and follow the schema exactly.\nPrevious Response:\n" + llm_response;
+        llm_response = llm_->query(retry_prompt);
+        parsed_plan = Thoth::PlanParser::parse(llm_response, plan.plan_id);
+    }
+
+    if (parsed_plan.has_value()) {
+        plan = parsed_plan.value();
+        plan.goal = goal; // Ensure goal matches
+        plan.created_at_ms = nowMs();
+        plan.updated_at_ms = plan.created_at_ms;
+        plan.status = PlanStatus::ACTIVE;
+
+        StructuredLogger::instance().log(
+            LogLevel::Info,
+            "planner",
+            "plan_generated",
+            "LLMPlanner created a dynamic multi-step plan",
+            {{"plan_id", plan.plan_id}, {"step_count", plan.steps.size()}});
+    } else {
+        plan.status = PlanStatus::FAILED;
+        StructuredLogger::instance().log(LogLevel::Error, "planner", "plan_failed", "Plan generation failed after retry", {{"goal", goal}});
+    }
+
+    save_plan(plan);
+    return plan;
+}
+
+Plan LLMPlanner::revise_plan(const Plan& existing_plan,
+                             const nlohmann::json& step_result) {
+    if (!prompt_factory_ || !llm_) {
+        Plan revised = existing_plan;
+        revised.updated_at_ms = nowMs();
+        return revised;
+    }
+
+    std::string prompt = prompt_factory_->buildRevisionPrompt(existing_plan.goal, 
+                                                               existing_plan.to_json().dump(), 
+                                                               step_result.dump());
+    
+    std::string llm_response = llm_->query(prompt);
+
+    auto parsed_plan = Thoth::PlanParser::parse(llm_response, existing_plan.plan_id);
+    
+    // Retry logic
+    if (!parsed_plan.has_value()) {
+        StructuredLogger::instance().log(LogLevel::Warn, "planner", "revision_parse_failed", "First plan revision attempt failed, retrying...", {{"llm_response", llm_response}});
+        
+        std::string retry_prompt = prompt + "\n\nERROR: Your previous response was not a valid JSON plan. Please correct it and follow the schema exactly.\nPrevious Response:\n" + llm_response;
+        llm_response = llm_->query(retry_prompt);
+        parsed_plan = Thoth::PlanParser::parse(llm_response, existing_plan.plan_id);
+    }
+
+    if (parsed_plan.has_value()) {
+        Plan revised = parsed_plan.value();
+        revised.goal = existing_plan.goal; // Ensure goal remains the same
+        revised.created_at_ms = existing_plan.created_at_ms; // Maintain creation time
+        revised.updated_at_ms = nowMs();
+        revised.status = PlanStatus::ACTIVE;
+        
+        // Reset current_index if the new plan starts from scratch or a new state
+        // For now, we assume the LLM generates the REMAINING steps or a FULL new plan.
+        // We set index to 0 for the new plan structure.
+        revised.current_index = 0;
+
+        StructuredLogger::instance().log(
+            LogLevel::Info,
+            "planner",
+            "plan_revised",
+            "LLMPlanner revised the existing plan",
+            {{"plan_id", revised.plan_id}, {"step_count", revised.steps.size()}});
+
+        save_plan(revised);
+        return revised;
+    } else {
+        StructuredLogger::instance().log(LogLevel::Error, "planner", "revision_failed", "Plan revision failed after retry", {{"plan_id", existing_plan.plan_id}});
+        Plan revised = existing_plan;
+        revised.updated_at_ms = nowMs();
+        save_plan(revised);
+        return revised;
+    }
+}
+
+void LLMPlanner::save_plan(const Plan& plan) {
+    if (!memory_) return;
+
+    Memory::CognatePlanRecord rec;
+    rec.plan_id = plan.plan_id;
+    rec.goal = plan.goal;
+    rec.plan_json = plan.to_json().dump();
+    rec.status = static_cast<int>(plan.status);
+    rec.success_score = 0.0f; // Default for new/active plans
+    rec.created_at = plan.created_at_ms;
+    rec.updated_at = plan.updated_at_ms;
+
+    // Generate goal embedding (Phase 3.1)
+    if (rag_ && rag_->engine) {
+        rec.embedding = rag_->engine->embed(plan.goal);
+    }
+
+    memory_->saveCognatePlan(rec);
+}
+

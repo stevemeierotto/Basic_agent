@@ -16,8 +16,6 @@ void VectorStore::addDocument(const std::string& text) {
     documents.push_back(text);
 
     auto emb = embeddingEngine->embed(text);
-    std::cerr << "[DEBUG] Embedding generated, size=" << emb.size() << "\n";
-
     if (emb.empty()) {
         std::cerr << "[ERROR] Empty embedding for document! Text=\"" 
                   << text.substr(0, 50) << (text.size() > 50 ? "..." : "") 
@@ -25,8 +23,15 @@ void VectorStore::addDocument(const std::string& text) {
     }
 
     embeddings.push_back(std::move(emb));
-    std::cerr << "[DEBUG] Added doc. Total docs=" << documents.size() 
-              << ", total embeddings=" << embeddings.size() << "\n";
+}
+
+void VectorStore::addDocumentWithEmbedding(const std::string& text, std::vector<float> embedding) {
+    if (embedding.empty()) {
+        return;
+    }
+
+    documents.push_back(text);
+    embeddings.push_back(std::move(embedding));
 }
 
 
@@ -40,18 +45,19 @@ void VectorStore::clear() {
 }
 
 std::vector<std::pair<std::string, float>> VectorStore::retrieve(const std::string& query, int topK) {
+    if (topK <= 0) {
+        return {};
+    }
+
     if (documents.empty() || embeddings.empty()) {
-        std::cerr << "[ERROR] retrieve() called but no documents/embeddings loaded.\n";
         return {};
     }
 
     auto queryVec = embeddingEngine->embed(query);
     if (queryVec.empty()) {
-        std::cerr << "[ERROR] Query embedding failed! Query=\"" << query << "\"\n";
+        std::cerr << "[ERROR] Query embedding failed for: " << query << "\n";
         return {};
     }
-    std::cerr << "[DEBUG] Query embedding size=" << queryVec.size() 
-              << ", docs=" << documents.size() << "\n";
 
     // Min-heap: smallest score at the top
     auto cmp = [](const std::pair<std::string, float>& a, const std::pair<std::string, float>& b) {
@@ -63,9 +69,11 @@ std::vector<std::pair<std::string, float>> VectorStore::retrieve(const std::stri
         decltype(cmp)
     > minHeap(cmp);
 
+    int valid_scores = 0;
     for (size_t i = 0; i < documents.size(); ++i) {
         float score = (*similarity)(queryVec, embeddings[i]);
-        std::cerr << "[DEBUG] Doc " << i << " score=" << score << "\n";
+
+        if (score > 0.00001f) valid_scores++;
 
         if (score < SIMILARITY_THRESHOLD) continue;
 
@@ -77,18 +85,16 @@ std::vector<std::pair<std::string, float>> VectorStore::retrieve(const std::stri
         }
     }
 
+    if (valid_scores == 0) {
+        std::cerr << "[WARN] All scores were zero for query: " << query << "\n";
+    }
+
     std::vector<std::pair<std::string, float>> results;
     while (!minHeap.empty()) {
         results.push_back(minHeap.top());
         minHeap.pop();
     }
     std::reverse(results.begin(), results.end());
-
-    if (results.empty()) {
-        std::cerr << "[WARN] No relevant results found for query=\"" << query << "\"\n";
-    } else {
-        std::cerr << "[DEBUG] Retrieved " << results.size() << " results.\n";
-    }
 
     return results;
 }
@@ -110,7 +116,6 @@ bool VectorStore::loadEmbeddings(const std::string& filepath) {
         // Read embedding method
         int methodInt = 0;
         in.read(reinterpret_cast<char*>(&methodInt), sizeof(methodInt));
-       // embeddingMethod = static_cast<EmbeddingMethod>(methodInt);
 
         // Read documents and embeddings
         for (size_t i = 0; i < numDocs; ++i) {
@@ -133,11 +138,6 @@ bool VectorStore::loadEmbeddings(const std::string& filepath) {
     } catch (...) {
         return false;
     }
-if (documents.size() != embeddings.size()) {
-    std::cerr << "[ERROR] Mismatch: documents=" << documents.size() 
-              << ", embeddings=" << embeddings.size() << "\n";
-}
-
 }
 
 
@@ -150,8 +150,9 @@ bool VectorStore::saveEmbeddings(const std::string& filepath) const {
             size_t numDocs = documents.size();
             out.write(reinterpret_cast<const char*>(&numDocs), sizeof(numDocs));
             
-            // Write embedding method
-            //out.write(reinterpret_cast<const char*>(&embeddingMethod), sizeof(embeddingMethod));
+            // Dummy method int for legacy format compatibility
+            int dummy = 0;
+            out.write(reinterpret_cast<const char*>(&dummy), sizeof(dummy));
             
             // Write documents and embeddings
             for (size_t i = 0; i < numDocs; ++i) {
@@ -164,11 +165,6 @@ bool VectorStore::saveEmbeddings(const std::string& filepath) const {
                 out.write(reinterpret_cast<const char*>(embeddings[i].data()), 
                          embeddingSize * sizeof(float));
             }
-            if (documents.size() != embeddings.size()) {
-    std::cerr << "[ERROR] Mismatch: documents=" << documents.size() 
-              << ", embeddings=" << embeddings.size() << "\n";
-}
-
             return true;
         } catch (...) {
             return false;

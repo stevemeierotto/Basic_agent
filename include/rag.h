@@ -8,43 +8,69 @@
  */
 
 #pragma once
-#include "vector_store.h"
-#include "embedding_engine.h"
-#include "config.h"
-#include "file_handler.h"
-#include "index_manager.h"
-#include "chunkers/chunker.h"
 
-//#include <unordered_map>
-#include <string>
 #include <vector>
+#include <string>
 #include <memory>
-#include <set>
 #include <shared_mutex>
+#include <json.hpp>
 
-// Core RAG pipeline manager
+#include "embedding_engine.h"
+#include "index_manager.h"
+#include "config.h"
+#include "grag_scorer.h"
+#include "controller_event.h"
+
+class Memory;
+
+/**
+ * @brief Coordinates retrieval logic across multiple indices.
+ */
 class RAGPipeline {
 public:
-    explicit RAGPipeline(std::unique_ptr<EmbeddingEngine> eng, IndexManager* idxMgr, Config* cfg);
+    RAGPipeline(std::unique_ptr<EmbeddingEngine> engine, IndexManager* indexManager, Config* config = nullptr, Memory* memory = nullptr);
 
-    std::string query(const std::string& query);
+    // Main entry point for retrieval
+    std::vector<CodeChunk> retrieveRelevant(const std::string& query, 
+                                            const std::vector<int>& errorLines = {}, 
+                                            int topK = 5,
+                                            const std::string& requestId = "",
+                                            const std::string& planId = "",
+                                            const std::string& stepId = "");
 
-    std::vector<CodeChunk> retrieveRelevant(
-        const std::string& query,
-        const std::vector<int>& errorLines,
-        int topK = 3);
+    // Simple textual query
+    std::string query(const std::string& queryStr);
 
     void clear();
 
+    void setEventCallback(EventCallback cb) { eventCallback = cb; }
+
+    static std::string limitText(const std::string& text, size_t maxChars);
+
+    IndexManager* getIndexManager() { return indexManager; }
+    RetrievalConfig& getRetrievalConfig() { return retrievalConfig; }
+
+    void setGoalEmbedding(const std::vector<float>& g) { goalEmbedding = g; }
+    void setCurrentEmbedding(const std::vector<float>& c) { currentEmbedding = c; }
+    void setTrajectoryEmbedding(const std::vector<float>& t) { trajectoryEmbedding = t; }
+    void setPlanContext(const std::string& pId, const std::string& sId) { planId = pId; stepId = sId; }
+
     std::unique_ptr<EmbeddingEngine> engine;
     IndexManager* indexManager;
-    IndexManager* getIndexManager() const { return indexManager; }
-
-private:
     Config* config;
-    mutable std::shared_mutex chunksMutex;
-    //VectorStore store; // non-owning
-    std::string indexFilePath;
-    std::string limitText(const std::string& text, size_t maxChars);
-};
+    Memory* memory;
+    EventCallback eventCallback;
 
+    RetrievalConfig retrievalConfig;
+    std::vector<float> goalEmbedding;
+    std::vector<float> currentEmbedding;
+    std::vector<float> trajectoryEmbedding;
+    std::string planId;
+    std::string stepId;
+
+    void logGragBenchmark(const std::string& requestId, 
+                          const std::string& query,
+                          const GragDiagnostics& diagnostics);
+private:
+    std::shared_mutex chunksMutex;
+};

@@ -19,8 +19,9 @@ public:
         size_t maxContextLength = 4000;
         bool includeTimestamps = false;
         bool includeRoleLabels = true;
-        std::string systemPrompt = "";
+        std::string systemPrompt = "Respond in natural language unless you need to perform an action. Only use the JSON tool format when a tool is strictly necessary.";
         std::string conversationSeparator = "\n";
+        bool enableTools = true;
     };
 
 private:
@@ -41,7 +42,21 @@ public:
 
     std::string buildRagQueryPrompt(const std::string& query);
 
+    std::string buildPlanPrompt(const std::string& goal,
+                                const std::string& strategy_context,
+                                const std::string& past_experience);
+
+    std::string buildRevisionPrompt(const std::string& goal,
+                                    const std::string& existing_plan_json,
+                                    const std::string& failed_step_result_json);
+
 private:
     std::string truncateToLimit(const std::string& input, size_t maxLen) const;
+    std::string loadTemplate(const std::string& filename, const std::string& defaultValue);
+    std::string applySubstitutions(std::string templateStr, const std::unordered_map<std::string, std::string>& subs);
+    
+    std::string getToolList();
+    std::string getMemoryContext(bool useExtendedSummary);
+    std::string getConversationHistory();
 };
 

@@ -9,33 +9,48 @@
 
 class VectorStore {
 public:
-    // non-owning pointer: RAGPipeline owns the engine via unique_ptr
-    explicit VectorStore(EmbeddingEngine* engine)
-        : embeddingEngine(engine) {}
+    // non-owning pointer: RAGPipeline owns the engine
+    explicit VectorStore(EmbeddingEngine* eng) 
+        : embeddingEngine(eng), similarity(std::make_unique<CosineSimilarity>()) {}
 
+    void setSimilarity(std::unique_ptr<ISimilarity> similarity);
 
-    void setSimilarity(std::unique_ptr<ISimilarity> sim);
+    // Add document text (will use current engine to embed)
     void addDocument(const std::string& text);
+    
+    // Explicitly add document + embedding (e.g. from file)
+    void addDocumentWithEmbedding(const std::string& text, std::vector<float> embedding);
+
+    // Batch add documents
     void addDocuments(const std::vector<std::string>& texts);
 
-    std::vector<std::vector<float>> embeddings;
-    bool loadEmbeddings(const std::string& path);
-    bool saveEmbeddings(const std::string& filepath) const;
-    void enforceMemoryLimit(size_t maxMemoryBytes);
-    size_t getMemoryUsage() const;
-
+    // Clear everything
     void clear();
 
+    // Query for topK matches
+    std::vector<std::pair<std::string, float>> retrieve(const std::string& query, int topK);
 
-    std::vector<std::pair<std::string, float>> retrieve(const std::string& query, int topK = 3);
+    // Persistence
+    bool loadEmbeddings(const std::string& filepath);
+    bool saveEmbeddings(const std::string& filepath) const;
+
+    size_t getMemoryUsage() const;
+    void enforceMemoryLimit(size_t maxMemoryBytes);
+
+    size_t chunk_count() const { return documents.size(); }
+
+    // Phase 7.1 Accessors
+    const std::vector<std::vector<float>>& getEmbeddings() const { return embeddings; }
+    const std::vector<std::string>& getDocuments() const { return documents; }
 
 private:
-    static constexpr float SIMILARITY_THRESHOLD = 0.01f;
+    std::vector<std::vector<float>> embeddings;
+    
+    // Threshold for retrieval relevance (Phase 13 fix: lower to allow all signal)
+    static constexpr float SIMILARITY_THRESHOLD = -1.0f;
 
     std::vector<std::string> documents;
 
     EmbeddingEngine* embeddingEngine;  // non-owning raw pointer
-    std::unique_ptr<ISimilarity> similarity =
-        std::make_unique<DotProductSimilarity>();
+    std::unique_ptr<ISimilarity> similarity;
 };
-

@@ -1,23 +1,73 @@
 #include "../include/embedding_engine.h"
+#include "../include/config.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <fstream>
 #include <stdexcept>
 #include <iostream>
+#include <curl/curl.h>
+#include <../include/json.hpp>
 
-EmbeddingEngine::EmbeddingEngine(Method method) : method(method) {}
+using json = nlohmann::json;
+
+static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    ((std::string*)userp)->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
+
+EmbeddingEngine::EmbeddingEngine(Method method, Config* config)
+    : method(method), config(config), curl_handle(nullptr), curl_headers(nullptr) {
+}
+
+EmbeddingEngine::~EmbeddingEngine() {
+    if (curl_headers) curl_slist_free_all(curl_headers);
+    if (curl_handle) curl_easy_cleanup(static_cast<CURL*>(curl_handle));
+}
+
+std::string EmbeddingEngine::getModelName() const {
+    if (method == Method::External) {
+        const char* envModel = std::getenv("OLLAMA_EMBED_MODEL");
+        return envModel ? envModel : "nomic-embed-text";
+    }
+    return "local-tfidf";
+}
+
+int EmbeddingEngine::getDimension() const {
+    if (method == Method::External) {
+        std::string model = getModelName();
+        if (model.find("nomic") != std::string::npos) return 768;
+        if (model.find("bge-small") != std::string::npos) return 384;
+        return 768; 
+    }
+    return static_cast<int>(VOCAB_SIZE);
+}
+
+bool EmbeddingEngine::initCurl() {
+    if (curl_handle) return true;
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+
+    curl_headers = curl_slist_append(nullptr, "Content-Type: application/json");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curl_headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    
+    // Increased timeouts for robustness
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+    
+    curl_handle = curl;
+    return true;
+}
 
 void EmbeddingEngine::setMethod(Method m) {
     method = m;
 }
 
-// ------------------------------------------------------------------
-// Public API: central entrypoint for all callers
-// ------------------------------------------------------------------
 std::vector<float> EmbeddingEngine::embed(const std::string& text) {
-    std::vector<float> vec;
+    if (text.empty()) return {};
 
+    std::vector<float> vec;
     switch (method) {
         case Method::Simple:
             vec = embedSimple(text);
@@ -32,90 +82,136 @@ std::vector<float> EmbeddingEngine::embed(const std::string& text) {
             vec = embedExternal(text);
             break;
         default:
-            std::cerr << "[EmbeddingEngine] Unknown method, returning empty vector\n";
             return {};
     }
 
-    // Basic validation
-    if (vec.empty()) {
-        std::cerr << "[EmbeddingEngine] Warning: embedding returned empty vector (text length="
-                  << text.size() << ")\n";
-        return {};
-    }
-
-    for (size_t i = 0; i < vec.size(); ++i) {
-        if (!std::isfinite(vec[i])) {
-            std::cerr << "[EmbeddingEngine] Warning: non-finite embedding value at index "
-                      << i << " (text length=" << text.size() << ")\n";
-            return {};
-        }
-    }
-
-    // Normalize once and return
+    if (vec.empty()) return {};
     return normalizeVector(std::move(vec));
 }
 
-// ------------------------------------------------------------------
-// Embedding implementations (produce raw vectors only)
-// ------------------------------------------------------------------
+std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<std::string>& texts) {
+    if (texts.empty()) return {};
+
+    if (method != Method::External) {
+        std::vector<std::vector<float>> results;
+        results.reserve(texts.size());
+        for (const auto& t : texts) {
+            results.push_back(embed(t));
+        }
+        return results;
+    }
+
+    if (!initCurl()) {
+        std::cerr << "[EmbeddingEngine] Ollama service unreachable. Permanent fallback to local TfIdf.\n";
+        method = Method::TfIdf;
+        return embedBatch(texts);
+    }
+
+    std::string model = getModelName();
+
+    json payload;
+    payload["model"] = model;
+    payload["input"] = texts;
+    
+    std::string jsonStr = payload.dump();
+    std::string readBuffer;
+
+    CURL* curl = static_cast<CURL*>(curl_handle);
+    curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/embed");
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        std::cerr << "[EmbeddingEngine] Ollama batch failed: " << curl_easy_strerror(res) << ". Permanent fallback to TfIdf.\n";
+        method = Method::TfIdf;
+        return embedBatch(texts);
+    }
+
+    try {
+        auto j = json::parse(readBuffer);
+        if (j.contains("embeddings") && j["embeddings"].is_array()) {
+            std::vector<std::vector<float>> results;
+            for (const auto& emb : j["embeddings"]) {
+                results.push_back(normalizeVector(emb.get<std::vector<float>>()));
+            }
+            return results;
+        }
+    } catch (...) {}
+
+    std::cerr << "[EmbeddingEngine] Ollama parse failed. Permanent fallback to TfIdf.\n";
+    method = Method::TfIdf;
+    return embedBatch(texts);
+}
+
 std::vector<float> EmbeddingEngine::embedSimple(const std::string& text) {
-    // Simple per-character counts (raw)
     std::vector<float> vec;
     vec.reserve(text.size());
-    for (unsigned char c : text) {
-        vec.push_back(static_cast<float>(c));
-    }
+    for (unsigned char c : text) vec.push_back(static_cast<float>(c));
     return vec;
 }
 
 std::vector<float> EmbeddingEngine::embedTfIdf(const std::string& text) {
-    // Update vocabulary/state for TF-IDF (keeps corpus stats)
     updateVocabulary(text);
-
-    // Create TF-IDF-like vector (VOCAB_SIZE may be large)
     std::vector<float> vec(VOCAB_SIZE, 0.0f);
     auto tokens = tokenize(text);
     if (tokens.empty()) return vec;
 
-    // Compute term frequencies in this document
     for (const auto& t : tokens) {
         size_t idx = hashToIndex(t);
         float tf = std::count(tokens.begin(), tokens.end(), t) / static_cast<float>(tokens.size());
         vec[idx] = tf * calculateIdf(t);
     }
-
-    return vec; // raw
+    return vec;
 }
 
 std::vector<float> EmbeddingEngine::embedWordHash(const std::string& text) {
     auto tokens = tokenize(text);
     std::vector<float> vec(VOCAB_SIZE, 0.0f);
-    for (const auto& t : tokens) {
-        vec[hashToIndex(t)] += 1.0f;
-    }
-    return vec; // raw
-}
-
-std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
-    // Placeholder for external provider call. Return a raw vector.
-    // For now use a simple fallback so callers still get a non-empty vector.
-    std::vector<float> vec;
-    if (text.empty()) {
-        vec.push_back(0.0f);
-        return vec;
-    }
-
-    // Very small deterministic stub: fill with hashed values
-    const size_t OUT_SZ = std::min<size_t>(VOCAB_SIZE, 512);
-    vec.assign(OUT_SZ, 0.0f);
-    size_t h = std::hash<std::string>{}(text);
-    vec[h % OUT_SZ] = static_cast<float>((h & 0xffff) / 65535.0);
+    for (const auto& t : tokens) vec[hashToIndex(t)] += 1.0f;
     return vec;
 }
 
-// ------------------------------------------------------------------
-// Tokenization / helpers
-// ------------------------------------------------------------------
+std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
+    if (!initCurl()) {
+        std::cerr << "[EmbeddingEngine] Ollama service unreachable. Permanent fallback to local TfIdf.\n";
+        method = Method::TfIdf;
+        return embedTfIdf(text);
+    }
+
+    std::string model = getModelName();
+
+    json payload;
+    payload["model"] = model;
+    payload["input"] = text;
+    
+    std::string jsonStr = payload.dump();
+    std::string readBuffer;
+
+    CURL* curl = static_cast<CURL*>(curl_handle);
+    curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/embed");
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        std::cerr << "[EmbeddingEngine] Ollama failed: " << curl_easy_strerror(res) << ". Permanent fallback to TfIdf.\n";
+        method = Method::TfIdf;
+        return embedTfIdf(text);
+    }
+
+    try {
+        auto j = json::parse(readBuffer);
+        if (j.contains("embeddings") && j["embeddings"].is_array() && !j["embeddings"].empty()) {
+            return j["embeddings"][0].get<std::vector<float>>();
+        }
+    } catch (...) {}
+
+    std::cerr << "[EmbeddingEngine] Ollama result empty. Permanent fallback to TfIdf.\n";
+    method = Method::TfIdf;
+    return embedTfIdf(text);
+}
+
 std::vector<std::string> EmbeddingEngine::tokenize(const std::string& text) const {
     std::vector<std::string> tokens;
     std::string token;
@@ -138,139 +234,99 @@ size_t EmbeddingEngine::hashToIndex(const std::string& term) const {
 float EmbeddingEngine::calculateIdf(const std::string& term) const {
     auto it = documentFreq.find(term);
     if (it == documentFreq.end() || it->second == 0) return 0.0f;
-    return std::log(static_cast<float>(documents.size()) / static_cast<float>(1 + it->second));
+    return std::log((1.0f + static_cast<float>(documents.size())) / (1.0f + static_cast<float>(it->second))) + 1.0f;
 }
 
 void EmbeddingEngine::updateVocabulary(const std::string& text) {
     auto tokens = tokenize(text);
-    // Update corpus statistics
     for (const auto& t : tokens) {
         globalTermFreq[t] += 1.0f;
         documentFreq[t] += 1;
     }
-    documents.push_back(text);  // add document to corpus
+    documents.push_back(text);
 }
 
-// ------------------------------------------------------------------
-// Normalization helper (kept as member; accepts by-value or moved vector)
-// ------------------------------------------------------------------
 std::vector<float> EmbeddingEngine::normalizeVector(std::vector<float> vec) const {
-    // Use inner_product to compute squared norm
-    float norm = std::sqrt(std::inner_product(vec.begin(), vec.end(), vec.begin(), 0.0f));
-    if (norm > 0.0f) {
+    if (vec.empty()) return vec;
+    double sumSq = 0.0;
+    for (float v : vec) sumSq += static_cast<double>(v) * v;
+    float norm = static_cast<float>(std::sqrt(sumSq));
+    if (norm > 1e-9f) {
         for (auto& v : vec) v /= norm;
-    } else {
-        // If the vector is effectively zero, leave as-is but warn
-        std::cerr << "[EmbeddingEngine] Warning: zero-norm embedding encountered during normalization\n";
     }
     return vec;
 }
 
-// ------------------------------------------------------------------
-// Persistence (unchanged, preserved)
- // ------------------------------------------------------------------
 bool EmbeddingEngine::saveState(const std::string& filepath) const {
-    try {
-        std::ofstream out(filepath, std::ios::binary);
-        if (!out) return false;
-
-        // Save method
-        int methodInt = static_cast<int>(method);
-        out.write(reinterpret_cast<const char*>(&methodInt), sizeof(methodInt));
-
-        // Save documents
-        size_t numDocs = documents.size();
-        out.write(reinterpret_cast<const char*>(&numDocs), sizeof(numDocs));
-        for (const auto& doc : documents) {
-            size_t len = doc.size();
-            out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-            out.write(doc.data(), len);
-        }
-
-        // Save globalTermFreq
-        size_t gtfSize = globalTermFreq.size();
-        out.write(reinterpret_cast<const char*>(&gtfSize), sizeof(gtfSize));
-        for (const auto& kv : globalTermFreq) {
-            const std::string& term = kv.first;
-            float freq = kv.second;
-            size_t len = term.size();
-            out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-            out.write(term.data(), len);
-            out.write(reinterpret_cast<const char*>(&freq), sizeof(freq));
-        }
-
-        // Save documentFreq
-        size_t dfSize = documentFreq.size();
-        out.write(reinterpret_cast<const char*>(&dfSize), sizeof(dfSize));
-        for (const auto& kv : documentFreq) {
-            const std::string& term = kv.first;
-            size_t count = kv.second;
-            size_t len = term.size();
-            out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-            out.write(term.data(), len);
-            out.write(reinterpret_cast<const char*>(&count), sizeof(count));
-        }
-
-        return true;
-    } catch (...) {
-        return false;
+    std::ofstream out(filepath, std::ios::binary);
+    if (!out) return false;
+    int methodInt = static_cast<int>(method);
+    out.write(reinterpret_cast<const char*>(&methodInt), sizeof(methodInt));
+    size_t numDocs = documents.size();
+    out.write(reinterpret_cast<const char*>(&numDocs), sizeof(numDocs));
+    for (const auto& doc : documents) {
+        size_t len = doc.size();
+        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        out.write(doc.data(), len);
     }
+    size_t gtfSize = globalTermFreq.size();
+    out.write(reinterpret_cast<const char*>(&gtfSize), sizeof(gtfSize));
+    for (const auto& kv : globalTermFreq) {
+        size_t len = kv.first.size();
+        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        out.write(kv.first.data(), len);
+        out.write(reinterpret_cast<const char*>(&kv.second), sizeof(kv.second));
+    }
+    size_t dfSize = documentFreq.size();
+    out.write(reinterpret_cast<const char*>(&dfSize), sizeof(dfSize));
+    for (const auto& kv : documentFreq) {
+        size_t len = kv.first.size();
+        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        out.write(kv.first.data(), len);
+        out.write(reinterpret_cast<const char*>(&kv.second), sizeof(kv.second));
+    }
+    return true;
 }
 
 bool EmbeddingEngine::loadState(const std::string& filepath) {
-    try {
-        std::ifstream in(filepath, std::ios::binary);
-        if (!in) return false;
-
-        documents.clear();
-        globalTermFreq.clear();
-        documentFreq.clear();
-
-        // Load method
-        int methodInt = 0;
-        in.read(reinterpret_cast<char*>(&methodInt), sizeof(methodInt));
-        method = static_cast<Method>(methodInt);
-
-        // Load documents
-        size_t numDocs = 0;
-        in.read(reinterpret_cast<char*>(&numDocs), sizeof(numDocs));
-        for (size_t i = 0; i < numDocs; ++i) {
-            size_t len = 0;
-            in.read(reinterpret_cast<char*>(&len), sizeof(len));
-            std::string doc(len, '\0');
-            in.read(&doc[0], len);
-            documents.push_back(std::move(doc));
-        }
-
-        // Load globalTermFreq
-        size_t gtfSize = 0;
-        in.read(reinterpret_cast<char*>(&gtfSize), sizeof(gtfSize));
-        for (size_t i = 0; i < gtfSize; ++i) {
-            size_t len = 0;
-            in.read(reinterpret_cast<char*>(&len), sizeof(len));
-            std::string term(len, '\0');
-            in.read(&term[0], len);
-            float freq;
-            in.read(reinterpret_cast<char*>(&freq), sizeof(freq));
-            globalTermFreq[std::move(term)] = freq;
-        }
-
-        // Load documentFreq
-        size_t dfSize = 0;
-        in.read(reinterpret_cast<char*>(&dfSize), sizeof(dfSize));
-        for (size_t i = 0; i < dfSize; ++i) {
-            size_t len = 0;
-            in.read(reinterpret_cast<char*>(&len), sizeof(len));
-            std::string term(len, '\0');
-            in.read(&term[0], len);
-            size_t count;
-            in.read(reinterpret_cast<char*>(&count), sizeof(count));
-            documentFreq[std::move(term)] = count;
-        }
-
-        return true;
-    } catch (...) {
-        return false;
+    std::ifstream in(filepath, std::ios::binary);
+    if (!in) return false;
+    int methodInt;
+    in.read(reinterpret_cast<char*>(&methodInt), sizeof(methodInt));
+    method = static_cast<Method>(methodInt);
+    size_t numDocs;
+    in.read(reinterpret_cast<char*>(&numDocs), sizeof(numDocs));
+    documents.clear();
+    for (size_t i = 0; i < numDocs; ++i) {
+        size_t len;
+        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        std::string doc(len, '\0');
+        in.read(&doc[0], len);
+        documents.push_back(doc);
     }
+    size_t gtfSize;
+    in.read(reinterpret_cast<char*>(&gtfSize), sizeof(gtfSize));
+    globalTermFreq.clear();
+    for (size_t i = 0; i < gtfSize; ++i) {
+        size_t len;
+        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        std::string term(len, '\0');
+        in.read(&term[0], len);
+        float freq;
+        in.read(reinterpret_cast<char*>(&freq), sizeof(freq));
+        globalTermFreq[term] = freq;
+    }
+    size_t dfSize;
+    in.read(reinterpret_cast<char*>(&dfSize), sizeof(dfSize));
+    documentFreq.clear();
+    for (size_t i = 0; i < dfSize; ++i) {
+        size_t len;
+        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        std::string term(len, '\0');
+        in.read(&term[0], len);
+        size_t count;
+        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        documentFreq[term] = count;
+    }
+    return true;
 }
-

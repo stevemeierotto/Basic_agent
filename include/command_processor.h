@@ -10,19 +10,26 @@
 
 #pragma once
 #include <string>
+#include <memory>
+#include <unordered_map>
+#include <functional>
 #include "memory.h"
 #include "rag.h"
 #include "prompt_factory.h"
 #include "llm_interface.h"
 #include "index_manager.h"
 #include "config.h"
+#include "decision_trace.h"
+#include "executive_controller.h"
+#include "constraint_checker.h"
 
 class CommandProcessor {
 public:
     CommandProcessor(Memory& mem, 
                                    RAGPipeline& ragPipeline, 
                                    LLMInterface& llmInterface,
-                                   Config* cfg);
+                                   Config* cfg,
+                                   std::shared_ptr<Thoth::ExecutiveController> controller = nullptr);
 
     // Starts a REPL loop
     void runLoop();
@@ -32,24 +39,35 @@ public:
 
     // NEW: Send query through Memory + RAG + LLM
     std::string processQuery(const std::string& input);
+    void ensureInitialized();
+    void setInitialized(bool value) { initialized = value; }
+    void setController(std::shared_ptr<Thoth::ExecutiveController> ctrl) { controller = ctrl; }
+
+    std::string processToolCall(const std::string& response, DecisionTrace& trace);
 
 private:
+    void syncPromptConfig();
     static constexpr size_t DEFAULT_MAX_QUERY_LENGTH = 10000;
+    static constexpr size_t DEFAULT_MAX_COMMAND_ARGS_LENGTH = 2048;
     static constexpr int DEFAULT_RAG_TOP_K = 5;
     
     size_t maxQueryLength = DEFAULT_MAX_QUERY_LENGTH;
+    size_t maxCommandArgsLength = DEFAULT_MAX_COMMAND_ARGS_LENGTH;
     bool initialized = false;
 
     Memory& memory;
     RAGPipeline& rag;
     LLMInterface& llm;
+    std::shared_ptr<Thoth::ExecutiveController> controller;
     PromptFactory promptFactory;   
     IndexManager * indexManager;
     Config* config;
+    DecisionTraceLogger traceLogger;
+    Thoth::ConstraintChecker constraint_checker_;
 
     void showConfig() const;
     void setConfig(const std::string& key, const std::string& value);
-    void ensureInitialized();
+
     std::pair<std::string, std::string> parseCommand(const std::string& input);
     void showHelp();
     void clearMemory();
@@ -60,6 +78,10 @@ private:
 
     void handleRag(const std::string& args);
     void handleBackend(const std::string& args);
+    void handleBenchmark(const std::string& args);
+    bool isCommandAllowed(const std::string& cmd, const std::string& args, std::string& reason) const;
+    bool isQueryAllowed(std::string& reason) const;
+    bool hasDangerousArgPattern(const std::string& args) const;
 
     // helpers
     static std::string trim(const std::string& s);
@@ -67,4 +89,3 @@ private:
     static std::string toLower(std::string s);
     static bool startsWith(const std::string& s, const std::string& prefix);
 };
-

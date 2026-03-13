@@ -1,5 +1,62 @@
 === HEADER FILES ===
 
+./include/basic_agent_plugin.h:
+```cpp
+#pragma once
+
+#include <iostream>
+#include <string>
+
+#include "config.h"
+#include "memory.h"
+#include "rag.h"
+#include "command_processor.h"
+#include "llm_interface.h"
+#include "env_loader.h"
+#include "embedding_engine.h"
+
+//#include "Plugin.h"  // Plugin interface
+
+class BasicAgentPlugin {
+public:
+    BasicAgentPlugin();
+    ~BasicAgentPlugin();
+
+    std::string processInput(const std::string& input);
+
+    // --- Implement Plugin interface ---
+    bool initialize()  {
+        std::cerr << "[BasicAgentPlugin] initialize() called." << std::endl;
+        return true;
+    }
+
+    void shutdown()  {
+        std::cerr << "[BasicAgentPlugin] shutdown() called." << std::endl;
+
+    }
+
+    std::string name() const  {
+        return "BasicAgentPlugin";
+    }
+
+    std::string execute(const std::string& input)  {
+        // just call processInput
+        return processInput(input);
+    }
+
+private:
+    Config config;
+    Memory memory;
+    std::unique_ptr<EmbeddingEngine> embeddingEngine;
+    IndexManager* indexManager;
+    RAGPipeline rag;
+    LLMInterface llm;
+    CommandProcessor cmdProcessor;
+};
+
+
+```
+
 ./include/command_processor.h:
 ```cpp
 /*
@@ -18,7 +75,6 @@
 #include "rag.h"
 #include "prompt_factory.h"
 #include "llm_interface.h"
-#include "webscraperTools.h"
 #include "index_manager.h"
 #include "config.h"
 
@@ -33,14 +89,15 @@ public:
     void runLoop();
 
     void handleCommand(const std::string& input);
+    void handleSimilarityCommand(const std::string& args);
 
     // NEW: Send query through Memory + RAG + LLM
     std::string processQuery(const std::string& input);
+    void ensureInitialized();
 
 private:
     static constexpr size_t DEFAULT_MAX_QUERY_LENGTH = 10000;
     static constexpr int DEFAULT_RAG_TOP_K = 5;
-    static constexpr int DEFAULT_SCRAPE_RESULTS = 3;
     
     size_t maxQueryLength = DEFAULT_MAX_QUERY_LENGTH;
     bool initialized = false;
@@ -49,13 +106,12 @@ private:
     RAGPipeline& rag;
     LLMInterface& llm;
     PromptFactory promptFactory;   
-    WebScraperTools scraper;
     IndexManager * indexManager;
     Config* config;
 
     void showConfig() const;
     void setConfig(const std::string& key, const std::string& value);
-    void ensureInitialized();
+
     std::pair<std::string, std::string> parseCommand(const std::string& input);
     void showHelp();
     void clearMemory();
@@ -64,7 +120,6 @@ private:
     std::unordered_map<std::string, CommandHandler> commandHandlers;
     void initializeCommands();
 
-    void handleScrape(const std::string& args);
     void handleRag(const std::string& args);
     void handleBackend(const std::string& args);
 
@@ -91,9 +146,10 @@ public:
     // Core LLM parameters
     double temperature = 0.7;
     double top_p = 1.0;
-    double similarity_threshold =0.4;
+    
     int max_tokens = 512;
     int max_results = 5;
+    double similarity_threshold =0.6;
 
     // Runtime parameters
     int verbosity = 1;  // 0 = silent, 1 = normal, 2 = debug
@@ -189,13 +245,14 @@ private:
  * See LICENSE file in the project root for full license text
  */
 
-
 #pragma once
 #include <string>
 
 namespace EnvLoader {
-    bool loadEnvFile(const std::string& filename = ".env");
-}
+
+[[nodiscard]] bool loadEnvFile(const std::string& filename = ".env");
+
+} // namespace EnvLoader
 
 
 ```
@@ -241,7 +298,7 @@ public:
 class IndexManager {
 public:
         explicit IndexManager(EmbeddingEngine* eng)
-        : engine(eng), store(eng) {}
+        : store(eng) ,engine(eng){}
 
     void init(const std::string& indexPath);
 
@@ -263,6 +320,10 @@ public:
     void loadIndex(const std::string& dbPath);
 
     void clear();
+    VectorStore store;
+    std::vector<std::pair<std::string,float>> retrieveChunks(const std::string& query, int topK) {
+        return store.retrieve(query, topK);
+    }
 private:
         // Constants
     static constexpr size_t MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -282,7 +343,6 @@ private:
 
     std::vector<CodeChunk> chunks;
     EmbeddingEngine* engine;
-    VectorStore store;
     std::shared_mutex chunksMutex;
 
     void addChunk(CodeChunk&& chunk);
@@ -324,8 +384,6 @@ enum class LLMBackend {
 
 class LLMInterface {
 public:
-    //LLMInterface(LLMBackend backend = LLMBackend::Ollama);
-
      LLMInterface(LLMBackend backend = LLMBackend::Ollama, Config* cfg = nullptr);
     ~LLMInterface();
 
@@ -342,10 +400,12 @@ public:
     const std::string& getSelectedModel() const { return selectedModel; }
 
 private:
-    CURL* curl = nullptr;
-    struct curl_slist* headers = nullptr;
+    
+
     LLMBackend backend;
     Config* config;
+    CURL* curl = nullptr;
+    struct curl_slist* headers = nullptr;
     std::string selectedModel; 
 
     static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
@@ -522,34 +582,9 @@ public:
 private:
     Config* config;
     mutable std::shared_mutex chunksMutex;
-    VectorStore store; // non-owning
+    //VectorStore store; // non-owning
     std::string indexFilePath;
-
     std::string limitText(const std::string& text, size_t maxChars);
-};
-
-
-```
-
-./include/retriever.h:
-```cpp
-#pragma once
-#include "index_manager.h"
-#include <vector>
-#include <string>
-
-class Retriever {
-public:
-    explicit Retriever(IndexManager& indexMgr);
-
-    // Retrieve top-k relevant chunks
-    std::vector<CodeChunk> retrieveRelevant(
-        const std::string& query,
-        const std::vector<int>& errorLines = {},
-        int topK = 3);
-
-private:
-    IndexManager& indexManager;
 };
 
 
@@ -643,6 +678,8 @@ public:
     explicit VectorStore(EmbeddingEngine* engine)
         : embeddingEngine(engine) {}
 
+
+    void setSimilarity(std::unique_ptr<ISimilarity> sim);
     void addDocument(const std::string& text);
     void addDocuments(const std::vector<std::string>& texts);
 
@@ -654,7 +691,6 @@ public:
 
     void clear();
 
-    void setSimilarity(std::unique_ptr<ISimilarity> sim);
 
     std::vector<std::pair<std::string, float>> retrieve(const std::string& query, int topK = 3);
 
@@ -668,57 +704,5 @@ private:
         std::make_unique<DotProductSimilarity>();
 };
 
-
-```
-
-./include/webscraperTools.h:
-```cpp
-/*
- * Copyright (c) 2025 Steve Meierotto
- * 
- * basic_agent - AI Agent with Memory and RAG Capabilities
- * uses either Ollama lacal models or OpenAI API
- *
- * Licensed under the MIT License
- * See LICENSE file in the project root for full license text
- */
-
-#pragma once
-#include "tools.h"
-
-class WebScraperTools : public Tools {
-private:
-    std::string apiKey;
-    std::string cseId;
-
-    // --- CURL helper ---
-    std::string performCurlRequest(const std::string& url, const std::string& userAgent);
-
-public:
-    WebScraperTools();
-    WebScraperTools(const std::string& apiKey, const std::string& cseId);
-    std::string handleScrape(const std::string& query, int results=3, int snippets=3);
-
-    // Implement/override
-    std::string summarizeText(const std::string& text, int numSentences = 3) override;
-
-    std::vector<std::string> webSearch(const std::string& query, int maxResults = 5);
-    std::string fetchAndExtract(const std::string& url);
-    std::string searchAndSummarize(const std::string& query, int numResults = 5, int numSentences = 3);
-    bool writeSummary(const std::string& summary, const std::string& filename);
-    // --- Starter API Methods ---
-    
-    // Reddit API: fetch top posts from a subreddit
-    std::string fetchRedditPosts(const std::string& subreddit, int limit=5);
-
-    // News API: fetch top articles for a query
-    std::string fetchNewsArticles(const std::string& query, int limit=5);
-
-    // YouTube API: fetch video titles and descriptions for a search query
-    std::string fetchYouTubeVideos(const std::string& query, int limit=5);
-
-    // Google Custom Search API (already partially used)
-    std::string fetchGoogleCSEResults(const std::string& query, int numResults=5);
-};
 
 ```

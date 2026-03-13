@@ -66,3 +66,21 @@ float JaccardSimilarity::operator()(const std::vector<float>& a,
     return (unionCount > 0) ? static_cast<float>(intersection) / unionCount : 0.0f;
 }
 
+// Factory function to create similarity metric from string name
+std::unique_ptr<ISimilarity> createSimilarity(const std::string& name) {
+    std::string lowerName = name;
+    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+    
+    if (lowerName == "cosine") {
+        return std::make_unique<CosineSimilarity>();
+    } else if (lowerName == "dot" || lowerName == "dotproduct") {
+        return std::make_unique<DotProductSimilarity>();
+    } else if (lowerName == "euclidean") {
+        return std::make_unique<EuclideanSimilarity>();
+    } else if (lowerName == "jaccard") {
+        return std::make_unique<JaccardSimilarity>();
+    }
+    
+    // Default to cosine if unknown
+    return std::make_unique<CosineSimilarity>();
+}

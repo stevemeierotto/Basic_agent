@@ -3,38 +3,15 @@
 #include <iostream>
 #include <algorithm>
 #include <filesystem>
+#include <shared_mutex>
 #include <mutex>
 #include <fstream>
+#include <cstdint>
+#include <../include/json.hpp>
 
-
+using json = nlohmann::json;
 
 namespace fs = std::filesystem;
-// Helper: return true if 'path' is inside 'directory'.
-// Both paths are converted to absolute + normalized before comparison.
-static bool pathIsUnderDirectory(const std::string& pathStr, const std::string& dirStr) {
-    try {
-        fs::path p = fs::absolute(pathStr).lexically_normal();
-        fs::path d = fs::absolute(dirStr).lexically_normal();
-
-        std::string pS = p.string();
-        std::string dS = d.string();
-
-        // ensure trailing separator on directory string so prefix-check is correct
-        if (!dS.empty() && dS.back() != fs::path::preferred_separator) {
-            dS.push_back(fs::path::preferred_separator);
-        }
-
-        // also add separator to file path when comparing (safer)
-        if (!pS.empty() && pS.back() != fs::path::preferred_separator) {
-            // no-op, don't append separator to file paths
-        }
-
-        return pS.rfind(dS, 0) == 0; // starts with
-    } catch (...) {
-        return false;
-    }
-}
-
 std::string sanitize_utf8(const std::string& input) {
     std::string output;
     output.reserve(input.size());
@@ -42,13 +19,21 @@ std::string sanitize_utf8(const std::string& input) {
         if (c < 0x80) {
             output.push_back(c);  // ASCII
         } else {
-            // Replace any non-ASCII byte with a space or '?'
             output.push_back(' ');
         }
     }
     return output;
 }
 
+static std::uint64_t computeFileFingerprint(const std::string& filePath) {
+    std::error_code ec;
+    const auto size = fs::file_size(filePath, ec);
+    if (ec) return 0;
+    const auto writeTime = fs::last_write_time(filePath, ec);
+    if (ec) return static_cast<std::uint64_t>(size);
+    const auto ticks = static_cast<std::uint64_t>(writeTime.time_since_epoch().count());
+    return (ticks * 1315423911ULL) ^ static_cast<std::uint64_t>(size);
+}
 
 size_t IndexManager::getCurrentMemoryUsage() const {
     size_t total = 0;
@@ -61,471 +46,465 @@ size_t IndexManager::getCurrentMemoryUsage() const {
 }
 
 const std::vector<CodeChunk>& IndexManager::getChunks() const {
-    return chunks; // return the internal vector of chunks
+    return chunks;
 }
-void IndexManager::enforceMemoryLimits() {
-    std::unique_lock lock(chunksMutex);  // exclusive lock for modification
 
+const CodeChunk* IndexManager::getChunkByCode(const std::string& codeText) const {
+    std::shared_lock<std::shared_mutex> lock(chunksMutex);
+    auto it = codeToChunkIndex.find(codeText);
+    if (it != codeToChunkIndex.end() && it->second < chunks.size()) {
+        return &chunks[it->second];
+    }
+    return nullptr;
+}
+
+void IndexManager::enforceMemoryLimits() {
+    std::unique_lock lock(chunksMutex);
     if (chunks.size() > MAX_CHUNKS || getCurrentMemoryUsage() > MAX_TOTAL_SIZE) {
-        std::cout << "[RAG] Memory limits exceeded, removing oldest chunks\n";
-        
-        // Simple LRU: remove first 20% of chunks
         size_t toRemove = chunks.size() / 5;
         chunks.erase(chunks.begin(), chunks.begin() + toRemove);
-
-        rebuildInternalStructures();  // also protected internally if needed
-        std::cout << "[RAG] Removed " << toRemove << " chunks\n";
+        rebuildInternalStructures();
     }
 }
 
-
-
 void IndexManager::removeChunksFromPath(const std::string& rootPath) {
-    std::unique_lock lock(chunksMutex); // exclusive lock for writes
+    std::unique_lock lock(chunksMutex);
+    std::vector<std::string> removedFiles;
     chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
         [&](const CodeChunk& c) { 
-            return c.fileName.rfind(rootPath, 0) == 0; 
+            const bool remove = c.fileName.rfind(rootPath, 0) == 0;
+            if (remove) removedFiles.push_back(c.fileName);
+            return remove; 
         }), chunks.end());
+    for (const auto& file : removedFiles) indexedFileFingerprints.erase(file);
 }
 
-// --- Clear all chunks, store, and mappings ---
 void IndexManager::clear() {
     std::unique_lock lock(chunksMutex);
     chunks.clear();
     codeToChunkIndex.clear();
+    indexedFileFingerprints.clear();
     store.clear();
-    std::cout << "[IndexManager] Cleared all in-memory chunks and store.\n";
 }
 
-// --- Add single chunk safely (renamed from addChunkToIndex) ---
 void IndexManager::addChunk(CodeChunk&& chunk) {
-    std::cerr << "[DEBUG] Adding chunk: file=" << chunk.fileName
-              << ", symbol=" << chunk.symbolName
-              << ", start=" << chunk.startLine
-              << ", end=" << chunk.endLine
-              << ", code size=" << chunk.code.size()
-              << ", embedding size=" << chunk.embedding.size() << "\n";
-    std::unique_lock lock(chunksMutex);
-    size_t index = chunks.size();
-    chunks.push_back(std::move(chunk));
-    store.addDocument(chunks.back().code);
-    codeToChunkIndex[chunks.back().code] = index;
+    if (chunk.code.empty()) {
+        return;
+    }
+    
+    // Phase 3.1 Hardening: Accept chunk if it has EITHER semantic embedding OR keyword signal
+    bool hasSemantic = !chunk.embedding.empty() && 
+                       !std::all_of(chunk.embedding.begin(), chunk.embedding.end(), [](float v){ return v == 0.0f; });
+    bool hasKeyword = chunk.keyword_score > 0.001f;
+
+    if (!hasSemantic && !hasKeyword) {
+        return;
+    }
+
+    {
+        std::unique_lock lock(chunksMutex);
+        if (codeToChunkIndex.find(chunk.code) != codeToChunkIndex.end()) return;
+        size_t index = chunks.size();
+        chunks.push_back(std::move(chunk));
+        store.addDocumentWithEmbedding(chunks.back().code, chunks.back().embedding);
+        codeToChunkIndex[chunks.back().code] = index;
+    }
 }
 
+std::string IndexManager::getCurrentCommitHash() const {
+    char buffer[128];
+    std::string result = "";
+    FILE* pipe = popen("git rev-parse HEAD 2>/dev/null", "r");
+    if (!pipe) return "unknown";
+    if (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+        result = buffer;
+        if (!result.empty() && result.back() == '\n') result.pop_back();
+    }
+    pclose(pipe);
+    return result.empty() ? "unknown" : result;
+}
+
+bool IndexManager::shouldReindexFile(const std::string& filePath) {
+    std::string normalized;
+    try {
+        normalized = fs::absolute(filePath).lexically_normal().string();
+    } catch (...) { normalized = filePath; }
+
+    const auto fingerprint = computeFileFingerprint(normalized);
+    if (fingerprint == 0) return true;
+    
+    std::shared_lock lock(chunksMutex);
+    const auto it = indexedFileFingerprints.find(normalized);
+    if (it == indexedFileFingerprints.end()) return true;
+    if (it->second != fingerprint) return true;
+    
+    std::string currentHash = getCurrentCommitHash();
+    for (const auto& c : chunks) {
+        if (c.fileName == normalized) {
+            if (c.embedding_version < engine->getInternalVersion()) return true;
+            if (c.commit_hash != currentHash) return true;
+        }
+    }
+    return false;
+}
+
+void IndexManager::removeChunksForFile(const std::string& filePath) {
+    std::string normalized;
+    try {
+        normalized = fs::absolute(filePath).lexically_normal().string();
+    } catch (...) { normalized = filePath; }
+
+    std::unique_lock lock(chunksMutex);
+    chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
+            [&](const CodeChunk& c) { return c.fileName == normalized; }),
+        chunks.end());
+    indexedFileFingerprints.erase(normalized);
+}
 
 void IndexManager::init(const std::string& indexPath) {
     FileHandler fh;
-
     if (!indexPath.empty()) {
-        indexFilePath = indexPath;
+        fs::path supplied(indexPath);
+        if (fs::exists(supplied) && fs::is_directory(supplied)) {
+            indexFilePath = (supplied / "rag_index.bin").string();
+        } else {
+            indexFilePath = supplied.string();
+        }
     } else {
-        
         indexFilePath = fh.getRagPath("rag_index.bin");
     }
-    std::cout << "[RAG] Loading index from: " << indexFilePath << "\n";
     loadIndex(indexFilePath);
-
-    // Prune chunks not under RAG directory
-    std::string ragDir = fh.getRagDirectory();
-    size_t originalSize = chunks.size();
-
-    chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
-        [&](const CodeChunk& c){
-            return !pathIsUnderDirectory(c.fileName, ragDir);
-        }), chunks.end());
-
-    if (originalSize != chunks.size()) {
-        std::cout << "[RAG] Pruned " << (originalSize - chunks.size())
-                  << " out-of-scope chunks\n";
-    }
-
-    // Rebuild vector store + mappings
     rebuildInternalStructures();
-
-    std::cout << "[RAG] Initialization complete: " << chunks.size()
-              << " chunks ready\n";
 }
 
-
 void IndexManager::indexFile(const std::string& filePath) {
-    // Read the file contents; store absolute path
-    std::ifstream in(filePath, std::ios::binary);
-    if (!in) {
-        std::cerr << "[RAG] Failed to open file for indexing: " << filePath << "\n";
+    std::string normalizedPath;
+    try {
+        normalizedPath = fs::absolute(filePath).lexically_normal().string();
+    } catch (...) { normalizedPath = filePath; }
+
+    // STRICT SANDBOX ENFORCEMENT
+    if (normalizedPath.find("/home/steve/Thoth/agent_workspace/") == std::string::npos) {
+        std::cerr << "[SECURITY] REJECTED path outside sandbox: " << normalizedPath << "\n";
         return;
     }
 
+    if (!shouldReindexFile(normalizedPath)) {
+        return;
+    }
+    removeChunksForFile(normalizedPath);
+    
+    std::ifstream in(normalizedPath, std::ios::binary);
+    if (!in) return;
+    std::error_code ec;
+    const auto fileSize = fs::file_size(normalizedPath, ec);
+    if (!ec && fileSize > MAX_FILE_SIZE) return;
     std::ostringstream ss;
     ss << in.rdbuf();
     std::string content = ss.str();
-
-    // Skip empty files
-    if (content.empty()) {
-        std::cerr << "[RAG] File is empty, skipping: " << filePath << "\n";
-        return;
-    }
-
-    if (!engine) {
-        std::cerr << "[ERROR] Embedding engine is null; cannot index file: " << filePath << "\n";
-        return;
-    }
-
+    if (content.empty()) return;
+    if (!engine) return;
     content = sanitize_utf8(content);
-    //Chunker chunker;
-    // Create smart chunks (may return empty)
-    auto chunksVec = Chunker::createSmartChunks(filePath, content);
-
-    // If the smart chunker returned empty, fallback to size-based chunking.
+    
+    auto chunksVec = Chunker::createSmartChunks(normalizedPath, content);
+    if (chunksVec.empty()) chunksVec = Chunker::chunkBySize(normalizedPath, content);
+    
     if (chunksVec.empty()) {
-        std::cerr << "[WARN] createSmartChunks returned 0 chunks for: "
-                  << filePath << ". Falling back to chunkBySize().\n";
-        chunksVec = Chunker::chunkBySize(filePath, content);
-    }
-
-    // If still empty, add the whole file as a single fallback chunk (last resort).
-    if (chunksVec.empty()) {
-        std::cerr << "[ERROR] chunkBySize also returned 0 chunks for: "
-                  << filePath << ". Adding whole file as a single chunk.\n";
-
         CodeChunk fallbackChunk;
-        fallbackChunk.fileName = fs::absolute(filePath).lexically_normal().string();
-        fallbackChunk.symbolName = "";
+        fallbackChunk.fileName = normalizedPath;
         fallbackChunk.startLine = 1;
         fallbackChunk.endLine = 0;
-        fallbackChunk.code = std::move(content); // move the big string
-
-        // Remove null bytes
-        fallbackChunk.code.erase(std::remove(fallbackChunk.code.begin(), fallbackChunk.code.end(), '\0'),
-                                 fallbackChunk.code.end());
-
-        try {
+        fallbackChunk.code = std::move(content);
+        std::error_code ec_m;
+        auto f_time = fs::last_write_time(normalizedPath, ec_m);
+        fallbackChunk.last_modified = std::chrono::duration_cast<std::chrono::milliseconds>(f_time.time_since_epoch()).count();
+        fallbackChunk.embedding_version = engine->getInternalVersion();
+        fallbackChunk.commit_hash = getCurrentCommitHash();
+        fallbackChunk.code.erase(std::remove(fallbackChunk.code.begin(), fallbackChunk.code.end(), '\0'), fallbackChunk.code.end());
+        try { 
             fallbackChunk.embedding = engine->embed(fallbackChunk.code);
-        } catch (const std::exception& ex) {
-            std::cerr << "[ERROR] Embedding failed for fallback chunk (" << filePath
-                      << "): " << ex.what() << "\n";
+            if (localTfIdfEngine) {
+                auto tfidf = localTfIdfEngine->embed(fallbackChunk.code);
+                float sum = 0;
+                for (float v : tfidf) sum += v * v;
+                fallbackChunk.keyword_score = std::sqrt(sum);
+            }
+        } catch (...) {}
+        addChunk(std::move(fallbackChunk));
+        {
+            std::unique_lock lock(chunksMutex);
+            indexedFileFingerprints[normalizedPath] = computeFileFingerprint(normalizedPath);
         }
-
-        addChunkToIndex(std::move(fallbackChunk));
-        try {
-            store.addDocument(chunksVec.empty() ? fallbackChunk.code : std::string()); // best-effort
-        } catch (const std::exception& ex) {
-            std::cerr << "[WARN] store.addDocument failed for fallback chunk: " << ex.what() << "\n";
-        }
-        std::cerr << "[DEBUG] Indexed file with 1 fallback chunk: " << filePath << "\n";
         return;
     }
+    
+    std::vector<std::string> codes;
+    for (const auto& c : chunksVec) codes.push_back(c.code);
+    auto embeddings = engine->embedBatch(codes);
 
-    // Process each chunk: generate embedding, add to index and to vector store
-    size_t added = 0;
     for (size_t i = 0; i < chunksVec.size(); ++i) {
         CodeChunk &chunkRef = chunksVec[i];
-
-        // Skip empty or whitespace-only chunks
-        if (chunkRef.code.empty() ||
-            std::all_of(chunkRef.code.begin(), chunkRef.code.end(), ::isspace)) 
-        {
-            std::cerr << "[WARN] Skipping blank or whitespace-only chunk at index " << i
-                      << " for file: " << filePath << "\n";
-            continue;
-        }
-
-        // Remove null bytes to avoid JSON/UTF-8 crashes
-        chunkRef.code.erase(std::remove(chunkRef.code.begin(), chunkRef.code.end(), '\0'),
-                            chunkRef.code.end());
-
-        // Skip very low-content chunks (few non-space characters)
-        size_t nonspace_count = std::count_if(
-            chunkRef.code.begin(),
-            chunkRef.code.end(),
-            [](char c){ return !std::isspace(c); }
-        );
-        if (nonspace_count < 10) { // threshold can be adjusted
-            std::cerr << "[WARN] Skipping low-content chunk at index " << i
-                      << " for file: " << filePath << "\n";
-            continue;
-        }
-
+        if (chunkRef.code.empty() || std::all_of(chunkRef.code.begin(), chunkRef.code.end(), ::isspace)) continue;
+        chunkRef.code.erase(std::remove(chunkRef.code.begin(), chunkRef.code.end(), '\0'), chunkRef.code.end());
+        size_t nonspace_count = std::count_if(chunkRef.code.begin(), chunkRef.code.end(), [](char c){ return !std::isspace(c); });
+        if (nonspace_count < 10) continue;
         try {
-            chunkRef.embedding = engine->embed(chunkRef.code);
+            if (i < embeddings.size()) chunkRef.embedding = embeddings[i];
+            else chunkRef.embedding = engine->embed(chunkRef.code);
 
-            // Skip zero-norm embeddings
-            bool isZero = std::all_of(
-                chunkRef.embedding.begin(),
-                chunkRef.embedding.end(),
-                [](float v){ return v == 0.0f; }
-            );
-            if (isZero) {
-                std::cerr << "[WARN] Skipping zero-norm embedding for chunk " << i
-                          << " in file: " << filePath << "\n";
-                continue;
+            std::error_code ec_m;
+            auto f_time = fs::last_write_time(normalizedPath, ec_m);
+            chunkRef.last_modified = std::chrono::duration_cast<std::chrono::milliseconds>(f_time.time_since_epoch()).count();
+            chunkRef.embedding_version = engine->getInternalVersion();
+            chunkRef.commit_hash = getCurrentCommitHash();
+
+            if (localTfIdfEngine) {
+                auto tfidf = localTfIdfEngine->embed(chunkRef.code);
+                float sum = 0;
+                for (float v : tfidf) sum += v * v;
+                chunkRef.keyword_score = std::sqrt(sum);
             }
 
-        } catch (const std::exception& ex) {
-            std::cerr << "[ERROR] Embedding failed for chunk " << i << " ("
-                      << filePath << "): " << ex.what() << " — skipping chunk.\n";
-            continue;
-        }
-
-        // Move the chunk out of the vector into a local variable before adding
-        CodeChunk chunk = std::move(chunkRef);
-
-        // Add to RAG in-memory index
-        addChunkToIndex(std::move(chunk));
-
-        // Add the chunk text to the vector store. Use chunk.code (still valid).
-        try {
-            store.addDocument(chunk.code);
-        } catch (const std::exception& ex) {
-            std::cerr << "[WARN] store.addDocument failed for chunk " << i
-                      << " (" << filePath << "): " << ex.what() << "\n";
-        }
-
-        ++added;
+            bool isZero = std::all_of(chunkRef.embedding.begin(), chunkRef.embedding.end(), [](float v){ return v == 0.0f; });
+            if (isZero && chunkRef.keyword_score < 0.001f) continue;
+        } catch (...) { continue; }
+        addChunk(std::move(chunkRef));
     }
-
-    std::cerr << "[DEBUG] Indexed file with " << added
-              << " chunk(s) (requested: " << chunksVec.size()
-              << "): " << filePath << "\n";
+    {
+        std::unique_lock lock(chunksMutex);
+        indexedFileFingerprints[normalizedPath] = computeFileFingerprint(normalizedPath);
+    }
 }
 
 void IndexManager::indexProject(const std::string& rootPath) {
-    if (!fs::exists(rootPath)) {
-        std::cerr << "[RAG] Path does not exist: " << rootPath << "\n";
+    if (!fs::exists(rootPath) || !fs::is_directory(rootPath)) return;
+    std::string rootAbs = fs::absolute(rootPath).lexically_normal().string();
+
+    // STRICT SANDBOX ENFORCEMENT
+    if (rootAbs.find("/home/steve/Thoth/agent_workspace/") == std::string::npos) {
+        std::cerr << "[SECURITY] REJECTED rootPath outside sandbox: " << rootAbs << "\n";
         return;
     }
+
+    int successCount = 0, errorCount = 0, skippedCount = 0;
+    constexpr size_t MAX_FILES_TO_INDEX = 2000;
+    size_t filesProcessed = 0;
     
-    if (!fs::is_directory(rootPath)) {
-        std::cerr << "[RAG] Path is not a directory: " << rootPath << "\n";
-        return;
-    }
-    
-    int successCount = 0, errorCount = 0;
-    
-    // Remove old chunks from this path first
-    size_t oldSize = chunks.size();
-    removeChunksFromPath(rootPath);
-    
-    if (oldSize != chunks.size()) {
-        std::cout << "[RAG] Removed " << (oldSize - chunks.size()) 
-                  << " old chunks from: " << rootPath << "\n";
-        rebuildInternalStructures();
-    }
-    
+    std::cout << "[RAG] Starting recursive index of: " << rootAbs << "\n";
+
     try {
         for (const auto& entry : fs::recursive_directory_iterator(rootPath)) {
+            if (filesProcessed >= MAX_FILES_TO_INDEX) break;
             if (!entry.is_regular_file()) continue;
             
+            std::string fullPath = fs::absolute(entry.path()).lexically_normal().string();
+            std::string filename = entry.path().filename().string();
+            
+            if (filename == "rag_index.bin") continue;
+            if (fullPath.find("/build/") != std::string::npos) continue;
+            if (fullPath.find("/.git/") != std::string::npos) continue;
+            if (fullPath.find("/docs/") != std::string::npos) continue;
+
             auto ext = entry.path().extension().string();
             if (isSupportedExtension(ext)) {
                 try {
-                    indexFile(entry.path().string());
+                    if (!shouldReindexFile(fullPath)) { 
+                        skippedCount++; 
+                        continue; 
+                    }
+                    indexFile(fullPath);
                     successCount++;
-                } catch (const std::exception& e) {
-                    std::cerr << "[RAG] Error indexing " << entry.path() 
-                              << ": " << e.what() << "\n";
-                    errorCount++;
-                }
+                    filesProcessed++;
+                    if (filesProcessed % 50 == 0) {
+                        std::cout << "[RAG] ... processed " << filesProcessed << " files\n";
+                    }
+                } catch (...) { errorCount++; }
             }
         }
-    } catch (const fs::filesystem_error& e) {
-        std::cerr << "[RAG] Filesystem error: " << e.what() << "\n";
-        return;
+    } catch (const std::exception& e) { 
+        std::cerr << "[RAG] Critical error during indexProject: " << e.what() << "\n";
     }
     
-    std::cout << "[RAG] Indexed " << fs::absolute(rootPath) 
-              << " - Success: " << successCount << ", Errors: " << errorCount << "\n";
+    std::cout << "[RAG] Indexed " << rootAbs << " - Success: " << successCount << ", Skipped: " << skippedCount << ", Errors: " << errorCount << "\n";
 }
-
-
-// --- Save / Load ---
-
 
 void IndexManager::saveIndex() const {
     FileHandler fh;
-    std::string path = fh.getRagPath("rag_index.bin");
-    saveIndex(path);
-
+    saveIndex(fh.getRagPath("rag_index.bin"));
 }
 
-// ----------------- saveIndex (unified layout) -----------------
 void IndexManager::saveIndex(const std::string& dbPath) const {
     std::filesystem::create_directories(std::filesystem::path(dbPath).parent_path());
     std::ofstream out(dbPath, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        std::cerr << "[basic_agent:RAG] Failed to open " << dbPath << " for writing.\n";
-        return;
-    }
+    if (!out) return;
 
-    // Write number of chunks
+    json header;
+    header["magic"] = 0x54484F54;
+    header["model_name"] = engine->getModelName();
+    header["embedding_dimension"] = engine->getDimension();
+    header["embedding_version"] = engine->getInternalVersion();
+    std::string headerStr = header.dump();
+    size_t headerLen = headerStr.size();
+    out.write(reinterpret_cast<const char*>(&headerLen), sizeof(headerLen));
+    out.write(headerStr.data(), headerLen);
+
     size_t n = chunks.size();
     out.write(reinterpret_cast<const char*>(&n), sizeof(n));
-
-    // Write chunks
     for (const auto& c : chunks) {
         size_t len;
-
-        len = c.fileName.size();
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(c.fileName.data(), len);
-
-        len = c.symbolName.size();
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(c.symbolName.data(), len);
-
+        len = c.fileName.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len)); out.write(c.fileName.data(), len);
+        len = c.symbolName.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len)); out.write(c.symbolName.data(), len);
         out.write(reinterpret_cast<const char*>(&c.startLine), sizeof(c.startLine));
         out.write(reinterpret_cast<const char*>(&c.endLine), sizeof(c.endLine));
-
-        len = c.code.size();
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(c.code.data(), len);
-
-        // Write embedding
-        len = c.embedding.size();
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        if (len > 0) {
-            out.write(reinterpret_cast<const char*>(c.embedding.data()), len * sizeof(float));
-        }
+        len = c.code.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len)); out.write(c.code.data(), len);
+        len = c.embedding.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        if (len > 0) out.write(reinterpret_cast<const char*>(c.embedding.data()), len * sizeof(float));
+        out.write(reinterpret_cast<const char*>(&c.last_modified), sizeof(c.last_modified));
+        len = c.commit_hash.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        if (len > 0) out.write(c.commit_hash.data(), len);
+        out.write(reinterpret_cast<const char*>(&c.embedding_version), sizeof(c.embedding_version));
+        out.write(reinterpret_cast<const char*>(&c.keyword_score), sizeof(c.keyword_score));
     }
-
-    // Save engine state
+    
+    // Save Primary Engine State
     {
         std::string tmpFile = dbPath + ".engine_tmp";
         engine->saveState(tmpFile);
         std::ifstream engIn(tmpFile, std::ios::binary);
-        std::string engData((std::istreambuf_iterator<char>(engIn)),
-                             std::istreambuf_iterator<char>());
+        std::string engData((std::istreambuf_iterator<char>(engIn)), std::istreambuf_iterator<char>());
         size_t engSize = engData.size();
         out.write(reinterpret_cast<const char*>(&engSize), sizeof(engSize));
         out.write(engData.data(), engSize);
         std::filesystem::remove(tmpFile);
     }
 
-    std::cout << "[basic_agent:RAG] Index saved to: " << dbPath
-              << " (entries=" << n << ")\n";
+    // Phase 13 Fix: Save Local TF-IDF Engine State
+    if (localTfIdfEngine) {
+        std::string tmpFile = dbPath + ".tfidf_tmp";
+        localTfIdfEngine->saveState(tmpFile);
+        std::ifstream engIn(tmpFile, std::ios::binary);
+        std::string engData((std::istreambuf_iterator<char>(engIn)), std::istreambuf_iterator<char>());
+        size_t engSize = engData.size();
+        out.write(reinterpret_cast<const char*>(&engSize), sizeof(engSize));
+        out.write(engData.data(), engSize);
+        std::filesystem::remove(tmpFile);
+    } else {
+        size_t zero = 0;
+        out.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
+    }
+
+    std::cout << "[basic_agent:RAG] Index saved to: " << dbPath << " (entries=" << n << ")\n";
 } 
 
 void IndexManager::loadIndex() {
     FileHandler fh;
-    std::string path = fh.getRagPath("rag_index.bin");
-    loadIndex(path);
-    
+    loadIndex(fh.getRagPath("rag_index.bin"));
 }
 
-
-
-// ----------------- loadIndex (unified layout) -----------------
 void IndexManager::loadIndex(const std::string& dbPath) {
     std::ifstream in(dbPath, std::ios::binary);
-    if (!in) {
-        std::cerr << "[basic_agent:RAG] No index found at " << dbPath << " (starting fresh).\n";
-        return;
+    if (!in) return;
+
+    size_t headerLen = 0;
+    in.read(reinterpret_cast<char*>(&headerLen), sizeof(headerLen));
+    if (headerLen > 0 && headerLen < 1024*1024) {
+        std::string headerStr(headerLen, '\0');
+        in.read(&headerStr[0], headerLen);
+        try {
+            json header = json::parse(headerStr);
+            bool mismatch = false;
+            if (header.value("model_name", "") != engine->getModelName()) mismatch = true;
+            if (header.value("embedding_dimension", 0) != engine->getDimension()) mismatch = true;
+            if (header.value("embedding_version", 0) != engine->getInternalVersion()) mismatch = true;
+
+            if (mismatch) {
+                std::cout << "[RAG] Index metadata mismatch detected.\n";
+                return;
+            }
+        } catch (...) {}
     }
 
     size_t n;
     in.read(reinterpret_cast<char*>(&n), sizeof(n));
-
     {
-        std::unique_lock lock(chunksMutex);  // lock for writes
+        std::unique_lock lock(chunksMutex);
         chunks.clear(); 
+        codeToChunkIndex.clear();
         chunks.reserve(n);
     }
-
     for (size_t i = 0; i < n; ++i) {
         CodeChunk c; size_t len;
-
-        in.read(reinterpret_cast<char*>(&len), sizeof(len));
-        c.fileName.resize(len);
-        in.read(&c.fileName[0], len);
-
-        in.read(reinterpret_cast<char*>(&len), sizeof(len));
-        c.symbolName.resize(len);
-        in.read(&c.symbolName[0], len);
-
+        in.read(reinterpret_cast<char*>(&len), sizeof(len)); c.fileName.resize(len); in.read(&c.fileName[0], len);
+        in.read(reinterpret_cast<char*>(&len), sizeof(len)); c.symbolName.resize(len); in.read(&c.symbolName[0], len);
         in.read(reinterpret_cast<char*>(&c.startLine), sizeof(c.startLine));
         in.read(reinterpret_cast<char*>(&c.endLine), sizeof(c.endLine));
-
-        in.read(reinterpret_cast<char*>(&len), sizeof(len));
-        c.code.resize(len);
-        in.read(&c.code[0], len);
-
-        // Read embedding
-        size_t embLen;
-        in.read(reinterpret_cast<char*>(&embLen), sizeof(embLen));
-        c.embedding.resize(embLen);
-        if (embLen > 0) {
-            in.read(reinterpret_cast<char*>(c.embedding.data()), embLen * sizeof(float));
-        }
-
+        in.read(reinterpret_cast<char*>(&len), sizeof(len)); c.code.resize(len); in.read(&c.code[0], len);
+        size_t embLen; in.read(reinterpret_cast<char*>(&embLen), sizeof(embLen)); c.embedding.resize(embLen);
+        if (embLen > 0) in.read(reinterpret_cast<char*>(c.embedding.data()), embLen * sizeof(float));
+        in.read(reinterpret_cast<char*>(&c.last_modified), sizeof(c.last_modified));
+        size_t hashLen; in.read(reinterpret_cast<char*>(&hashLen), sizeof(hashLen));
+        if (hashLen > 0) { c.commit_hash.resize(hashLen); in.read(&c.commit_hash[0], hashLen); }
+        in.read(reinterpret_cast<char*>(&c.embedding_version), sizeof(c.embedding_version));
+        in.read(reinterpret_cast<char*>(&c.keyword_score), sizeof(c.keyword_score));
         try { c.fileName = fs::absolute(c.fileName).lexically_normal().string(); } catch (...) {}
-
         {
             std::unique_lock lock(chunksMutex);
+            codeToChunkIndex[c.code] = chunks.size();
             chunks.push_back(std::move(c));
+            indexedFileFingerprints[chunks.back().fileName] = computeFileFingerprint(chunks.back().fileName);
         }
     }
-
-    // Restore engine state
+    
+    // Load Primary Engine State
     size_t engSize;
     in.read(reinterpret_cast<char*>(&engSize), sizeof(engSize));
     if (engSize > 0) {
         std::string engData(engSize, '\0');
         in.read(&engData[0], engSize);
         std::string tmpFile = dbPath + ".engine_tmp";
-        {
-            std::ofstream tmpOut(tmpFile, std::ios::binary);
-            tmpOut.write(engData.data(), engSize);
-        }
+        { std::ofstream tmpOut(tmpFile, std::ios::binary); tmpOut.write(engData.data(), engSize); }
         engine->loadState(tmpFile);
         std::filesystem::remove(tmpFile);
     }
 
-    // Rebuild store from loaded chunks
+    // Phase 13 Fix: Load Local TF-IDF Engine State
+    size_t tfidfSize;
+    in.read(reinterpret_cast<char*>(&tfidfSize), sizeof(tfidfSize));
+    if (tfidfSize > 0 && localTfIdfEngine) {
+        std::string engData(tfidfSize, '\0');
+        in.read(&engData[0], tfidfSize);
+        std::string tmpFile = dbPath + ".tfidf_tmp";
+        { std::ofstream tmpOut(tmpFile, std::ios::binary); tmpOut.write(engData.data(), tfidfSize); }
+        localTfIdfEngine->loadState(tmpFile);
+        std::filesystem::remove(tmpFile);
+    }
+
     {
         std::unique_lock lock(chunksMutex);
         store.clear();
-        codeToChunkIndex.clear();
         for (size_t i = 0; i < chunks.size(); ++i) {
             auto& c = chunks[i];
-            if (!c.embedding.empty()) {
-                store.addDocument(c.code);
-                store.embeddings.back() = c.embedding;
-                codeToChunkIndex[c.code] = i;
+            if (!c.embedding.empty() && !c.code.empty()) {
+                store.addDocumentWithEmbedding(c.code, c.embedding);
             }
         }
     }
-
-    std::cout << "[basic_agent:RAG] Index loaded from: " << dbPath
-              << " (entries=" << n << ")\n";
+    std::cout << "[basic_agent:RAG] Index loaded from: " << dbPath << " (entries=" << n << ")\n";
 }
 
 void IndexManager::rebuildInternalStructures() {
-    std::unique_lock lock(chunksMutex);  // exclusive access to chunks and codeToChunkIndex
-
+    std::unique_lock lock(chunksMutex);
     store.clear();
     codeToChunkIndex.clear();
-
-    std::cout << "[RAG] Rebuilding vector store..." << std::flush;
-
     for (size_t i = 0; i < chunks.size(); ++i) {
         const auto& chunk = chunks[i];
-        store.addDocument(chunk.code);
+        if (chunk.code.empty() || chunk.embedding.empty()) continue;
+        if (codeToChunkIndex.find(chunk.code) != codeToChunkIndex.end()) continue;
+        store.addDocumentWithEmbedding(chunk.code, chunk.embedding);
         codeToChunkIndex[chunk.code] = i;
     }
-
-    std::cout << " done (" << chunks.size() << " embeddings)\n";
 }
 
-// --- Add single chunk safely ---
 void IndexManager::addChunkToIndex(CodeChunk&& chunk) {
-        std::cerr << "[DEBUG] Adding chunk: file=" << chunk.fileName
-              << ", symbol=" << chunk.symbolName
-              << ", start=" << chunk.startLine
-              << ", end=" << chunk.endLine
-              << ", code size=" << chunk.code.size()
-              << ", embedding size=" << chunk.embedding.size() << "\n";
-    std::unique_lock lock(chunksMutex);
-    size_t index = chunks.size();
-    chunks.push_back(std::move(chunk));
-    store.addDocument(chunks.back().code);
-    codeToChunkIndex[chunks.back().code] = index;
+    addChunk(std::move(chunk));
 }
