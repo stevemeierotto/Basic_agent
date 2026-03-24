@@ -31,6 +31,22 @@ public:
         const std::vector<std::pair<std::string, std::string>>& messages,
         const std::string& summary = "");
     void setRagFiles(const std::vector<std::string>& filePaths);
+    void setSessionId(const std::string& sessionId);
+
+    void checkResumablePlan();
+
+    // --- Executive Control ---
+    void pause() { if (controller) controller->pause(); }
+    void resume() { if (controller) controller->resume(); }
+    void abort() { if (controller) controller->abort(); }
+    void executeGoal(const std::string& goal) { if (controller) controller->execute_goal(goal); }
+
+    // --- Cognate UI Integration ---
+    std::vector<Memory::CognateStrategyRecord> getAllStrategies() const;
+    std::vector<Memory::CognateTrajectoryRecord> getAllTrajectories() const;
+    std::vector<Memory::CognateExperimentRecord> getAllExperiments() const;
+    bool saveExperiment(const Memory::CognateExperimentRecord& record);
+    Memory::GraphStatistics getGraphStatistics() const;
 
     // --- Implement Plugin interface ---
     bool initialize()  {

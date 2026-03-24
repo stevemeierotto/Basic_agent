@@ -15,7 +15,6 @@
 #include "../include/benchmark_runner.h"
 #include "../include/benchmark_reporter.h"
 #include "../include/benchmark_case_registry.h"
-#include "../include/file_handler.h"
 #include <iostream>
 #include <vector>
 #include <filesystem>
@@ -24,41 +23,43 @@
 namespace fs = std::filesystem;
 
 int main(int argc, char** argv) {
-    std::cout << "Initializing Sandbox Benchmark Environment...\n";
+    bool useSample = false;
+    if (argc > 1 && std::string(argv[1]) == "--sample") {
+        useSample = true;
+    }
+
+    std::cout << "Initializing Research Paper Benchmark Environment...\n";
 
     Config config;
     Memory memory(config);
-    FileHandler fh;
     
     auto engine = std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::External, &config);
     IndexManager indexManager(engine.get());
     
-    // STRICT SANDBOX BOUNDARY: The benchmark MUST only read from agent_workspace/rag/docs/
-    std::cout << "Indexing sandboxed benchmark corpus only...\n";
+    // STRICT SANDBOX BOUNDARY: The benchmark MUST only read from agent_workspace/docs/
+    std::cout << "Indexing research paper corpus only...\n";
     indexManager.clear();
     
-    // We only index the docs inside the sandbox for the benchmark.
-    // The test cases now exclusively point to these files.
     std::vector<std::string> corpusFiles = {
-        "agent_workspace/rag/docs/GRAG.md",
-        "agent_workspace/rag/docs/PLAN.md",
-        "agent_workspace/rag/docs/cognate.md",
-        "agent_workspace/rag/docs/improvements.md",
-        "agent_workspace/rag/docs/NODE.md",
-        "agent_workspace/rag/docs/architectural_facts.md",
-        "agent_workspace/rag/docs/completed_improvements_log.md",
-        "agent_workspace/rag/docs/AGENTS.md"
+        "agent_workspace/docs/2210.03629v3.txt",
+        "agent_workspace/docs/2005.11401v4.txt",
+        "agent_workspace/docs/2304.03442v2.txt",
+        "agent_workspace/docs/2310.08560v2.txt",
+        "agent_workspace/docs/2201.11903v6.txt"
     };
 
     for (const auto& f : corpusFiles) {
         if (fs::exists(f)) {
-            // Hard reject: double check absolute path before indexing
+            // Hard reject prefix check
             std::string absPath = fs::absolute(f).lexically_normal().string();
             if (absPath.find("/home/steve/Thoth/agent_workspace/") == std::string::npos) {
                 std::cerr << "[SECURITY ALERT] REJECTED path outside sandbox: " << absPath << "\n";
                 continue;
             }
+            
+            std::cout << "[Benchmark] Indexing: " << f << "...\n";
             indexManager.indexFile(f);
+            std::cout << "[Benchmark] Total chunks so far: " << indexManager.getChunks().size() << "\n";
         } else {
             std::cerr << "[WARN] Benchmark corpus file missing: " << f << "\n";
         }
@@ -69,12 +70,17 @@ int main(int argc, char** argv) {
 
     RAGPipeline rag(std::move(engine), &indexManager, &config, &memory);
     
-    std::cout << "Loading 15 Rewritten Sandboxed Test Cases...\n";
+    std::cout << "Loading 100 Hardened Research Paper Test Cases...\n";
     auto cases = Thoth::BenchmarkCaseRegistry::getCases();
+
+    if (useSample && cases.size() > 10) {
+        std::cout << "[INFO] Sampling active: running 10 out of " << cases.size() << " cases.\n";
+        cases.resize(10);
+    }
 
     Thoth::BenchmarkRunner runner(rag);
 
-    std::cout << "Executing RAG vs GRAG Comparison...\n";
+    std::cout << "Executing RAG vs GRAG Comparison (Research Corpus)...\n";
     auto result = runner.runComparison(cases);
 
     std::cout << "Saving results to grag_benchmark.jsonl...\n";

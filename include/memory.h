@@ -78,7 +78,7 @@ public:
     void storeStepMetric(const Thoth::MemoryRepository::StepMetricRecord& metric);
 
     void storeActivePlan(const Thoth::MemoryRepository::ActivePlanRecord& plan);
-    std::optional<Thoth::MemoryRepository::ActivePlanRecord> getActivePlan() const;
+    std::optional<Thoth::MemoryRepository::ActivePlanRecord> getActivePlan(const std::string& session_id) const;
     void deleteActivePlan(const std::string& plan_id);
 
     // Cognate Plan Persistence (Phase 2.1)
@@ -101,6 +101,12 @@ public:
     std::optional<CognateStrategyRecord> loadStrategy(const std::string& strategy_id) const;
     std::vector<CognateStrategyRecord> getAllStrategies() const;
 
+    // Cognate Experiments
+    using CognateExperimentRecord = Thoth::MemoryRepository::CognateExperimentRecord;
+    bool saveExperiment(const CognateExperimentRecord& record);
+    std::optional<CognateExperimentRecord> loadExperiment(const std::string& experiment_id) const;
+    std::vector<CognateExperimentRecord> getAllExperiments() const;
+
     // Trajectory Index (Phase 7.7)
     void loadTrajectoryIndex();
     void updateTrajectoryIndex(const CognateTrajectoryRecord& record);
@@ -119,13 +125,18 @@ public:
     static constexpr int TIER_WARM = 1;
     static constexpr int TIER_COLD = 2;
 
-    // Graph Memory (Phase 8)
+    // Graph Memory (Phase 5.6 / 8)
     using Node = Thoth::MemoryRepository::Node;
     using Edge = Thoth::MemoryRepository::Edge;
-    bool addNode(const Node& node);
-    bool addEdge(const Edge& edge);
+    using GraphStatistics = Thoth::MemoryRepository::GraphStatistics;
+    void addNode(const Node& node);
+    void addEdge(const Edge& edge);
     std::vector<Node> getNodesByType(const std::string& type) const;
     std::vector<Edge> getEdgesFrom(const std::string& nodeId) const;
+    GraphStatistics getGraphStatistics() const;
+
+    static std::string calculateContentHash(const std::string& text);
+
 
     // Pruning (Phase 4, Step 4.2)
     std::vector<Thoth::MemoryRepository::ArchivedTurnRecord> getArchivedTurns() const;

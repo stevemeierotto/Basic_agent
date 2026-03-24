@@ -16,6 +16,9 @@
 #include <utility>
 #include <unordered_map>
 
+class EmbeddingEngine;
+class Memory;
+
 class GragScorer {
 public:
     /**
@@ -53,7 +56,8 @@ public:
         GragDiagnostics& diagnostics_out,
         const std::unordered_map<std::string, float>& graph_scores = {},
         EmbeddingEngine* tfidf_engine = nullptr,
-        const std::string& query_text = "");
+        const std::string& query_text = "",
+        const Memory* memory = nullptr);
 
     // GRAG-FUTURE: rescore_multi_index() for merged index results
     // GRAG-FUTURE: Adaptive threshold tuning — learning DIRECTION_THRESHOLD from retrieval success metrics

@@ -40,6 +40,7 @@ BasicAgentPlugin::BasicAgentPlugin()
     };
     controller->set_event_callback(cb);
     rag.setEventCallback(cb);
+    indexManager->setEventCallback(cb);
 
     FileHandler fileHandler;
 
@@ -123,4 +124,47 @@ void BasicAgentPlugin::setRagFiles(const std::vector<std::string>& filePaths) {
         }
     }
     cmdProcessor.setInitialized(true);
+}
+
+void BasicAgentPlugin::setSessionId(const std::string& sessionId) {
+    if (controller) controller->set_session_id(sessionId);
+    cmdProcessor.set_session_id(sessionId);
+    if (indexManager) indexManager->setSessionId(sessionId);
+}
+
+void BasicAgentPlugin::checkResumablePlan() {
+    if (!controller) return;
+    auto plan = controller->get_resumable_plan();
+    if (plan) {
+        controller->resume_from_plan(*plan);
+        
+        ControllerEvent ev;
+        ev.type = EventType::PLAN_CREATED;
+        ev.session_id = controller->get_session_id();
+        ev.plan_id = plan->plan_id;
+        ev.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        ev.metadata = {{"plan", plan->to_json()}};
+        if (onEvent) onEvent(ev);
+    }
+}
+
+std::vector<Memory::CognateStrategyRecord> BasicAgentPlugin::getAllStrategies() const {
+    return memory.getAllStrategies();
+}
+
+std::vector<Memory::CognateTrajectoryRecord> BasicAgentPlugin::getAllTrajectories() const {
+    return memory.getAllTrajectories();
+}
+
+std::vector<Memory::CognateExperimentRecord> BasicAgentPlugin::getAllExperiments() const {
+    return memory.getAllExperiments();
+}
+
+bool BasicAgentPlugin::saveExperiment(const Memory::CognateExperimentRecord& record) {
+    return memory.saveExperiment(record);
+}
+
+Memory::GraphStatistics BasicAgentPlugin::getGraphStatistics() const {
+    return memory.getGraphStatistics();
 }

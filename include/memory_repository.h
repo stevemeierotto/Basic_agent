@@ -98,23 +98,41 @@ public:
     virtual bool storePastPlan(const PastPlanRecord& plan, int version) = 0;
     virtual std::vector<PastPlanRecord> getAllPastPlans(int version) = 0;
 
-    // Graph Memory (Phase 8)
+    // Graph Memory (Phase 5.6)
     struct Node {
-        std::string id;
+        std::string id;         // Content-based hash (SHA256)
+        std::string file_path;
+        std::string symbol;
         std::string type;
-        std::vector<float> embedding;
     };
+
     struct Edge {
         std::string from_id;
         std::string to_id;
-        std::string relation_type;
         float weight;
+        int success_count;
+        int failure_count;
+        int64_t last_used_ms;
     };
 
     virtual bool addNode(const Node& node) = 0;
     virtual bool addEdge(const Edge& edge) = 0;
     virtual std::vector<Node> getNodesByType(const std::string& type) = 0;
     virtual std::vector<Edge> getEdgesFrom(const std::string& nodeId) = 0;
+    virtual std::vector<Edge> getAllEdges() = 0;
+    virtual bool deleteEdge(const std::string& from_id, const std::string& to_id) = 0;
+    
+    // Graph Statistics (Adaptive Graph Memory)
+    struct GraphStatistics {
+        int total_nodes = 0;
+        int total_edges = 0;
+        float avg_edge_weight = 0.0f;
+        float max_edge_weight = 0.0f;
+        float min_edge_weight = 0.0f;
+        int total_success_count = 0;
+        int total_failure_count = 0;
+    };
+    virtual GraphStatistics getGraphStatistics() = 0;
 
     // Execution Metrics (Phase 1, Step 1.4)
     struct StepMetricRecord {
@@ -132,6 +150,7 @@ public:
     // Plan Persistence (Phase 1, Step 1.6)
     struct ActivePlanRecord {
         std::string plan_id;
+        std::string session_id;
         std::string goal;
         std::string steps_json;
         int current_index;
@@ -141,7 +160,7 @@ public:
     };
 
     virtual bool storeActivePlan(const ActivePlanRecord& plan) = 0;
-    virtual std::optional<ActivePlanRecord> getActivePlan() = 0; // Returns the most recent non-terminal plan
+    virtual std::optional<ActivePlanRecord> getActivePlan(const std::string& session_id) = 0; // Filter by session
     virtual bool deleteActivePlan(const std::string& plan_id) = 0;
 
     // Cognate Plan Persistence (Phase 2.1)
@@ -203,6 +222,21 @@ public:
 
     virtual bool storeEpisodeStep(const EpisodeStepRecord& step) = 0;
     virtual std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) = 0;
+
+    // Cognate Experiments (Scientific Mode Integration)
+    struct CognateExperimentRecord {
+        std::string experiment_id;
+        std::string name;
+        std::string hypothesis;
+        std::string configuration_json;
+        std::string results_json;
+        int64_t created_at;
+        std::string status;
+    };
+
+    virtual bool saveExperiment(const CognateExperimentRecord& record) = 0;
+    virtual std::optional<CognateExperimentRecord> loadExperiment(const std::string& experiment_id) = 0;
+    virtual std::vector<CognateExperimentRecord> getAllExperiments() = 0;
 };
 
 } // namespace Thoth

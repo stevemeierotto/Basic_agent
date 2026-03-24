@@ -53,6 +53,7 @@ set(BASIC_AGENT_SOURCES
     src/run_tests_tool.cpp
     src/trajectory.cpp
     src/trajectory_builder.cpp
+    src/graph_refiner.cpp
     src/strategy.cpp
     src/strategy_engine.cpp
     src/sqlite_memory_repository.cpp

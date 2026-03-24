@@ -59,7 +59,7 @@ std::string LLMInterface::detectOllamaModel() {
     if (!curl) return "";
 
     try {
-        curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/tags");
+        curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:11434/api/tags");
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(curl, CURLOPT_POST, 0L);
 
@@ -89,6 +89,12 @@ std::string LLMInterface::detectOllamaModel() {
 
 std::string LLMInterface::resolveOllamaModel() {
     if (!selectedModel.empty()) return selectedModel;
+
+    // 1. Check config first
+    if (config && !config->llm_model.empty()) {
+        selectedModel = config->llm_model;
+        return selectedModel;
+    }
 
     const char* envModel = std::getenv("OLLAMA_MODEL");
     if (envModel && *envModel) {
@@ -171,7 +177,7 @@ std::string LLMInterface::askOllama(const std::string& prompt) {
             payload["max_tokens"] = maxTokens;
             std::string jsonStr = payload.dump();
 
-            curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/generate");
+            curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:11434/api/generate");
             curl_easy_setopt(curl, CURLOPT_HTTPGET, 0L);
             curl_easy_setopt(curl, CURLOPT_POST, 1L);
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());

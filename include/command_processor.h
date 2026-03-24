@@ -34,7 +34,7 @@ public:
     // Starts a REPL loop
     void runLoop();
 
-    void handleCommand(const std::string& input);
+    std::string handleCommand(const std::string& input);
     void handleSimilarityCommand(const std::string& args);
 
     // NEW: Send query through Memory + RAG + LLM
@@ -42,11 +42,13 @@ public:
     void ensureInitialized();
     void setInitialized(bool value) { initialized = value; }
     void setController(std::shared_ptr<Thoth::ExecutiveController> ctrl) { controller = ctrl; }
+    void set_session_id(const std::string& id) { session_id = id; }
 
     std::string processToolCall(const std::string& response, DecisionTrace& trace);
 
 private:
     void syncPromptConfig();
+    std::string session_id;
     static constexpr size_t DEFAULT_MAX_QUERY_LENGTH = 10000;
     static constexpr size_t DEFAULT_MAX_COMMAND_ARGS_LENGTH = 2048;
     static constexpr int DEFAULT_RAG_TOP_K = 5;
@@ -70,9 +72,9 @@ private:
 
     std::pair<std::string, std::string> parseCommand(const std::string& input);
     void showHelp();
-    void clearMemory();
+    std::string clearMemory();
 
-    using CommandHandler = std::function<void(const std::string&)>;
+    using CommandHandler = std::function<std::string(const std::string&)>;
     std::unordered_map<std::string, CommandHandler> commandHandlers;
     void initializeCommands();
 

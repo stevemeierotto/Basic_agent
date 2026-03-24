@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <mutex>
 
 class Config;
 
@@ -38,6 +39,8 @@ public:
     // Normalize once and return
     std::vector<float> normalizeVector(std::vector<float> vec) const;
 
+    void updateVocabulary(const std::string& text);
+
 private:
     Method method;
     Config* config;
@@ -57,10 +60,14 @@ private:
     std::vector<std::string> tokenize(const std::string& text) const;
     size_t hashToIndex(const std::string& term) const;
     float calculateIdf(const std::string& term) const;
-    void updateVocabulary(const std::string& text);
 
-    // CURL resources for External method
-    void* curl_handle;
+    // Helper implementations for pooled CURL
+    void* acquireCurlHandle();
+    void releaseCurlHandle(void* handle);
+
+    // CURL resources
+    std::vector<void*> curl_pool;
     struct curl_slist* curl_headers;
+    mutable std::mutex engineMutex;
     bool initCurl();
 };

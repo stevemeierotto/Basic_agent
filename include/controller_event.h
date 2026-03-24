@@ -26,11 +26,14 @@ enum class EventType {
     STATE_CHANGED,
     MODE_SWITCHED,
     EMBEDDING_FAILED,
-    RETRIEVAL_DIAGNOSTICS
+    RETRIEVAL_DIAGNOSTICS,
+    INDEXING_STARTED,
+    INDEXING_COMPLETED
 };
 
 struct ControllerEvent {
     EventType type;
+    std::string session_id;    // Correlate event with UI session
     std::string plan_id;
     std::string step_id;       // Empty string if not step-specific
     std::string controller_state_name;

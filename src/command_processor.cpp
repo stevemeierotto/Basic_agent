@@ -177,6 +177,34 @@ std::string CommandProcessor::processQuery(const std::string& input) {
             "classified as user_query",
             {{"is_command", false}});
 
+        // --- Goal Detection (Phase 9 Upgrade) ---
+        // If the user starts with "Goal: " or specific action keywords, trigger the ExecutiveController
+        bool shouldBeGoal = false;
+        std::string goalText = input;
+        
+        if (startsWith(toLower(input), "goal:")) {
+            shouldBeGoal = true;
+            goalText = trim(input.substr(5));
+        } else if (startsWith(toLower(input), "implement") || 
+                   startsWith(toLower(input), "fix") || 
+                   startsWith(toLower(input), "create")) {
+            // Heuristic for action-oriented requests
+            shouldBeGoal = true;
+        }
+
+        if (shouldBeGoal && controller && controller->get_state() == Thoth::ControllerState::IDLE) {
+            StructuredLogger::instance().log(
+                LogLevel::Info,
+                "command_processor",
+                "goal_detected",
+                "Transitioning query to ExecutiveController goal",
+                {{"goal", goalText}},
+                trace.requestId);
+                
+            controller->execute_goal(goalText);
+            return "[Goal Started] " + goalText;
+        }
+
         syncPromptConfig();
         ensureInitialized();
 
@@ -231,6 +259,19 @@ std::string CommandProcessor::processQuery(const std::string& input) {
                 {{"backend", backendToString(llm.getBackend())},
                  {"generation_latency_ms", generationLatencyMs}});
 
+            // Emit empty diagnostics to clear UI
+            if (rag.eventCallback) {
+                ControllerEvent ev;
+                ev.type = EventType::RETRIEVAL_DIAGNOSTICS;
+                ev.metadata = {
+                    {"scoring_type", "no_index"},
+                    {"breakdowns", nlohmann::json::array()},
+                    {"alpha", 0.0},
+                    {"direction_magnitude", 0.0}
+                };
+                rag.eventCallback(ev);
+            }
+
             std::string finalResponse = processToolCall(response, trace);
 
             try {
@@ -248,14 +289,24 @@ std::string CommandProcessor::processQuery(const std::string& input) {
         // 1. Retrieve context
         std::string activePlanId = "";
         std::string activeStepId = "";
-        if (controller && controller->get_state() != Thoth::ControllerState::IDLE) {
-            auto currentPlan = controller->get_current_plan();
+        bool hasPlanContext = false;
+        Plan currentPlan;
+        if (controller) {
+            currentPlan = controller->get_current_plan();
+            if (!currentPlan.plan_id.empty()) {
+                hasPlanContext = true;
+            }
+        }
+
+        if (hasPlanContext) {
             activePlanId = currentPlan.plan_id;
             if (currentPlan.current_index < currentPlan.steps.size()) {
                 activeStepId = currentPlan.steps[currentPlan.current_index].step_id;
             }
-            
-            // Sync embeddings for GRAG math
+        }
+
+        // Sync embeddings for GRAG when we have any plan context (even if idle)
+        if (hasPlanContext) {
             rag.setGoalEmbedding(controller->get_goal_embedding());
             rag.setCurrentEmbedding(controller->get_current_embedding());
         }
@@ -453,15 +504,14 @@ void CommandProcessor::setConfig(const std::string& key, const std::string& valu
 }
 
 
-void CommandProcessor::handleCommand(const std::string& input) {
+std::string CommandProcessor::handleCommand(const std::string& input) {
     try {
         syncPromptConfig();
         ensureInitialized();
         if (!startsWith(input, "/")) {
             std::string response = processQuery(input);
-            std::cout << "Assistant: " << response << "\n";
             try { memory.updateSummary(input, response); } catch (...) {}
-            return;
+            return response;
         }
 
         auto [cmd, args] = parseCommand(input);
@@ -477,38 +527,37 @@ void CommandProcessor::handleCommand(const std::string& input) {
         if (args.size() > maxCommandArgsLength) {
             traceLogger.finishTrace(trace, false, "denied_command_args_too_large");
             traceLogger.writeTrace(trace);
-            std::cout << "[Denied] command arguments exceed maximum allowed length.\n";
-            return;
+            return "[Denied] command arguments exceed maximum allowed length.";
         }
 
         std::string denyReason;
         if (!isCommandAllowed(cmd, args, denyReason)) {
             traceLogger.finishTrace(trace, false, "denied_policy");
             traceLogger.writeTrace(trace);
-            std::cout << "[Denied] " << denyReason << "\n";
-            return;
+            return "[Denied] " + denyReason;
         }
 
         auto it = commandHandlers.find(cmd);
         if (it != commandHandlers.end()) {
             try {
-                it->second(args);
+                std::string result = it->second(args);
                 traceLogger.finishTrace(trace, true, "command_completed");
                 traceLogger.writeTrace(trace);
+                return result;
             } catch (const std::exception& e) {
                 traceLogger.finishTrace(trace, false, std::string("Command exception: ") + e.what());
                 traceLogger.writeTrace(trace);
-                std::cout << "Error executing command: " << e.what() << "\n";
+                return "Error executing command: " + std::string(e.what());
             }
         } else {
-            std::cout << "Unknown command '/" << cmd << "'. Try /help.\n";
             traceLogger.finishTrace(trace, false, "command_unknown");
             traceLogger.writeTrace(trace);
+            return "Unknown command '/" + cmd + "'. Try /help.";
         }
     } catch (const std::exception& e) {
-        std::cout << "Fatal error in command handler: " << e.what() << "\n";
+        return "Fatal error in command handler: " + std::string(e.what());
     } catch (...) {
-        std::cout << "Unknown fatal error in command handler.\n";
+        return "Unknown fatal error in command handler.";
     }
 }
 
@@ -571,12 +620,14 @@ void CommandProcessor::showHelp() {
         "Also: type 'exit' or 'quit' to leave.\n";
 }
 
-void CommandProcessor::clearMemory() {
+std::string CommandProcessor::clearMemory() {
     try {
         memory.clear();
         memory.save();
-        std::cout << "Memory cleared.\n";
-    } catch (...) {}
+        return "Memory cleared.";
+    } catch (const std::exception& e) {
+        return "Failed to clear memory: " + std::string(e.what());
+    }
 }
 
 void CommandProcessor::ensureInitialized() {
@@ -603,37 +654,85 @@ void CommandProcessor::ensureInitialized() {
 }
 
 void CommandProcessor::initializeCommands() {
-    commandHandlers["help"] = [this](const std::string&) { showHelp(); };
+    commandHandlers["help"] = [this](const std::string&) { 
+        return "Built-ins:\n"
+               "  /help               Show this help\n"
+               "  /rag                Query knowledge with RAG\n"
+               "  /clear              Clears agent's memory and summaries\n"
+               "  /backend ollama     Switch to Ollama\n"
+               "  /backend openai     Switch to OpenAI\n"
+               "  /mode [std|sci]     Switch execution mode\n"
+               "  /similarity         Switch Similarity\n"
+               "  /benchmark ...      Run retrieval/index benchmarks\n"
+               "  /config             Show config values\n"
+               "  /set key value      Update config\n"
+               "Also: type 'exit' or 'quit' to leave.\n";
+    };
     commandHandlers["h"] = commandHandlers["help"];
     commandHandlers["?"] = commandHandlers["help"];
     
-    commandHandlers["clear"] = [this](const std::string&) { clearMemory(); };
+    commandHandlers["clear"] = [this](const std::string&) { return clearMemory(); };
     commandHandlers["reset"] = commandHandlers["clear"];
-    commandHandlers["rag"] = [this](const std::string& args) { handleRag(args); };
-    commandHandlers["backend"] = [this](const std::string& args) { handleBackend(args); };
+    commandHandlers["rag"] = [this](const std::string& args) { 
+        if (args.empty()) return std::string("Usage: /rag <query>");
+        auto chunks = rag.retrieveRelevant(args, {}, 5);
+        std::ostringstream oss;
+        oss << "Retrieved " << chunks.size() << " chunks for query: " << args << "\n";
+        return oss.str();
+    };
+    commandHandlers["backend"] = [this](const std::string& args) { 
+        if (args == "ollama") {
+            llm.setBackend(LLMBackend::Ollama);
+            return std::string("Backend switched to Ollama");
+        } else if (args == "openai") {
+            llm.setBackend(LLMBackend::OpenAI);
+            return std::string("Backend switched to OpenAI");
+        }
+        return std::string("Unknown backend. Use 'ollama' or 'openai'");
+    };
     commandHandlers["mode"] = [this](const std::string& args) {
-        if (!controller) return;
+        if (!controller) return std::string("Controller not available");
         std::string modeStr = toLower(trim(args));
         if (modeStr == "standard" || modeStr == "std") {
             controller->set_execution_mode(std::make_unique<Thoth::StandardExecutionMode>());
-            std::cout << "[Controller] Switched to Standard mode.\n";
+            return std::string("Switched to Standard execution mode");
         } else if (modeStr == "scientific" || modeStr == "sci") {
             controller->set_execution_mode(std::make_unique<Thoth::ScientificExecutionMode>());
-            std::cout << "[Controller] Switched to Scientific mode.\n";
+            return std::string("Switched to Scientific execution mode");
         }
+        return std::string("Unknown mode. Use 'standard' or 'scientific'");
     };
-    commandHandlers["similarity"] = [this](const std::string& args) { handleSimilarityCommand(args); };
-    commandHandlers["config"] = [this](const std::string&) { showConfig(); };
-    commandHandlers["benchmark"] = [this](const std::string& args) { handleBenchmark(args); };
     commandHandlers["goal"] = [this](const std::string& args) {
-        if (!controller || args.empty()) return;
+        if (!controller) return std::string("Controller not available");
+        if (args.empty()) return std::string("Usage: /goal <your objective>");
         controller->execute_goal(args);
+        return "GOAL ACCEPTED: " + args;
+    };
+    commandHandlers["aging"] = [this](const std::string&) {
+        memory.processMemoryAging();
+        return std::string("Memory aging and graph decay triggered");
+    };
+    commandHandlers["graph"] = [this](const std::string& args) {
+        if (args == "stats") {
+            auto stats = memory.getGraphStatistics();
+            std::ostringstream oss;
+            oss << "Graph Stats: Nodes=" << stats.total_nodes << ", Edges=" << stats.total_edges;
+            return oss.str();
+        } else if (args == "aging") {
+            memory.processMemoryAging();
+            return std::string("Graph decay triggered");
+        }
+        return std::string("Usage: /graph <stats|aging>");
     };
     commandHandlers["set"] = [this](const std::string& args) {
         std::istringstream iss(args);
         std::string k, v;
         iss >> k >> v;
-        if (!k.empty() && !v.empty()) setConfig(k, v);
+        if (!k.empty() && !v.empty()) {
+            setConfig(k, v);
+            return "Config updated: " + k + "=" + v;
+        }
+        return std::string("Usage: /set <key> <value>");
     };
 }
 

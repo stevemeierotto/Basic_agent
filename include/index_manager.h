@@ -2,28 +2,37 @@
 #include "vector_store.h"
 #include "embedding_engine.h"
 #include "chunkers/chunker.h"
+#include "controller_event.h"
 #include <vector>
 #include <string>
 #include <memory>
 #include <shared_mutex>
 #include <set>
 #include <unordered_map>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <functional>
 
 
 class IndexManager {
 public:
-        explicit IndexManager(EmbeddingEngine* eng)
-        : store(eng) ,engine(eng), localTfIdfEngine(std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf)) {}
+    explicit IndexManager(EmbeddingEngine* eng);
+    ~IndexManager();
 
     void init(const std::string& indexPath);
 
-
-
     // Index a single file
     void indexFile(const std::string& filePath);
+    void indexFileAsync(const std::string& filePath);
 
     // Index all files in a directory recursively
     void indexProject(const std::string& rootPath);
+    void indexProjectAsync(const std::string& rootPath);
+
+    bool isIndexing() const { return m_isIndexing; }
 
     // Access indexed chunks
     const std::vector<CodeChunk>& getChunks() const;
@@ -49,6 +58,9 @@ public:
 
     EmbeddingEngine* getTfIdfEngine() const { return localTfIdfEngine.get(); }
 
+    void setEventCallback(EventCallback cb) { eventCallback = cb; }
+    void setSessionId(const std::string& id) { session_id = id; }
+
 private:
         // Constants
     static constexpr size_t MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -70,10 +82,23 @@ private:
     EmbeddingEngine* engine;
     std::unique_ptr<EmbeddingEngine> localTfIdfEngine;
     mutable std::shared_mutex chunksMutex;
+    EventCallback eventCallback;
+    std::string session_id;
 
     void addChunk(CodeChunk&& chunk);
     void enforceMemoryLimits();
     std::string indexFilePath;
+
+    // Async infrastructure
+    std::atomic<bool> m_isIndexing{false};
+    std::thread m_workerThread;
+    std::queue<std::function<void()>> m_taskQueue;
+    std::mutex m_queueMutex;
+    std::condition_variable m_queueCv;
+    std::atomic<bool> m_stopWorker{false};
+
+    void workerLoop();
+    void startWorker();
 
     // Helper functions
     std::string limitText(const std::string& text, size_t maxChars);

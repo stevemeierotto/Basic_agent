@@ -15,6 +15,9 @@ public:
     double similarity_threshold =0.6;
     std::string similarity_metric = "cosine";  // "cosine", "dot", "euclidean", "jaccard"
 
+    std::string llm_model = "qwen2.5:3b";
+    std::string embedding_model = "nomic-embed-text:v1.5";
+
     // Runtime parameters
     int verbosity = 1;  // 0 = silent, 1 = normal, 2 = debug
     bool grag_directional = true; // Phase 7 toggle
@@ -42,6 +45,7 @@ public:
     float wd = 0.4f;
     float wt = 0.0f;
     float keyword_weight = 0.3f;
+    float graph_weight = 0.3f;
 
     // Load/Save from JSON or ENV
     bool loadFromJson(const std::string& path);

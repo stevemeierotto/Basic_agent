@@ -151,23 +151,28 @@ std::vector<CodeChunk> chunkBySize(
             return result;
         }
 
-        constexpr size_t CHUNK_SIZE = 4096;   // increased target chunk size (chars)
-        constexpr size_t OVERLAP    = 512;    // sliding window overlap
-        const std::string separators = ".!?"; // sentence boundaries
+        constexpr size_t TARGET_CHUNK_SIZE = 2048; // reduced from 4096
+        constexpr size_t MAX_CHUNK_SIZE    = 8000; // hard cap (~2000 tokens)
+        constexpr size_t OVERLAP           = 512;  
+        const std::string separators = ".!?"; 
 
         size_t pos = 0;
         size_t totalSize = content.size();
 
         while (pos < totalSize) {
-            size_t chunkEnd = pos + CHUNK_SIZE;
+            size_t chunkEnd = pos + TARGET_CHUNK_SIZE;
             if (chunkEnd > totalSize) chunkEnd = totalSize;
 
-            // Extend chunkEnd to next sentence boundary for better context
+            // Extend chunkEnd to next sentence boundary, but don't exceed MAX_CHUNK_SIZE
             size_t sentencePos = chunkEnd;
-            while (sentencePos < totalSize && separators.find(content[sentencePos]) == std::string::npos) {
+            while (sentencePos < totalSize && 
+                   sentencePos < pos + MAX_CHUNK_SIZE &&
+                   separators.find(content[sentencePos]) == std::string::npos) {
                 ++sentencePos;
             }
-            if (sentencePos < totalSize) chunkEnd = sentencePos + 1; // include punctuation
+            if (sentencePos < totalSize && sentencePos < pos + MAX_CHUNK_SIZE) {
+                chunkEnd = sentencePos + 1; 
+            }
 
             CodeChunk chunk;
             chunk.fileName = fs::absolute(filePath).lexically_normal().string();

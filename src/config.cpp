@@ -10,9 +10,29 @@ Config::Config()
     : temperature(0.7),
       top_p(1.0),
       max_tokens(512),
-      max_results(5),            // default topK for RAG
-      similarity_threshold(0.7),  // optional
-      similarity_metric("cosine")  // default similarity metric
+      max_results(5),
+      similarity_threshold(0.7),
+      similarity_metric("cosine"),
+      verbosity(1),
+      grag_directional(true),
+      max_retries(3),
+      log_level("info"),
+      log_to_console(true),
+      log_rotate_max_bytes(10 * 1024 * 1024),
+      log_rotate_max_files(5),
+      log_max_string_length(10000),
+      memory_limit_mb(512),
+      disk_quota_mb(1024),
+      enable_tools(true),
+      allow_network(true),
+      allow_shell_exec(false),
+      allow_web(true),
+      allow_file_io(true),
+      wq(0.4f),
+      wd(0.4f),
+      wt(0.2f),
+      keyword_weight(0.3f),
+      graph_weight(0.3f)
 {}
 
 bool Config::loadFromJson(const std::string& path) {
@@ -52,6 +72,8 @@ bool Config::loadFromJson(const std::string& path) {
         similarity_metric = j["similarity_metric"];
     }
     if (j.contains("similarity_threshold")) similarity_threshold = j["similarity_threshold"];
+    if (j.contains("llm_model")) llm_model = j["llm_model"];
+    if (j.contains("embedding_model")) embedding_model = j["embedding_model"];
 
     return true;
 }
@@ -66,6 +88,8 @@ bool Config::saveToJson(const std::string& path) const {
     j["max_results"] = max_results;
     j["similarity_threshold"] = similarity_threshold;
     j["similarity_metric"] = similarity_metric;
+    j["llm_model"] = llm_model;
+    j["embedding_model"] = embedding_model;
     j["verbosity"] = verbosity;
     j["max_retries"] = max_retries;
     j["grag_directional"] = grag_directional;
@@ -136,6 +160,8 @@ std::string Config::get(const std::string& key) const {
     if (key == "max_results") return std::to_string(max_results);
     if (key == "similarity_threshold") return std::to_string(similarity_threshold);
     if (key == "similarity_metric") return similarity_metric;
+    if (key == "llm_model") return llm_model;
+    if (key == "embedding_model") return embedding_model;
     if (key == "verbosity") return std::to_string(verbosity);
     if (key == "max_retries") return std::to_string(max_retries);
     if (key == "grag_directional") return grag_directional ? "true" : "false";
@@ -168,6 +194,8 @@ bool Config::set(const std::string& key, const std::string& value) {
         else if (key == "max_results") max_results = std::stoi(value);
         else if (key == "similarity_threshold") similarity_threshold = std::stod(value);
         else if (key == "similarity_metric") similarity_metric = value;
+        else if (key == "llm_model") llm_model = value;
+        else if (key == "embedding_model") embedding_model = value;
         else if (key == "verbosity") verbosity = std::stoi(value);
         else if (key == "max_retries") max_retries = std::stoi(value);
         else if (key == "grag_directional") grag_directional = (value == "true");

@@ -36,7 +36,10 @@ public:
                                             int topK = 5,
                                             const std::string& requestId = "",
                                             const std::string& planId = "",
-                                            const std::string& stepId = "");
+                                            const std::string& stepId = "",
+                                            const std::vector<float>& g_emb = {},
+                                            const std::vector<float>& c_emb = {},
+                                            const std::vector<float>& t_emb = {});
 
     // Simple textual query
     std::string query(const std::string& queryStr);

@@ -26,6 +26,7 @@
 #include "decision_trace.h"
 #include "constraint_checker.h"
 #include "trajectory_builder.h"
+#include "graph_refiner.h"
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -57,11 +58,12 @@ public:
     ~ExecutiveController();
 
     // Primary entry point — drives the full goal to completion
-    void execute_goal(const std::string& goal);
+    std::string execute_goal(const std::string& goal);
 
-    // Pause/resume support
+    // Pause/resume/abort support
     void pause();
     void resume();
+    void abort();
     bool is_running() const;
 
     // Resume from a persisted plan (loaded from SQLite or JSON)
@@ -72,15 +74,26 @@ public:
 
     // Observability — subscribe to lifecycle events
     void set_event_callback(EventCallback callback);
+    void set_session_id(const std::string& session_id) { 
+        std::lock_guard<std::mutex> lock(mutex_);
+        session_id_ = session_id; 
+    }
 
     // Mode switching (called internally, but exposed for testing)
     void set_execution_mode(std::unique_ptr<IExecutionMode> mode);
-    void set_workflow_engine(std::shared_ptr<WorkflowEngine> engine) { workflow_engine_ = engine; }
+    void set_workflow_engine(std::shared_ptr<WorkflowEngine> engine) { 
+        std::lock_guard<std::mutex> lock(mutex_);
+        workflow_engine_ = engine; 
+    }
 
     // State inspection (for UI highlighting and trace logging)
     ControllerState get_state() const;
-    const Plan& get_current_plan() const;
+    Plan get_current_plan() const;
     std::string get_current_plan_id() const;
+    std::string get_session_id() const { 
+        std::lock_guard<std::mutex> lock(mutex_); 
+        return session_id_; 
+    }
     int get_current_step_index() const;
 
     // Helpers exposed for ExecutionModes
@@ -114,7 +127,10 @@ protected:
     friend class StandardExecutionMode;
     friend class ScientificExecutionMode;
     std::string state_to_name(ControllerState state) const;
+    void transition_to_unlocked(ControllerState new_state);
+    void update_goal_embedding_unlocked(const std::string& goal);
     void update_current_embedding_unlocked();
+    void update_trajectory_embedding_unlocked();
     void clear_embeddings_unlocked();
     void store_plan_history(float success_score);
     void reinforce_plan_graph();
@@ -138,15 +154,24 @@ protected:
     std::shared_ptr<StrategyEngine> strategy_engine_;
     std::shared_ptr<StepMetricsRepository> metrics_repo_;
     std::shared_ptr<TrajectoryBuilder> trajectory_builder_;
+    std::shared_ptr<GraphRefiner> graph_refiner_;
     std::unique_ptr<IExecutionMode> execution_mode_;
     ConstraintChecker constraint_checker_;
     EventCallback event_callback_;
 
     Plan current_plan_;
     Trajectory current_trajectory_;
+    
+    // Phase 5.6: Track active chunks per step for causal linking
+    struct ActiveStepSet {
+        std::string step_id;
+        std::vector<std::string> chunk_hashes;
+    };
+    std::vector<ActiveStepSet> active_sets_;
     int revisions_count_ = 0;
     int reflection_count_ = 0;
     const int MAX_REFLECTIONS = 2;
+    std::string session_id_;
     bool plan_reused_ = false;
     ControllerState state_ = ControllerState::IDLE;
     bool paused_ = false;

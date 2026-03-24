@@ -50,9 +50,10 @@ ExecutiveController::ExecutiveController(
     strategy_engine_ = std::make_shared<Thoth::StrategyEngine>(memory);
     if (rag && memory) {
         trajectory_builder_ = std::make_shared<Thoth::TrajectoryBuilder>(memory->getRepo(), rag->engine.get());
+        graph_refiner_ = std::make_shared<Thoth::GraphRefiner>(memory);
     }
     execution_mode_ = std::make_unique<Thoth::StandardExecutionMode>();
-    transition_to(ControllerState::IDLE);
+    transition_to_unlocked(ControllerState::IDLE);
 }
 
 ExecutiveController::~ExecutiveController() {
@@ -67,7 +68,7 @@ ExecutiveController::~ExecutiveController() {
     }
 }
 
-void ExecutiveController::execute_goal(const std::string& goal) {
+std::string ExecutiveController::execute_goal(const std::string& goal) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (loop_thread_) {
@@ -81,7 +82,7 @@ void ExecutiveController::execute_goal(const std::string& goal) {
         revisions_count_ = 0;
         reflection_count_ = 0;
         plan_reused_ = false;
-        transition_to(ControllerState::PLANNING);
+        transition_to_unlocked(ControllerState::PLANNING);
         
         current_plan_ = Plan();
         current_plan_.updated_at_ms = nowMs();
@@ -92,7 +93,7 @@ void ExecutiveController::execute_goal(const std::string& goal) {
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        update_goal_embedding(goal);
+        update_goal_embedding_unlocked(goal);
 
         // Phase 5: Plan History Reuse logic
         std::string enhanced_goal = goal;
@@ -123,19 +124,17 @@ void ExecutiveController::execute_goal(const std::string& goal) {
 
         update_current_embedding_unlocked();
         persist_current_plan_unlocked();
-    }
-    
-    emit_event(EventType::PLAN_CREATED);
-    
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        transition_to(ControllerState::IDLE);
-        current_plan_.updated_at_ms = nowMs();
+
+        // Start the execution loop
+        state_ = ControllerState::IDLE;
         running_ = true;
         loop_thread_ = std::make_unique<std::thread>([this]() {
             run_loop();
         });
     }
+    
+    emit_event(EventType::PLAN_CREATED);
+    return "GOAL ACCEPTED: " + goal;
 }
 
 void ExecutiveController::pause() {
@@ -150,6 +149,20 @@ void ExecutiveController::resume() {
     paused_ = false;
     current_plan_.updated_at_ms = nowMs();
     persist_current_plan_unlocked();
+}
+
+void ExecutiveController::abort() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (state_ != ControllerState::COMPLETED && state_ != ControllerState::FAILED && state_ != ControllerState::ABORTED) {
+        transition_to_unlocked(ControllerState::ABORTED);
+        stop_requested_ = true;
+        current_plan_.updated_at_ms = nowMs();
+        persist_current_plan_unlocked();
+        
+        // Releasing lock to emit event (prevents deadlocks)
+        lock.unlock();
+        emit_event(EventType::PLAN_ABORTED);
+    }
 }
 
 bool ExecutiveController::is_running() const {
@@ -170,7 +183,12 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
 
         current_plan_ = plan;
         current_plan_.updated_at_ms = nowMs();
-        update_goal_embedding(current_plan_.goal);
+        
+        // Restore session ID if it's not set but exists in the plan's context
+        // (Note: active_plans table now has session_id, but the Plan struct doesn't yet have it as a direct member)
+        // For now, we rely on the controller already having session_id set by the AgentInterface.
+        
+        update_goal_embedding_unlocked(current_plan_.goal);
         update_current_embedding_unlocked();
         persist_current_plan_unlocked();
         
@@ -184,7 +202,14 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
 
 std::optional<Plan> ExecutiveController::get_resumable_plan() const {
     if (!memory_) return std::nullopt;
-    auto rec = memory_->getActivePlan();
+    
+    std::string sid;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sid = session_id_;
+    }
+    
+    auto rec = memory_->getActivePlan(sid);
     if (!rec) return std::nullopt;
 
     try {
@@ -220,7 +245,7 @@ ControllerState ExecutiveController::get_state() const {
     return state_;
 }
 
-const Plan& ExecutiveController::get_current_plan() const {
+Plan ExecutiveController::get_current_plan() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return current_plan_;
 }
@@ -298,7 +323,7 @@ void ExecutiveController::evaluate_state() {
         }
 
         if (active_step_futures_.empty() && (state_ == ControllerState::EXECUTING_STEP || state_ == ControllerState::OBSERVING_RESULT)) {
-            transition_to(ControllerState::IDLE);
+            transition_to_unlocked(ControllerState::IDLE);
         }
     }
 
@@ -341,7 +366,7 @@ void ExecutiveController::decide_transition() {
                 reflection_count_++;
                 
                 store_plan_history(score);
-                transition_to(ControllerState::PLANNING);
+                transition_to_unlocked(ControllerState::PLANNING);
                 
                 // Re-run planning with context
                 std::string reflection_goal = current_plan_.goal + " (Reflection: previous attempt had low success score " + std::to_string(score) + ")";
@@ -364,14 +389,14 @@ void ExecutiveController::decide_transition() {
                 current_trajectory_.embedding = goal_embedding_;
 
                 persist_current_plan_unlocked();
-                transition_to(ControllerState::IDLE);
+                transition_to_unlocked(ControllerState::IDLE);
                 
                 lock.unlock();
                 emit_event(EventType::PLAN_CREATED);
                 return;
             }
 
-            transition_to(all_successful ? ControllerState::COMPLETED : ControllerState::FAILED);
+            transition_to_unlocked(all_successful ? ControllerState::COMPLETED : ControllerState::FAILED);
             current_plan_.updated_at_ms = nowMs();
             
             store_plan_history(score);
@@ -436,7 +461,7 @@ void ExecutiveController::decide_transition() {
         }
 
         if (!steps_to_start.empty()) {
-            transition_to(ControllerState::EXECUTING_STEP);
+            transition_to_unlocked(ControllerState::EXECUTING_STEP);
             current_plan_.updated_at_ms = nowMs();
             persist_current_plan_unlocked();
         }
@@ -487,7 +512,7 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
         memory_->storeEpisodeStep(ep);
     }
 
-    transition_to(ControllerState::OBSERVING_RESULT);
+    transition_to_unlocked(ControllerState::OBSERVING_RESULT);
 
     bool success = result.success;
 
@@ -498,10 +523,52 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
         
         lock.lock();
         update_current_embedding_unlocked();
-        update_trajectory_embedding();
+        
+        // Phase 5.6: Capture Active Set from RETRIEVAL result
+        if (step.type == StepType::RETRIEVAL && step.result.contains("diagnostics")) {
+            try {
+                auto diag = step.result["diagnostics"];
+                if (diag.contains("breakdowns") && diag["breakdowns"].is_array()) {
+                    auto breakdowns = diag["breakdowns"];
+                    
+                    float bestScore = 0.0f;
+                    if (!breakdowns.empty()) {
+                        bestScore = breakdowns[0].value("final_score", 0.0f);
+                    }
+
+                    ActiveStepSet currentSet;
+                    currentSet.step_id = step.step_id;
+
+                    for (const auto& b : breakdowns) {
+                        float score = b.value("final_score", 0.0f);
+                        // Take chunks where final_score >= 0.8 * best_score, cap at 5
+                        if (score >= 0.8f * bestScore && currentSet.chunk_hashes.size() < 5) {
+                            std::string content = b.value("code_text", ""); // Need to ensure code_text is in breakdown
+                            if (content.empty()) continue;
+
+                            std::string hash = Memory::calculateContentHash(content);
+                            currentSet.chunk_hashes.push_back(hash);
+
+                            // Register node if it doesn't exist
+                            Memory::Node node;
+                            node.id = hash;
+                            node.file_path = b.value("file_name", "");
+                            node.symbol = b.value("symbol", "");
+                            node.type = "code_chunk";
+                            memory_->addNode(node);
+                        }
+                    }
+                    if (!currentSet.chunk_hashes.empty()) {
+                        active_sets_.push_back(currentSet);
+                    }
+                }
+            } catch (...) {}
+        }
+
+        update_trajectory_embedding_unlocked();
         persist_current_plan_unlocked();
         
-        transition_to(ControllerState::IDLE);
+        transition_to_unlocked(ControllerState::IDLE);
     } else {
         current_plan_.updated_at_ms = nowMs();
         std::string err = result.error_message;
@@ -510,7 +577,7 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
 
         lock.lock();
         if (step.failure_policy.revise_plan_on_failure) {
-            transition_to(ControllerState::REVISING_PLAN);
+            transition_to_unlocked(ControllerState::REVISING_PLAN);
             current_plan_.updated_at_ms = nowMs();
             persist_current_plan_unlocked();
             
@@ -526,23 +593,24 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
             emit_event(EventType::PLAN_REVISED);
             
             lock.lock();
-            transition_to(ControllerState::IDLE);
+            transition_to_unlocked(ControllerState::IDLE);
             current_plan_.updated_at_ms = nowMs();
             persist_current_plan_unlocked();
         } else if (step.failure_policy.abort_on_failure) {
-            transition_to(ControllerState::FAILED);
+            transition_to_unlocked(ControllerState::FAILED);
             current_plan_.updated_at_ms = nowMs();
             if (memory_) memory_->deleteActivePlan(current_plan_.plan_id);
             lock.unlock();
             emit_event(EventType::PLAN_FAILED);
         } else {
-            transition_to(ControllerState::IDLE);
+            transition_to_unlocked(ControllerState::IDLE);
             persist_current_plan_unlocked();
         }
     }
 }
 
 nlohmann::json ExecutiveController::dispatch_step(PlanStep& step) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!workflow_engine_) {
         return {{"status", "error"}, {"error_message", "WorkflowEngine not available"}};
     }
@@ -551,6 +619,11 @@ nlohmann::json ExecutiveController::dispatch_step(PlanStep& step) {
 }
 
 void ExecutiveController::transition_to(ControllerState new_state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    transition_to_unlocked(new_state);
+}
+
+void ExecutiveController::transition_to_unlocked(ControllerState new_state) {
     state_ = new_state;
 }
 
@@ -561,6 +634,7 @@ void ExecutiveController::emit_event(EventType type, const std::string& step_id,
     {
         std::lock_guard<std::mutex> lock(mutex_);
         event.type = type;
+        event.session_id = session_id_;
         event.plan_id = current_plan_.plan_id;
         event.step_id = step_id;
         event.timestamp_ms = nowMs();
@@ -602,39 +676,52 @@ void ExecutiveController::emit_event(EventType type, const std::string& step_id,
 }
 
 void ExecutiveController::reinforce_plan_graph() {
-    if (!memory_ || current_plan_.plan_id.empty()) return;
+    if (!memory_ || !graph_refiner_ || current_plan_.plan_id.empty() || active_sets_.size() < 2) return;
 
-    Memory::Node goalNode;
-    goalNode.id = current_plan_.plan_id;
-    goalNode.type = "plan";
-    goalNode.embedding = goal_embedding_;
-    memory_->addNode(goalNode);
+    // Phase 5.6: Causal Edge Generation
+    // Identify all edges in this trajectory for the refiner
+    std::vector<Memory::Edge> trajectory_edges;
 
-    for (const auto& step : current_plan_.steps) {
-        if (step.type == StepType::RETRIEVAL && step.status == StepStatus::SUCCESS) {
-            try {
-                if (step.result.contains("data") && step.result["data"].contains("chunks")) {
-                    auto chunks = step.result["data"]["chunks"];
-                    for (const auto& chunkJson : chunks) {
-                        std::string file = chunkJson.value("file", "");
-                        if (file.empty()) continue;
+    for (size_t i = 0; i < active_sets_.size() - 1; ++i) {
+        const auto& fromSet = active_sets_[i];
+        const auto& toSet = active_sets_[i + 1];
 
-                        Memory::Node chunkNode;
-                        chunkNode.id = file;
-                        chunkNode.type = "code_chunk";
-                        memory_->addNode(chunkNode);
+        for (const auto& fromHash : fromSet.chunk_hashes) {
+            for (const auto& toHash : toSet.chunk_hashes) {
+                if (fromHash == toHash) continue;
 
-                        Memory::Edge edge;
-                        edge.from_id = current_plan_.plan_id;
-                        edge.to_id = file;
-                        edge.relation_type = "retrieved_for";
-                        edge.weight = 1.0f;
-                        memory_->addEdge(edge);
+                Memory::Edge edge;
+                edge.from_id = fromHash;
+                edge.to_id = toHash;
+                
+                // Fetch existing if present to preserve counts
+                auto existing = memory_->getEdgesFrom(fromHash);
+                bool found = false;
+                for (const auto& e : existing) {
+                    if (e.to_id == toHash) {
+                        edge = e;
+                        found = true;
+                        break;
                     }
                 }
-            } catch (...) {}
+                
+                if (!found) {
+                    edge.weight = 0.1f; // Initial weight
+                    edge.success_count = 0;
+                    edge.failure_count = 0;
+                }
+                edge.last_used_ms = nowMs();
+                trajectory_edges.push_back(edge);
+            }
         }
     }
+
+    if (!trajectory_edges.empty()) {
+        float success_score = (current_plan_.status == PlanStatus::COMPLETED) ? 1.0f : 0.0f;
+        graph_refiner_->refineFromTrajectory(trajectory_edges, success_score);
+    }
+    
+    active_sets_.clear(); // Reset for next plan
 }
 
 void ExecutiveController::record_trajectory_step(const PlanStep& step, const Thoth::StepResult& result) {
@@ -672,6 +759,7 @@ void ExecutiveController::persist_current_plan_unlocked() {
 
     MemoryRepository::ActivePlanRecord rec;
     rec.plan_id = current_plan_.plan_id;
+    rec.session_id = session_id_;
     rec.goal = current_plan_.goal;
     rec.steps_json = current_plan_.to_json().dump();
     rec.current_index = static_cast<int>(current_plan_.current_index);
@@ -717,6 +805,8 @@ void ExecutiveController::log_to_trace(const ControllerEvent& event) {
         case EventType::MODE_SWITCHED: type_str = "MODE_SWITCHED"; break;
         case EventType::EMBEDDING_FAILED: type_str = "EMBEDDING_FAILED"; break;
         case EventType::RETRIEVAL_DIAGNOSTICS: type_str = "RETRIEVAL_DIAGNOSTICS"; break;
+        case EventType::INDEXING_STARTED: type_str = "INDEXING_STARTED"; break;
+        case EventType::INDEXING_COMPLETED: type_str = "INDEXING_COMPLETED"; break;
     }
 
     nlohmann::json entry;
@@ -740,6 +830,11 @@ void ExecutiveController::log_to_trace(const ControllerEvent& event) {
 }
 
 void ExecutiveController::update_goal_embedding(const std::string& goal) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    update_goal_embedding_unlocked(goal);
+}
+
+void ExecutiveController::update_goal_embedding_unlocked(const std::string& goal) {
     if (rag_ && rag_->engine) {
         nlohmann::json structured_goal;
         structured_goal["schema_version"] = 2;
@@ -785,6 +880,11 @@ void ExecutiveController::update_current_embedding_unlocked() {
 }
 
 void ExecutiveController::update_trajectory_embedding() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    update_trajectory_embedding_unlocked();
+}
+
+void ExecutiveController::update_trajectory_embedding_unlocked() {
     if (trajectory_builder_ && rag_) {
         // T embedding is computed from recent episode steps
         trajectory_embedding_ = trajectory_builder_->buildTrajectory(current_plan_.plan_id);
@@ -845,6 +945,9 @@ void ExecutiveController::store_plan_history(float success_score) {
     record.goal_embedding = goal_embedding_;
 
     memory_->storePastPlan(record);
+
+    // Phase 5.6: Reinforce Graph Memory
+    reinforce_plan_graph();
     
     MemoryRepository::CognatePlanRecord cognateRec;
     cognatePlanRecordFromPlan(current_plan_, cognateRec);

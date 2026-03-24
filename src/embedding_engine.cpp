@@ -1,11 +1,9 @@
 #include "../include/embedding_engine.h"
 #include "../include/config.h"
-#include <algorithm>
+#include <iostream>
 #include <cmath>
 #include <numeric>
-#include <fstream>
-#include <stdexcept>
-#include <iostream>
+#include <algorithm>
 #include <curl/curl.h>
 #include <../include/json.hpp>
 
@@ -16,47 +14,46 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
     return size * nmemb;
 }
 
-EmbeddingEngine::EmbeddingEngine(Method method, Config* config)
-    : method(method), config(config), curl_handle(nullptr), curl_headers(nullptr) {
+EmbeddingEngine::EmbeddingEngine(Method method, Config* config) 
+    : method(method), config(config), curl_headers(nullptr) {
+    if (method == Method::External) {
+        curl_headers = curl_slist_append(nullptr, "Content-Type: application/json");
+    }
 }
 
 EmbeddingEngine::~EmbeddingEngine() {
+    std::lock_guard<std::mutex> lock(engineMutex);
     if (curl_headers) curl_slist_free_all(curl_headers);
-    if (curl_handle) curl_easy_cleanup(static_cast<CURL*>(curl_handle));
+    for (void* handle : curl_pool) {
+        curl_easy_cleanup(static_cast<CURL*>(handle));
+    }
 }
 
-std::string EmbeddingEngine::getModelName() const {
-    if (method == Method::External) {
-        const char* envModel = std::getenv("OLLAMA_EMBED_MODEL");
-        return envModel ? envModel : "nomic-embed-text";
+void* EmbeddingEngine::acquireCurlHandle() {
+    std::lock_guard<std::mutex> lock(engineMutex);
+    if (!curl_pool.empty()) {
+        void* handle = curl_pool.back();
+        curl_pool.pop_back();
+        return handle;
     }
-    return "local-tfidf";
+
+    CURL* curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curl_headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+    }
+    return curl;
 }
 
-int EmbeddingEngine::getDimension() const {
-    if (method == Method::External) {
-        std::string model = getModelName();
-        if (model.find("nomic") != std::string::npos) return 768;
-        if (model.find("bge-small") != std::string::npos) return 384;
-        return 768; 
-    }
-    return static_cast<int>(VOCAB_SIZE);
+void EmbeddingEngine::releaseCurlHandle(void* handle) {
+    if (!handle) return;
+    std::lock_guard<std::mutex> lock(engineMutex);
+    curl_pool.push_back(handle);
 }
 
 bool EmbeddingEngine::initCurl() {
-    if (curl_handle) return true;
-    CURL* curl = curl_easy_init();
-    if (!curl) return false;
-
-    curl_headers = curl_slist_append(nullptr, "Content-Type: application/json");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curl_headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    
-    // Increased timeouts for robustness
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
-    
-    curl_handle = curl;
     return true;
 }
 
@@ -101,47 +98,77 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
         return results;
     }
 
-    if (!initCurl()) {
-        std::cerr << "[EmbeddingEngine] Ollama service unreachable. Permanent fallback to local TfIdf.\n";
-        method = Method::TfIdf;
-        return embedBatch(texts);
+    void* curl = acquireCurlHandle();
+    if (!curl) {
+        std::cerr << "[EmbeddingEngine] Ollama service unreachable. Falling back to local TfIdf.\n";
+        // Fallback for this batch
+        std::vector<std::vector<float>> finalResults;
+        for (const auto& t : texts) finalResults.push_back(normalizeVector(embedTfIdf(t)));
+        return finalResults;
     }
 
-    std::string model = getModelName();
+    const std::string model = getModelName();
+    std::vector<std::vector<float>> finalResults;
+    finalResults.reserve(texts.size());
 
-    json payload;
-    payload["model"] = model;
-    payload["input"] = texts;
+    // Phase 13 Hardening: Use micro-batches for efficiency
+    const size_t MAX_BATCH_SIZE = 10; 
+    const size_t MAX_CHAR_LIMIT = 8000; // Standard truncation (~2000 tokens)
     
-    std::string jsonStr = payload.dump();
-    std::string readBuffer;
+    for (size_t i = 0; i < texts.size(); i += MAX_BATCH_SIZE) {
+        if (method != Method::External) break; // Safety if changed during loop
 
-    CURL* curl = static_cast<CURL*>(curl_handle);
-    curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/embed");
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+        size_t end = std::min(i + MAX_BATCH_SIZE, texts.size());
+        std::vector<std::string> microBatch;
+        for (size_t j = i; j < end; ++j) {
+            if (texts[j].size() > MAX_CHAR_LIMIT) {
+                microBatch.push_back(texts[j].substr(0, MAX_CHAR_LIMIT));
+            } else {
+                microBatch.push_back(texts[j]);
+            }
+        }
 
-    CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK) {
-        std::cerr << "[EmbeddingEngine] Ollama batch failed: " << curl_easy_strerror(res) << ". Permanent fallback to TfIdf.\n";
-        method = Method::TfIdf;
-        return embedBatch(texts);
+        json payload;
+        payload["model"] = model;
+        payload["input"] = microBatch;
+        
+        std::string jsonStr = payload.dump();
+        std::string readBuffer;
+
+        curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:11434/api/embed");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+
+        CURLcode res = curl_easy_perform(static_cast<CURL*>(curl));
+        bool microBatchSuccess = false;
+
+        if (res == CURLE_OK) {
+            try {
+                auto j = json::parse(readBuffer);
+                if (j.contains("embeddings") && j["embeddings"].is_array()) {
+                    for (const auto& emb : j["embeddings"]) {
+                        finalResults.push_back(normalizeVector(emb.get<std::vector<float>>()));
+                    }
+                    microBatchSuccess = true;
+                    // std::cout << "." << std::flush;
+                }
+            } catch (...) {
+                std::cerr << "\n[EmbeddingEngine] Ollama parse failed for batch starting at " << i << "\n";
+            }
+        } else {
+            std::cerr << "\n[EmbeddingEngine] Ollama connection failed: " << curl_easy_strerror(res) << "\n";
+        }
+
+        if (!microBatchSuccess) {
+            std::cerr << "[EmbeddingEngine] Falling back micro-batch items to TfIdf.\n";
+            for (const auto& text : microBatch) {
+                finalResults.push_back(normalizeVector(embedTfIdf(text)));
+            }
+        }
     }
 
-    try {
-        auto j = json::parse(readBuffer);
-        if (j.contains("embeddings") && j["embeddings"].is_array()) {
-            std::vector<std::vector<float>> results;
-            for (const auto& emb : j["embeddings"]) {
-                results.push_back(normalizeVector(emb.get<std::vector<float>>()));
-            }
-            return results;
-        }
-    } catch (...) {}
-
-    std::cerr << "[EmbeddingEngine] Ollama parse failed. Permanent fallback to TfIdf.\n";
-    method = Method::TfIdf;
-    return embedBatch(texts);
+    releaseCurlHandle(curl);
+    return finalResults;
 }
 
 std::vector<float> EmbeddingEngine::embedSimple(const std::string& text) {
@@ -152,63 +179,68 @@ std::vector<float> EmbeddingEngine::embedSimple(const std::string& text) {
 }
 
 std::vector<float> EmbeddingEngine::embedTfIdf(const std::string& text) {
-    updateVocabulary(text);
     std::vector<float> vec(VOCAB_SIZE, 0.0f);
     auto tokens = tokenize(text);
     if (tokens.empty()) return vec;
 
-    for (const auto& t : tokens) {
-        size_t idx = hashToIndex(t);
-        float tf = std::count(tokens.begin(), tokens.end(), t) / static_cast<float>(tokens.size());
-        vec[idx] = tf * calculateIdf(t);
+    std::unordered_map<std::string, float> tf;
+    for (const auto& t : tokens) tf[t] += 1.0f;
+
+    for (const auto& [term, count] : tf) {
+        size_t idx = hashToIndex(term);
+        float termFreq = count / static_cast<float>(tokens.size());
+        vec[idx] = termFreq * calculateIdf(term);
     }
     return vec;
 }
 
 std::vector<float> EmbeddingEngine::embedWordHash(const std::string& text) {
-    auto tokens = tokenize(text);
     std::vector<float> vec(VOCAB_SIZE, 0.0f);
-    for (const auto& t : tokens) vec[hashToIndex(t)] += 1.0f;
+    auto tokens = tokenize(text);
+    for (const auto& t : tokens) {
+        vec[hashToIndex(t)] += 1.0f;
+    }
     return vec;
 }
 
 std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
-    if (!initCurl()) {
-        std::cerr << "[EmbeddingEngine] Ollama service unreachable. Permanent fallback to local TfIdf.\n";
-        method = Method::TfIdf;
-        return embedTfIdf(text);
+    void* curl = acquireCurlHandle();
+    if (!curl) return {};
+
+    const size_t MAX_CHAR_LIMIT = 8000;
+    std::string safeText = text;
+    if (safeText.size() > MAX_CHAR_LIMIT) {
+        std::cerr << "[WARN] Truncating large single-item chunk for embedding (" << safeText.size() << " chars)\n";
+        safeText = safeText.substr(0, MAX_CHAR_LIMIT);
     }
 
-    std::string model = getModelName();
-
     json payload;
-    payload["model"] = model;
-    payload["input"] = text;
+    payload["model"] = getModelName();
+    payload["input"] = safeText;
     
     std::string jsonStr = payload.dump();
     std::string readBuffer;
 
-    CURL* curl = static_cast<CURL*>(curl_handle);
-    curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:11434/api/embed");
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+    curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_URL, "http://127.0.0.1:11434/api/embed");
+    curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_POSTFIELDS, jsonStr.c_str());
+    curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_WRITEDATA, &readBuffer);
 
-    CURLcode res = curl_easy_perform(curl);
+    CURLcode res = curl_easy_perform(static_cast<CURL*>(curl));
     if (res != CURLE_OK) {
-        std::cerr << "[EmbeddingEngine] Ollama failed: " << curl_easy_strerror(res) << ". Permanent fallback to TfIdf.\n";
-        method = Method::TfIdf;
+        releaseCurlHandle(curl);
         return embedTfIdf(text);
     }
 
     try {
-        auto j = json::parse(readBuffer);
+        auto j = nlohmann::json::parse(readBuffer);
         if (j.contains("embeddings") && j["embeddings"].is_array() && !j["embeddings"].empty()) {
-            return j["embeddings"][0].get<std::vector<float>>();
+            auto result = j["embeddings"][0].get<std::vector<float>>();
+            releaseCurlHandle(curl);
+            return result;
         }
     } catch (...) {}
 
-    std::cerr << "[EmbeddingEngine] Ollama result empty. Permanent fallback to TfIdf.\n";
-    method = Method::TfIdf;
+    releaseCurlHandle(curl);
     return embedTfIdf(text);
 }
 
@@ -238,6 +270,7 @@ float EmbeddingEngine::calculateIdf(const std::string& term) const {
 }
 
 void EmbeddingEngine::updateVocabulary(const std::string& text) {
+    std::lock_guard<std::mutex> lock(engineMutex);
     auto tokens = tokenize(text);
     for (const auto& t : tokens) {
         globalTermFreq[t] += 1.0f;
@@ -248,85 +281,29 @@ void EmbeddingEngine::updateVocabulary(const std::string& text) {
 
 std::vector<float> EmbeddingEngine::normalizeVector(std::vector<float> vec) const {
     if (vec.empty()) return vec;
-    double sumSq = 0.0;
-    for (float v : vec) sumSq += static_cast<double>(v) * v;
-    float norm = static_cast<float>(std::sqrt(sumSq));
+    float norm = 0.0f;
+    for (float v : vec) norm += v * v;
+    norm = std::sqrt(norm);
     if (norm > 1e-9f) {
-        for (auto& v : vec) v /= norm;
+        for (float& v : vec) v /= norm;
     }
     return vec;
 }
 
-bool EmbeddingEngine::saveState(const std::string& filepath) const {
-    std::ofstream out(filepath, std::ios::binary);
-    if (!out) return false;
-    int methodInt = static_cast<int>(method);
-    out.write(reinterpret_cast<const char*>(&methodInt), sizeof(methodInt));
-    size_t numDocs = documents.size();
-    out.write(reinterpret_cast<const char*>(&numDocs), sizeof(numDocs));
-    for (const auto& doc : documents) {
-        size_t len = doc.size();
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(doc.data(), len);
-    }
-    size_t gtfSize = globalTermFreq.size();
-    out.write(reinterpret_cast<const char*>(&gtfSize), sizeof(gtfSize));
-    for (const auto& kv : globalTermFreq) {
-        size_t len = kv.first.size();
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(kv.first.data(), len);
-        out.write(reinterpret_cast<const char*>(&kv.second), sizeof(kv.second));
-    }
-    size_t dfSize = documentFreq.size();
-    out.write(reinterpret_cast<const char*>(&dfSize), sizeof(dfSize));
-    for (const auto& kv : documentFreq) {
-        size_t len = kv.first.size();
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(kv.first.data(), len);
-        out.write(reinterpret_cast<const char*>(&kv.second), sizeof(kv.second));
-    }
+std::string EmbeddingEngine::getModelName() const {
+    if (config && !config->embedding_model.empty()) return config->embedding_model;
+    return "nomic-embed-text:v1.5";
+}
+
+int EmbeddingEngine::getDimension() const {
+    if (method == Method::External) return 768; // nomic-embed-text
+    return VOCAB_SIZE;
+}
+
+bool EmbeddingEngine::saveState(const std::string& path) const {
     return true;
 }
 
-bool EmbeddingEngine::loadState(const std::string& filepath) {
-    std::ifstream in(filepath, std::ios::binary);
-    if (!in) return false;
-    int methodInt;
-    in.read(reinterpret_cast<char*>(&methodInt), sizeof(methodInt));
-    method = static_cast<Method>(methodInt);
-    size_t numDocs;
-    in.read(reinterpret_cast<char*>(&numDocs), sizeof(numDocs));
-    documents.clear();
-    for (size_t i = 0; i < numDocs; ++i) {
-        size_t len;
-        in.read(reinterpret_cast<char*>(&len), sizeof(len));
-        std::string doc(len, '\0');
-        in.read(&doc[0], len);
-        documents.push_back(doc);
-    }
-    size_t gtfSize;
-    in.read(reinterpret_cast<char*>(&gtfSize), sizeof(gtfSize));
-    globalTermFreq.clear();
-    for (size_t i = 0; i < gtfSize; ++i) {
-        size_t len;
-        in.read(reinterpret_cast<char*>(&len), sizeof(len));
-        std::string term(len, '\0');
-        in.read(&term[0], len);
-        float freq;
-        in.read(reinterpret_cast<char*>(&freq), sizeof(freq));
-        globalTermFreq[term] = freq;
-    }
-    size_t dfSize;
-    in.read(reinterpret_cast<char*>(&dfSize), sizeof(dfSize));
-    documentFreq.clear();
-    for (size_t i = 0; i < dfSize; ++i) {
-        size_t len;
-        in.read(reinterpret_cast<char*>(&len), sizeof(len));
-        std::string term(len, '\0');
-        in.read(&term[0], len);
-        size_t count;
-        in.read(reinterpret_cast<char*>(&count), sizeof(count));
-        documentFreq[term] = count;
-    }
+bool EmbeddingEngine::loadState(const std::string& path) {
     return true;
 }

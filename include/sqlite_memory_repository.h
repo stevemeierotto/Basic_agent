@@ -62,11 +62,14 @@ public:
     bool addEdge(const Edge& edge) override;
     std::vector<Node> getNodesByType(const std::string& type) override;
     std::vector<Edge> getEdgesFrom(const std::string& nodeId) override;
+    std::vector<Edge> getAllEdges() override;
+    bool deleteEdge(const std::string& from_id, const std::string& to_id) override;
+    GraphStatistics getGraphStatistics() override;
 
     virtual bool storeStepMetric(const StepMetricRecord& metric) override;
 
     bool storeActivePlan(const ActivePlanRecord& plan) override;
-    std::optional<ActivePlanRecord> getActivePlan() override;
+    std::optional<ActivePlanRecord> getActivePlan(const std::string& session_id) override;
     bool deleteActivePlan(const std::string& plan_id) override;
 
     // Cognate Phase 2.1
@@ -87,6 +90,11 @@ public:
     // Episode Steps (Phase 5, Step 5.5)
     bool storeEpisodeStep(const EpisodeStepRecord& step) override;
     std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) override;
+
+    // Cognate Experiments
+    bool saveExperiment(const CognateExperimentRecord& record) override;
+    std::optional<CognateExperimentRecord> loadExperiment(const std::string& experiment_id) override;
+    std::vector<CognateExperimentRecord> getAllExperiments() override;
 
 private:
     struct DBHandle;

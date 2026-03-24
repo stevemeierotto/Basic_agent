@@ -12,6 +12,72 @@
 using json = nlohmann::json;
 
 namespace fs = std::filesystem;
+
+IndexManager::IndexManager(EmbeddingEngine* eng)
+    : store(eng), engine(eng), localTfIdfEngine(std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf)) 
+{
+    startWorker();
+}
+
+IndexManager::~IndexManager() {
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_stopWorker = true;
+    }
+    m_queueCv.notify_all();
+    if (m_workerThread.joinable()) {
+        m_workerThread.join();
+    }
+}
+
+void IndexManager::startWorker() {
+    m_workerThread = std::thread(&IndexManager::workerLoop, this);
+}
+
+void IndexManager::workerLoop() {
+    while (true) {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> lock(m_queueMutex);
+            m_queueCv.wait(lock, [this]() { return m_stopWorker || !m_taskQueue.empty(); });
+            
+            if (m_stopWorker && m_taskQueue.empty()) break;
+            
+            task = std::move(m_taskQueue.front());
+            m_taskQueue.pop();
+            m_isIndexing = !m_taskQueue.empty();
+        }
+        
+        if (task) {
+            task();
+        }
+
+        // Check again after task execution
+        {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            m_isIndexing = !m_taskQueue.empty();
+        }
+    }
+}
+
+void IndexManager::indexFileAsync(const std::string& filePath) {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    m_taskQueue.push([this, filePath]() {
+        indexFile(filePath);
+    });
+    m_isIndexing = true;
+    m_queueCv.notify_one();
+}
+
+void IndexManager::indexProjectAsync(const std::string& rootPath) {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    m_taskQueue.push([this, rootPath]() {
+        indexProject(rootPath);
+    });
+    m_isIndexing = true;
+    m_queueCv.notify_one();
+}
+
 std::string sanitize_utf8(const std::string& input) {
     std::string output;
     output.reserve(input.size());
@@ -192,6 +258,15 @@ void IndexManager::indexFile(const std::string& filePath) {
     if (!shouldReindexFile(normalizedPath)) {
         return;
     }
+
+    if (eventCallback) {
+        ControllerEvent ev;
+        ev.type = EventType::INDEXING_STARTED;
+        ev.session_id = session_id;
+        ev.metadata = {{"file_path", normalizedPath}};
+        eventCallback(ev);
+    }
+
     removeChunksForFile(normalizedPath);
     
     std::ifstream in(normalizedPath, std::ios::binary);
@@ -205,6 +280,10 @@ void IndexManager::indexFile(const std::string& filePath) {
     if (content.empty()) return;
     if (!engine) return;
     content = sanitize_utf8(content);
+    
+    if (localTfIdfEngine) {
+        localTfIdfEngine->updateVocabulary(content);
+    }
     
     auto chunksVec = Chunker::createSmartChunks(normalizedPath, content);
     if (chunksVec.empty()) chunksVec = Chunker::chunkBySize(normalizedPath, content);
@@ -238,41 +317,65 @@ void IndexManager::indexFile(const std::string& filePath) {
         return;
     }
     
-    std::vector<std::string> codes;
-    for (const auto& c : chunksVec) codes.push_back(c.code);
-    auto embeddings = engine->embedBatch(codes);
+    // Phase 13 Stability: Process chunks in micro-batches to avoid memory spikes
+    const size_t BATCH_SIZE = 10;
+    for (size_t i = 0; i < chunksVec.size(); i += BATCH_SIZE) {
+        size_t batchEnd = std::min(i + BATCH_SIZE, chunksVec.size());
+        std::vector<std::string> batchCodes;
+        for (size_t j = i; j < batchEnd; ++j) {
+            batchCodes.push_back(chunksVec[j].code);
+        }
 
-    for (size_t i = 0; i < chunksVec.size(); ++i) {
-        CodeChunk &chunkRef = chunksVec[i];
-        if (chunkRef.code.empty() || std::all_of(chunkRef.code.begin(), chunkRef.code.end(), ::isspace)) continue;
-        chunkRef.code.erase(std::remove(chunkRef.code.begin(), chunkRef.code.end(), '\0'), chunkRef.code.end());
-        size_t nonspace_count = std::count_if(chunkRef.code.begin(), chunkRef.code.end(), [](char c){ return !std::isspace(c); });
-        if (nonspace_count < 10) continue;
-        try {
-            if (i < embeddings.size()) chunkRef.embedding = embeddings[i];
-            else chunkRef.embedding = engine->embed(chunkRef.code);
+        // HEAVY PHASE: Release lock while calling EmbeddingEngine (which might call Ollama)
+        // Note: ChunksMutex is not held here because indexFile doesn't hold it globally yet.
+        // It only holds it in addChunk() and at the end for fingerprinting.
+        auto embeddings = engine->embedBatch(batchCodes);
 
-            std::error_code ec_m;
-            auto f_time = fs::last_write_time(normalizedPath, ec_m);
-            chunkRef.last_modified = std::chrono::duration_cast<std::chrono::milliseconds>(f_time.time_since_epoch()).count();
-            chunkRef.embedding_version = engine->getInternalVersion();
-            chunkRef.commit_hash = getCurrentCommitHash();
+        for (size_t j = 0; j < batchCodes.size(); ++j) {
+            size_t chunkIdx = i + j;
+            CodeChunk &chunkRef = chunksVec[chunkIdx];
+            
+            if (chunkRef.code.empty() || std::all_of(chunkRef.code.begin(), chunkRef.code.end(), ::isspace)) continue;
+            chunkRef.code.erase(std::remove(chunkRef.code.begin(), chunkRef.code.end(), '\0'), chunkRef.code.end());
+            
+            size_t nonspace_count = std::count_if(chunkRef.code.begin(), chunkRef.code.end(), [](char c){ return !std::isspace(c); });
+            if (nonspace_count < 10) continue;
 
-            if (localTfIdfEngine) {
-                auto tfidf = localTfIdfEngine->embed(chunkRef.code);
-                float sum = 0;
-                for (float v : tfidf) sum += v * v;
-                chunkRef.keyword_score = std::sqrt(sum);
-            }
+            try {
+                if (j < embeddings.size()) chunkRef.embedding = embeddings[j];
+                else chunkRef.embedding = engine->embed(chunkRef.code);
 
-            bool isZero = std::all_of(chunkRef.embedding.begin(), chunkRef.embedding.end(), [](float v){ return v == 0.0f; });
-            if (isZero && chunkRef.keyword_score < 0.001f) continue;
-        } catch (...) { continue; }
-        addChunk(std::move(chunkRef));
+                std::error_code ec_m;
+                auto f_time = fs::last_write_time(normalizedPath, ec_m);
+                chunkRef.last_modified = std::chrono::duration_cast<std::chrono::milliseconds>(f_time.time_since_epoch()).count();
+                chunkRef.embedding_version = engine->getInternalVersion();
+                chunkRef.commit_hash = getCurrentCommitHash();
+
+                if (localTfIdfEngine) {
+                    auto tfidf = localTfIdfEngine->embed(chunkRef.code);
+                    float sum = 0;
+                    for (float v : tfidf) sum += v * v;
+                    chunkRef.keyword_score = std::sqrt(sum);
+                }
+            } catch (...) { continue; }
+            addChunk(std::move(chunkRef));
+        }
+        if (i % 20 == 0) std::cout << "." << std::flush;
     }
+
     {
         std::unique_lock lock(chunksMutex);
         indexedFileFingerprints[normalizedPath] = computeFileFingerprint(normalizedPath);
+    }
+    
+    enforceMemoryLimits(); // Safety check after each file
+
+    if (eventCallback) {
+        ControllerEvent ev;
+        ev.type = EventType::INDEXING_COMPLETED;
+        ev.session_id = session_id;
+        ev.metadata = {{"file_path", normalizedPath}};
+        eventCallback(ev);
     }
 }
 
