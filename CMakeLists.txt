@@ -86,6 +86,9 @@ target_link_libraries(basic_agent PRIVATE CURL::libcurl SQLite::SQLite3)
 add_executable(run_grag_benchmark src/run_grag_benchmark.cpp)
 target_link_libraries(run_grag_benchmark PRIVATE basic_agent)
 
+add_executable(run_cognate_benchmark src/run_cognate_benchmark.cpp)
+target_link_libraries(run_cognate_benchmark PRIVATE basic_agent)
+
 # CLI executable for debugging or standalone use
 # Only build CLI tool if we're building standalone
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

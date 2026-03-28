@@ -157,6 +157,10 @@ std::vector<Memory::CognateTrajectoryRecord> BasicAgentPlugin::getAllTrajectorie
     return memory.getAllTrajectories();
 }
 
+std::vector<Memory::EpisodeStepRecord> BasicAgentPlugin::getAllEpisodeSteps() const {
+    return memory.getAllEpisodeSteps();
+}
+
 std::vector<Memory::CognateExperimentRecord> BasicAgentPlugin::getAllExperiments() const {
     return memory.getAllExperiments();
 }

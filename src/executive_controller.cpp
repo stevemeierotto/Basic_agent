@@ -236,8 +236,36 @@ void ExecutiveController::set_execution_mode(std::unique_ptr<IExecutionMode> mod
         execution_mode_ = std::move(mode);
         current_plan_.updated_at_ms = nowMs();
         persist_current_plan_unlocked();
+        persist_problem_state_unlocked();
     }
     emit_event(EventType::MODE_SWITCHED);
+}
+
+void ExecutiveController::update_problem_state(const ProblemState& state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_problem_state_ = state;
+    current_problem_state_.updated_at = nowMs();
+    persist_problem_state_unlocked();
+}
+
+ProblemState ExecutiveController::get_problem_state() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return current_problem_state_;
+}
+
+void ExecutiveController::persist_problem_state_unlocked() {
+    if (!memory_ || current_problem_state_.problem_id.empty()) return;
+
+    MemoryRepository::ProblemStateRecord rec;
+    rec.problem_id = current_problem_state_.problem_id;
+    rec.goal_id = current_plan_.plan_id; // Goal ID usually maps to plan_id
+    rec.state_json = current_problem_state_.to_json().dump();
+    rec.iteration_count = current_problem_state_.iteration_count;
+    rec.confidence_score = current_problem_state_.confidence_score;
+    rec.created_at = current_problem_state_.created_at;
+    rec.updated_at = current_problem_state_.updated_at;
+    
+    memory_->saveProblemState(rec);
 }
 
 ControllerState ExecutiveController::get_state() const {
@@ -501,7 +529,7 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
     // Phase 5.5: Store Episode Step for semantic trajectory retrieval
     if (memory_) {
         Memory::EpisodeStepRecord ep;
-        ep.episode_id = "ep-" + current_plan_.plan_id;
+        ep.episode_id = "traj-" + current_plan_.plan_id;
         ep.goal_id = current_plan_.plan_id;
         ep.step_index = static_cast<int>(std::distance(current_plan_.steps.begin(), it));
         ep.state_summary = step.description;
@@ -641,10 +669,19 @@ void ExecutiveController::emit_event(EventType type, const std::string& step_id,
         event.controller_state_name = state_to_name(state_);
         
         nlohmann::json enriched_meta = metadata;
+        
+        // Standard structural fields
         enriched_meta["current_index"] = current_plan_.current_index;
         if (!step_id.empty()) {
             enriched_meta["step_id"] = step_id;
         }
+
+        // Schema Standardization (Cognate V2)
+        // Ensure these fields exist if not provided to avoid UI key-missing errors
+        if (!enriched_meta.contains("reasoning_stage")) enriched_meta["reasoning_stage"] = "standard";
+        if (!enriched_meta.contains("confidence_score")) enriched_meta["confidence_score"] = 1.0f;
+        if (!enriched_meta.contains("success")) enriched_meta["success"] = true;
+        if (!enriched_meta.contains("iteration_count")) enriched_meta["iteration_count"] = reflection_count_;
         
         if (type == EventType::PLAN_CREATED || type == EventType::PLAN_REVISED) {
             enriched_meta["plan"] = current_plan_.to_json();
@@ -655,13 +692,22 @@ void ExecutiveController::emit_event(EventType type, const std::string& step_id,
                 if (s.step_id == step_id) {
                     if (type == EventType::STEP_COMPLETED) {
                         enriched_meta["result"] = s.result;
+                        enriched_meta["success"] = (s.status == StepStatus::SUCCESS);
                     }
                     if (type == EventType::STEP_STARTED) {
                         enriched_meta["step_type"] = static_cast<int>(s.type);
                     }
+                    if (type == EventType::STEP_FAILED) {
+                        enriched_meta["success"] = false;
+                    }
                     break;
                 }
             }
+        }
+
+        // Special handling for terminal events
+        if (type == EventType::PLAN_FAILED || type == EventType::PLAN_ABORTED) {
+            enriched_meta["success"] = false;
         }
         
         event.metadata = enriched_meta;

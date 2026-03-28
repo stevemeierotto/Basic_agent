@@ -21,10 +21,12 @@ namespace Thoth {
 struct Strategy {
     std::string strategy_id;
     std::string description;
-    std::vector<std::string> step_pattern; // Sequence of step descriptions or types
+    std::string reasoning_stage; // e.g., "hypothesis", "analysis", "standard"
+    std::vector<std::string> step_pattern; 
     float success_rate = 0.0f;
     int occurrence_count = 0;
     int64_t created_at = 0;
+    nlohmann::json metadata;
 
     nlohmann::json to_json() const;
     static Strategy from_json(const nlohmann::json& j);

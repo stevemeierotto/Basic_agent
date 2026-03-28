@@ -10,6 +10,7 @@
 
 #pragma once
 #include <string>
+#include <mutex>
 #include <curl/curl.h>
 #include "config.h"
 
@@ -46,6 +47,7 @@ private:
     CURL* curl = nullptr;
     struct curl_slist* headers = nullptr;
     std::string selectedModel; 
+    mutable std::recursive_mutex llmMutex;
 
     static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
         ((std::string*)userp)->append((char*)contents, size * nmemb);

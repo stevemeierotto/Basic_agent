@@ -1,7 +1,7 @@
 /*
- * Copyright (c) 2025 Steve Meierotto
+ * Copyright (c) 2026 Steve Meierotto
  * 
- * Thoth — Cognate Phase 8.1
+ * Thoth — StrategyEngine 2.0 (Cognate V2)
  *
  * Licensed under the MIT License (see LICENSE in project root)
  */
@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <algorithm>
 #include <chrono>
+#include <set>
+#include <iostream>
 
 namespace Thoth {
 
@@ -20,7 +22,13 @@ void StrategyEngine::processTrajectories() {
     if (!memory_) return;
 
     auto all_trajs = memory_->getAllTrajectories();
-    if (all_trajs.size() < 3) return;
+    std::cout << "  [StrategyEngine] Processing " << all_trajs.size() << " trajectories...\n";
+    // Thesis Rule: Minimum of 3 trajectories required for extraction
+    if (all_trajs.size() < 3) {
+        StructuredLogger::instance().log(LogLevel::Info, "strategy_engine", "INSUFFICIENT_DATA", 
+            "Not enough trajectories for strategy extraction", {{"count", all_trajs.size()}});
+        return;
+    }
 
     std::unordered_map<std::string, PatternCandidate> candidates;
 
@@ -31,9 +39,21 @@ void StrategyEngine::processTrajectories() {
 
             std::vector<std::string> step_sequence;
             for (const auto& s : tj["steps"]) {
-                // Use StepType as the pattern key
+                // Semantic Pattern Extraction: Tool + Step Type
+                std::string tool_name = s.value("tool", "none");
                 int type = s.value("type", 0);
-                step_sequence.push_back(std::to_string(type));
+                
+                // We create a semantic key like "RETRIEVAL" or "TOOL:project_analyze"
+                if (tool_name != "none" && !tool_name.empty()) {
+                    step_sequence.push_back("TOOL:" + tool_name);
+                } else {
+                    // Map type enum to string for readability
+                    switch(type) {
+                        case 1: step_sequence.push_back("RETRIEVAL"); break;
+                        case 2: step_sequence.push_back("LLM"); break;
+                        default: step_sequence.push_back("STEP_" + std::to_string(type)); break;
+                    }
+                }
             }
 
             if (step_sequence.size() < 2) continue;
@@ -49,15 +69,25 @@ void StrategyEngine::processTrajectories() {
         }
     }
 
-    // Phase 8.2: Strategy Extraction
+    // Phase 3.1: Strategy Promotion & Library
     for (const auto& [key, cand] : candidates) {
         float avg_success = cand.total_success / static_cast<float>(cand.count);
         
-        // Strategy Selection Criteria: min 3 occurrences, >= 0.8 success rate
+        // Thesis Differentiator: 80% success / 3-run threshold
         if (cand.count >= 3 && avg_success >= 0.8f) {
+            
+            // Check if strategy already exists to avoid duplication
+            // (In a real implementation we'd use a database lookup by pattern key)
+            
             Memory::CognateStrategyRecord strategy;
-            strategy.strategy_id = "strat-" + key.substr(0, 8);
-            strategy.description = "Autonomous strategy for sequence: " + key;
+            // Generate a deterministic ID based on the pattern key for stability
+            std::hash<std::string> hasher;
+            size_t hash_val = hasher(key);
+            std::stringstream ss;
+            ss << "strat-" << std::hex << (hash_val & 0xFFFFFFFF);
+            strategy.strategy_id = ss.str();
+            
+            strategy.description = "Successful pattern detected: " + key;
             
             nlohmann::json pattern_j = cand.steps;
             strategy.step_pattern_json = pattern_j.dump();
@@ -67,9 +97,15 @@ void StrategyEngine::processTrajectories() {
 
             memory_->saveStrategy(strategy);
             
-            StructuredLogger::instance().log(LogLevel::Info, "strategy_engine", "STRATEGY_EMERGED", 
-                "New strategy extracted from trajectories", 
-                {{"strategy_id", strategy.strategy_id}, {"occurrences", cand.count}, {"success_rate", avg_success}});
+            StructuredLogger::instance().log(LogLevel::Info, "strategy_engine", "STRATEGY_PROMOTED", 
+                "Pattern promoted to Strategy (Threshold Met)", 
+                {
+                    {"strategy_id", strategy.strategy_id}, 
+                    {"occurrences", cand.count}, 
+                    {"success_rate", avg_success},
+                    {"pattern", key},
+                    {"thesis_threshold_met", true}
+                });
         }
     }
 }

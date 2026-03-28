@@ -44,6 +44,7 @@ public:
     // --- Cognate UI Integration ---
     std::vector<Memory::CognateStrategyRecord> getAllStrategies() const;
     std::vector<Memory::CognateTrajectoryRecord> getAllTrajectories() const;
+    std::vector<Memory::EpisodeStepRecord> getAllEpisodeSteps() const;
     std::vector<Memory::CognateExperimentRecord> getAllExperiments() const;
     bool saveExperiment(const Memory::CognateExperimentRecord& record);
     Memory::GraphStatistics getGraphStatistics() const;

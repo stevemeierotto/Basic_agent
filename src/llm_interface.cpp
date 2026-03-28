@@ -56,6 +56,7 @@ LLMInterface::LLMInterface(LLMBackend b, Config* cfg)
 }
 
 std::string LLMInterface::detectOllamaModel() {
+    std::lock_guard<std::recursive_mutex> lock(llmMutex);
     if (!curl) return "";
 
     try {
@@ -107,6 +108,7 @@ std::string LLMInterface::resolveOllamaModel() {
 }
 
 LLMInterface::~LLMInterface() {
+    std::lock_guard<std::recursive_mutex> lock(llmMutex);
     if (headers) curl_slist_free_all(headers);
     if (curl) curl_easy_cleanup(curl);
     headers = nullptr;
@@ -114,6 +116,7 @@ LLMInterface::~LLMInterface() {
 }
 
 void LLMInterface::setBackend(LLMBackend b) {
+    std::lock_guard<std::recursive_mutex> lock(llmMutex);
     if (backend == b) return; // no-op if same backend
     backend = b;
 
@@ -154,6 +157,7 @@ std::string LLMInterface::query(const std::string& prompt) {
 
 
 std::string LLMInterface::askOllama(const std::string& prompt) {
+    std::lock_guard<std::recursive_mutex> lock(llmMutex);
     if (!curl) return "Assistant: [Error] Ollama CURL handle not initialized.";
 
     try {

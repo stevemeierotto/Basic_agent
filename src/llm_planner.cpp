@@ -45,28 +45,46 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
         return plan;
     }
 
-    // Phase 3.2, 3.3, 7.5, 8.2: Gather context for the prompt
+    // Phase 3.2: Gather context for the prompt (Cognate V2)
     std::string strategy_context;
     std::string past_experience;
     
     if (rag_ && rag_->engine && memory_) {
         auto goal_embedding = rag_->engine->embed(goal);
         
-        // 1. Past Trajectories (Phase 7.5)
+        // 1. Past Trajectories (Experience-Guided Planning)
         auto trajectories = memory_->retrieveSimilarTrajectories(goal_embedding, 3);
-        std::ostringstream traj_oss;
-        for (const auto& t : trajectories) {
-            traj_oss << "- Goal: " << t.goal << "\n  Trajectory: " << t.trajectory_json << "\n\n";
+        if (!trajectories.empty()) {
+            std::ostringstream traj_oss;
+            traj_oss << "[PAST EXPERIENCE - RELEVANT TRAJECTORIES]\n";
+            for (const auto& t : trajectories) {
+                traj_oss << "- Goal: " << t.goal << "\n  Trajectory: " << t.trajectory_json << "\n\n";
+            }
+            past_experience = traj_oss.str();
+            
+            StructuredLogger::instance().log(LogLevel::Info, "planner", "TRAJECTORY_INJECTION", 
+                "Injected " + std::to_string(trajectories.size()) + " trajectories as prior experience", 
+                {{"goal", goal}, {"trajectory_count", trajectories.size()}});
         }
-        past_experience = traj_oss.str();
 
-        // 2. Emerged Strategies (Phase 8.2)
+        // 2. Emerged Strategies (The Learned proof)
+        // Thesis Differentiator: Prioritize strategies promoted by 80%/3-run threshold
         auto strats = memory_->getAllStrategies();
-        std::ostringstream strat_oss;
-        for (const auto& s : strats) {
-            strat_oss << "- Strategy: " << s.description << "\n  Pattern: " << s.step_pattern_json << "\n\n";
+        if (!strats.empty()) {
+            std::ostringstream strat_oss;
+            strat_oss << "[LEARNED STRATEGIES - HIGH SUCCESS PATTERNS]\n";
+            for (const auto& s : strats) {
+                strat_oss << "- Strategy ID: " << s.strategy_id << "\n";
+                strat_oss << "  Description: " << s.description << "\n";
+                strat_oss << "  Pattern: " << s.step_pattern_json << "\n";
+                strat_oss << "  Historical Success Rate: " << (s.success_rate * 100.0f) << "%\n\n";
+            }
+            strategy_context = strat_oss.str();
+
+            StructuredLogger::instance().log(LogLevel::Info, "planner", "STRATEGY_INJECTION", 
+                "Injected " + std::to_string(strats.size()) + " learned strategies into prompt", 
+                {{"goal", goal}, {"strategy_count", strats.size()}});
         }
-        strategy_context = strat_oss.str();
     }
 
     std::string prompt = prompt_factory_->buildPlanPrompt(goal, strategy_context, past_experience);

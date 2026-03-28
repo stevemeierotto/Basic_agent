@@ -107,6 +107,12 @@ public:
     std::optional<CognateExperimentRecord> loadExperiment(const std::string& experiment_id) const;
     std::vector<CognateExperimentRecord> getAllExperiments() const;
 
+    // Problem State (Cognate V2, Phase 1.1)
+    using ProblemStateRecord = Thoth::MemoryRepository::ProblemStateRecord;
+    bool saveProblemState(const ProblemStateRecord& record);
+    std::optional<ProblemStateRecord> loadProblemState(const std::string& problem_id) const;
+    std::optional<ProblemStateRecord> getLatestProblemState(const std::string& goal_id) const;
+
     // Trajectory Index (Phase 7.7)
     void loadTrajectoryIndex();
     void updateTrajectoryIndex(const CognateTrajectoryRecord& record);
@@ -117,6 +123,7 @@ public:
     using EpisodeStepRecord = Thoth::MemoryRepository::EpisodeStepRecord;
     void storeEpisodeStep(const EpisodeStepRecord& step);
     std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) const;
+    std::vector<EpisodeStepRecord> getAllEpisodeSteps() const;
 
     std::shared_ptr<Thoth::MemoryRepository> getRepo() const;
 

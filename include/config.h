@@ -47,6 +47,11 @@ public:
     float keyword_weight = 0.3f;
     float graph_weight = 0.3f;
 
+    // Cognate V2 — Scientific Reasoning Settings
+    float convergence_epsilon = 0.05f;
+    int stability_window = 2;
+    int max_scientific_iterations = 5;
+
     // Load/Save from JSON or ENV
     bool loadFromJson(const std::string& path);
     bool saveToJson(const std::string& path) const;

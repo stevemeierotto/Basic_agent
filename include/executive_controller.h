@@ -14,6 +14,7 @@
 #include <future>
 #include "plan.h"
 #include "trajectory.h"
+#include "problem_state.h"
 #include "iplanner.h"
 #include "strategy_engine.h"
 #include "iexecution_mode.h"
@@ -109,6 +110,10 @@ public:
     void update_trajectory_embedding();
     void clear_embeddings();
 
+    // Problem State (Cognate V2)
+    void update_problem_state(const ProblemState& state);
+    ProblemState get_problem_state() const;
+
     // Getters for GRAG integration
     std::vector<float> get_goal_embedding() const { 
         std::lock_guard<std::mutex> lock(mutex_); 
@@ -137,6 +142,7 @@ protected:
     void record_trajectory_step(const PlanStep& step, const Thoth::StepResult& result);
     float calculate_trajectory_score();
     void persist_current_plan_unlocked();
+    void persist_problem_state_unlocked();
 
     // The main loop — runs until COMPLETED, ABORTED, or FAILED
     void run_loop();
@@ -161,6 +167,7 @@ protected:
 
     Plan current_plan_;
     Trajectory current_trajectory_;
+    ProblemState current_problem_state_;
     
     // Phase 5.6: Track active chunks per step for causal linking
     struct ActiveStepSet {

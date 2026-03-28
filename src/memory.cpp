@@ -256,6 +256,12 @@ std::vector<Memory::EpisodeStepRecord> Memory::getRecentEpisodeSteps(const std::
     return repo->getRecentEpisodeSteps(goal_id, n);
 }
 
+std::vector<Memory::EpisodeStepRecord> Memory::getAllEpisodeSteps() const {
+    std::shared_lock lock(mtx);
+    if (!repo) return {};
+    return repo->getAllEpisodeSteps();
+}
+
 std::shared_ptr<Thoth::MemoryRepository> Memory::getRepo() const {
     return std::shared_ptr<Thoth::MemoryRepository>(repo.get(), [](Thoth::MemoryRepository*){});
 }
@@ -437,4 +443,22 @@ std::vector<Memory::CognateExperimentRecord> Memory::getAllExperiments() const {
     std::shared_lock lock(mtx);
     if (!repo) return {};
     return repo->getAllExperiments();
+}
+
+bool Memory::saveProblemState(const ProblemStateRecord& record) {
+    std::unique_lock lock(mtx);
+    if (!repo) return false;
+    return repo->saveProblemState(record);
+}
+
+std::optional<Memory::ProblemStateRecord> Memory::loadProblemState(const std::string& problem_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return std::nullopt;
+    return repo->loadProblemState(problem_id);
+}
+
+std::optional<Memory::ProblemStateRecord> Memory::getLatestProblemState(const std::string& goal_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return std::nullopt;
+    return repo->getLatestProblemState(goal_id);
 }

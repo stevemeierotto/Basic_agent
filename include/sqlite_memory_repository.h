@@ -90,11 +90,17 @@ public:
     // Episode Steps (Phase 5, Step 5.5)
     bool storeEpisodeStep(const EpisodeStepRecord& step) override;
     std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) override;
+    std::vector<EpisodeStepRecord> getAllEpisodeSteps() override;
 
     // Cognate Experiments
     bool saveExperiment(const CognateExperimentRecord& record) override;
     std::optional<CognateExperimentRecord> loadExperiment(const std::string& experiment_id) override;
     std::vector<CognateExperimentRecord> getAllExperiments() override;
+
+    // Problem State (Cognate V2, Phase 1.1)
+    bool saveProblemState(const ProblemStateRecord& record) override;
+    std::optional<ProblemStateRecord> loadProblemState(const std::string& problem_id) override;
+    std::optional<ProblemStateRecord> getLatestProblemState(const std::string& goal_id) override;
 
 private:
     struct DBHandle;

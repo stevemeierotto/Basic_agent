@@ -222,6 +222,7 @@ public:
 
     virtual bool storeEpisodeStep(const EpisodeStepRecord& step) = 0;
     virtual std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) = 0;
+    virtual std::vector<EpisodeStepRecord> getAllEpisodeSteps() = 0;
 
     // Cognate Experiments (Scientific Mode Integration)
     struct CognateExperimentRecord {
@@ -237,6 +238,21 @@ public:
     virtual bool saveExperiment(const CognateExperimentRecord& record) = 0;
     virtual std::optional<CognateExperimentRecord> loadExperiment(const std::string& experiment_id) = 0;
     virtual std::vector<CognateExperimentRecord> getAllExperiments() = 0;
+
+    // Problem State (Cognate V2, Phase 1.1)
+    struct ProblemStateRecord {
+        std::string problem_id;
+        std::string goal_id;
+        std::string state_json; // Serialized ProblemState struct
+        int iteration_count;
+        float confidence_score;
+        int64_t created_at;
+        int64_t updated_at;
+    };
+
+    virtual bool saveProblemState(const ProblemStateRecord& record) = 0;
+    virtual std::optional<ProblemStateRecord> loadProblemState(const std::string& problem_id) = 0;
+    virtual std::optional<ProblemStateRecord> getLatestProblemState(const std::string& goal_id) = 0;
 };
 
 } // namespace Thoth

@@ -5,27 +5,22 @@
 #include <vector>
 #include <chrono>
 #include <cstring>
+#include <algorithm>
 
 namespace Thoth {
 
 static std::string safe_col_text(sqlite3_stmt* stmt, int col) {
-    const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, col));
-    return text ? std::string(text) : std::string("");
+    const unsigned char* text = sqlite3_column_text(stmt, col);
+    return text ? std::string(reinterpret_cast<const char*>(text)) : "";
 }
 
 struct SQLiteMemoryRepository::DBHandle {
     sqlite3* handle = nullptr;
-
-    ~DBHandle() {
-        if (handle) {
-            sqlite3_close(handle);
-        }
-    }
 };
 
 SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
-    : db_(std::make_unique<DBHandle>()) {
-    
+    : db_(std::make_unique<DBHandle>()) 
+{
     int rc = sqlite3_open(dbPath.c_str(), &db_->handle);
     if (rc != SQLITE_OK) {
         std::cerr << "[SQLiteMemoryRepository] Failed to open database: " << sqlite3_errmsg(db_->handle) << "\n";
@@ -33,28 +28,20 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
     }
 
     try {
-        sqlite3_exec(db_->handle, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
-        sqlite3_exec(db_->handle, "PRAGMA foreign_keys = ON;", nullptr, nullptr, nullptr);
-
         const char* schema = 
             "CREATE TABLE IF NOT EXISTS sessions ("
             "  session_id TEXT PRIMARY KEY,"
-            "  title TEXT,"
-            "  active_goal TEXT,"
             "  created_at_ms INTEGER NOT NULL,"
-            "  updated_at_ms INTEGER NOT NULL,"
-            "  summary TEXT,"
-            "  metadata_json TEXT"
+            "  updated_at_ms INTEGER NOT NULL"
             ");"
             "CREATE TABLE IF NOT EXISTS messages ("
-            "  message_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
             "  session_id TEXT NOT NULL,"
             "  role TEXT NOT NULL,"
             "  content TEXT NOT NULL,"
             "  timestamp_ms INTEGER NOT NULL,"
             "  FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE"
             ");"
-            "CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages (session_id, timestamp_ms);"
             "CREATE TABLE IF NOT EXISTS summaries ("
             "  session_id TEXT NOT NULL,"
             "  summary_type TEXT NOT NULL,"
@@ -72,7 +59,7 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             "  type TEXT NOT NULL,"
             "  embedding BLOB NOT NULL,"
             "  embedding_version INTEGER NOT NULL,"
-            "  PRIMARY KEY (plan_id, type)"
+            "  PRIMARY KEY (plan_id, type, embedding_version)"
             ");"
             "CREATE TABLE IF NOT EXISTS past_plans ("
             "  plan_id TEXT PRIMARY KEY,"
@@ -86,17 +73,17 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             ");"
             "CREATE TABLE IF NOT EXISTS graph_nodes ("
             "  id TEXT PRIMARY KEY,"
-            "  file_path TEXT,"
+            "  file_path TEXT NOT NULL,"
             "  symbol TEXT,"
-            "  type TEXT"
+            "  type TEXT NOT NULL"
             ");"
             "CREATE TABLE IF NOT EXISTS graph_edges ("
-            "  from_id TEXT,"
-            "  to_id TEXT,"
-            "  weight REAL DEFAULT 0.1,"
+            "  from_id TEXT NOT NULL,"
+            "  to_id TEXT NOT NULL,"
+            "  weight REAL NOT NULL,"
             "  success_count INTEGER DEFAULT 0,"
             "  failure_count INTEGER DEFAULT 0,"
-            "  last_used_ms INTEGER,"
+            "  last_used_ms INTEGER NOT NULL,"
             "  PRIMARY KEY (from_id, to_id),"
             "  FOREIGN KEY (from_id) REFERENCES graph_nodes(id) ON DELETE CASCADE,"
             "  FOREIGN KEY (to_id) REFERENCES graph_nodes(id) ON DELETE CASCADE"
@@ -112,7 +99,7 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             ");"
             "CREATE TABLE IF NOT EXISTS active_plans ("
             "  plan_id TEXT PRIMARY KEY,"
-            "  session_id TEXT,"
+            "  session_id TEXT NOT NULL,"
             "  goal TEXT NOT NULL,"
             "  steps_json TEXT NOT NULL,"
             "  current_index INTEGER NOT NULL,"
@@ -122,30 +109,13 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             ");"
             "CREATE TABLE IF NOT EXISTS plans ("
             "  plan_id TEXT PRIMARY KEY,"
-            "  goal TEXT,"
-            "  plan_json TEXT,"
-            "  status INTEGER,"
-            "  success_score REAL,"
+            "  goal TEXT NOT NULL,"
+            "  plan_json TEXT NOT NULL,"
+            "  status INTEGER NOT NULL,"
+            "  success_score REAL NOT NULL,"
             "  embedding BLOB,"
-            "  created_at INTEGER,"
-            "  updated_at INTEGER"
-            ");"
-            "CREATE TABLE IF NOT EXISTS trajectories ("
-            "  trajectory_id TEXT PRIMARY KEY,"
-            "  goal TEXT,"
-            "  trajectory_json TEXT,"
-            "  success_score REAL,"
-            "  embedding BLOB,"
-            "  created_at INTEGER,"
-            "  usage_count INTEGER DEFAULT 0,"
-            "  tier INTEGER DEFAULT 0"
-            ");"
-            "CREATE TABLE IF NOT EXISTS strategies ("
-            "  strategy_id TEXT PRIMARY KEY,"
-            "  description TEXT,"
-            "  step_pattern_json TEXT,"
-            "  success_rate REAL,"
-            "  created_at INTEGER"
+            "  created_at INTEGER NOT NULL,"
+            "  updated_at INTEGER NOT NULL"
             ");"
             "CREATE TABLE IF NOT EXISTS archived_turns ("
             "  archive_id TEXT PRIMARY KEY,"
@@ -175,6 +145,23 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             "  embedding_blob BLOB,"
             "  timestamp_ms INTEGER"
             ");"
+            "CREATE TABLE IF NOT EXISTS trajectories ("
+            "  trajectory_id TEXT PRIMARY KEY,"
+            "  goal TEXT NOT NULL,"
+            "  trajectory_json TEXT NOT NULL,"
+            "  success_score REAL NOT NULL,"
+            "  embedding BLOB,"
+            "  created_at INTEGER NOT NULL,"
+            "  usage_count INTEGER DEFAULT 0,"
+            "  tier INTEGER DEFAULT 0"
+            ");"
+            "CREATE TABLE IF NOT EXISTS strategies ("
+            "  strategy_id TEXT PRIMARY KEY,"
+            "  description TEXT NOT NULL,"
+            "  step_pattern_json TEXT NOT NULL,"
+            "  success_rate REAL NOT NULL,"
+            "  created_at INTEGER NOT NULL"
+            ");"
             "CREATE TABLE IF NOT EXISTS cognate_experiments ("
             "  experiment_id TEXT PRIMARY KEY,"
             "  name TEXT NOT NULL,"
@@ -183,6 +170,15 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             "  results_json TEXT,"
             "  created_at INTEGER,"
             "  status TEXT"
+            ");"
+            "CREATE TABLE IF NOT EXISTS problem_states ("
+            "  problem_id TEXT PRIMARY KEY,"
+            "  goal_id TEXT NOT NULL,"
+            "  state_json TEXT NOT NULL,"
+            "  iteration_count INTEGER NOT NULL,"
+            "  confidence_score REAL NOT NULL,"
+            "  created_at INTEGER NOT NULL,"
+            "  updated_at INTEGER NOT NULL"
             ");";
 
         char* errMsg = nullptr;
@@ -192,24 +188,7 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             sqlite3_free(errMsg);
         }
 
-        // Migration: Add session_id column to active_plans if it doesn't exist
-        bool needsSessionId = true;
-        sqlite3_stmt* checkStmt;
-        if (sqlite3_prepare_v2(db_->handle, "PRAGMA table_info(active_plans);", -1, &checkStmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(checkStmt) == SQLITE_ROW) {
-                std::string colName = safe_col_text(checkStmt, 1);
-                if (colName == "session_id") {
-                    needsSessionId = false;
-                    break;
-                }
-            }
-            sqlite3_finalize(checkStmt);
-        }
-        if (needsSessionId) {
-            sqlite3_exec(db_->handle, "ALTER TABLE active_plans ADD COLUMN session_id TEXT;", nullptr, nullptr, nullptr);
-        }
-
-        // Sessions table migrations
+        // Session table migrations
         auto add_col = [&](const std::string& table, const std::string& col, const std::string& type) {
             bool exists = false;
             sqlite3_stmt* p;
@@ -231,7 +210,19 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
         add_col("sessions", "summary", "TEXT");
         add_col("sessions", "metadata_json", "TEXT");
 
-        setMeta("embedding_schema_version", "1");
+        // Trajectory table migrations
+        add_col("trajectories", "trajectory_json", "TEXT");
+        add_col("trajectories", "success_score", "REAL");
+        add_col("trajectories", "created_at", "INTEGER");
+        add_col("trajectories", "usage_count", "INTEGER");
+        add_col("trajectories", "tier", "INTEGER");
+
+        // Strategy table migrations
+        add_col("strategies", "description", "TEXT");
+        add_col("strategies", "step_pattern_json", "TEXT");
+        add_col("strategies", "success_rate", "REAL");
+        add_col("strategies", "created_at", "INTEGER");
+
     } catch (const std::exception& e) {
         std::cerr << "[SQLiteMemoryRepository] Initialization exception: " << e.what() << "\n";
     }
@@ -507,10 +498,12 @@ std::vector<MemoryRepository::PastPlanRecord> SQLiteMemoryRepository::getAllPast
             p.failure_count = sqlite3_column_int(stmt, 5);
             
             const void* blob = sqlite3_column_blob(stmt, 6);
-            int bytes = sqlite3_column_bytes(stmt, 6);
-            int count = bytes / sizeof(float);
-            p.goal_embedding.resize(count);
-            std::memcpy(p.goal_embedding.data(), blob, bytes);
+            if (blob) {
+                int bytes = sqlite3_column_bytes(stmt, 6);
+                int count = bytes / sizeof(float);
+                p.goal_embedding.resize(count);
+                std::memcpy(p.goal_embedding.data(), blob, bytes);
+            }
             
             plans.push_back(std::move(p));
         }
@@ -621,6 +614,7 @@ std::vector<MemoryRepository::Edge> SQLiteMemoryRepository::getAllEdges() {
             e.last_used_ms = sqlite3_column_int64(stmt, 5);
             edges.push_back(std::move(e));
         }
+
         sqlite3_finalize(stmt);
     } catch (...) {}
     return edges;
@@ -642,7 +636,6 @@ bool SQLiteMemoryRepository::deleteEdge(const std::string& from_id, const std::s
 MemoryRepository::GraphStatistics SQLiteMemoryRepository::getGraphStatistics() {
     GraphStatistics stats;
     try {
-        // Count nodes
         const char* sql_nodes = "SELECT COUNT(*) FROM graph_nodes;";
         sqlite3_stmt* stmt_nodes;
         if (sqlite3_prepare_v2(db_->handle, sql_nodes, -1, &stmt_nodes, nullptr) == SQLITE_OK) {
@@ -652,7 +645,6 @@ MemoryRepository::GraphStatistics SQLiteMemoryRepository::getGraphStatistics() {
             sqlite3_finalize(stmt_nodes);
         }
 
-        // Count edges and compute statistics
         const char* sql_edges = "SELECT COUNT(*), AVG(weight), MIN(weight), MAX(weight), SUM(success_count), SUM(failure_count) FROM graph_edges;";
         sqlite3_stmt* stmt_edges;
         if (sqlite3_prepare_v2(db_->handle, sql_edges, -1, &stmt_edges, nullptr) == SQLITE_OK) {
@@ -1294,6 +1286,38 @@ std::vector<MemoryRepository::EpisodeStepRecord> SQLiteMemoryRepository::getRece
     return results;
 }
 
+std::vector<MemoryRepository::EpisodeStepRecord> SQLiteMemoryRepository::getAllEpisodeSteps() {
+    std::vector<EpisodeStepRecord> results;
+    try {
+        const char* sql = "SELECT episode_id, goal_id, step_index, state_summary, action_taken, result_status, embedding_blob, timestamp_ms "
+                          "FROM episode_steps ORDER BY timestamp_ms DESC;";
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return results;
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            EpisodeStepRecord rec;
+            rec.episode_id = safe_col_text(stmt, 0);
+            rec.goal_id = safe_col_text(stmt, 1);
+            rec.step_index = sqlite3_column_int(stmt, 2);
+            rec.state_summary = safe_col_text(stmt, 3);
+            rec.action_taken = safe_col_text(stmt, 4);
+            rec.result_status = safe_col_text(stmt, 5);
+            
+            const void* blob = sqlite3_column_blob(stmt, 6);
+            if (blob) {
+                int bytes = sqlite3_column_bytes(stmt, 6);
+                int count = bytes / sizeof(float);
+                rec.embedding.resize(count);
+                std::memcpy(rec.embedding.data(), blob, bytes);
+            }
+            rec.timestamp_ms = sqlite3_column_int64(stmt, 7);
+            results.push_back(std::move(rec));
+        }
+        sqlite3_finalize(stmt);
+    } catch (...) {}
+    return results;
+}
+
 bool SQLiteMemoryRepository::saveExperiment(const CognateExperimentRecord& record) {
     try {
         const char* sql = "INSERT OR REPLACE INTO cognate_experiments (experiment_id, name, hypothesis, configuration_json, results_json, created_at, status) "
@@ -1363,6 +1387,77 @@ std::vector<MemoryRepository::CognateExperimentRecord> SQLiteMemoryRepository::g
         sqlite3_finalize(stmt);
     } catch (...) {}
     return results;
+}
+
+bool SQLiteMemoryRepository::saveProblemState(const ProblemStateRecord& record) {
+    try {
+        const char* sql = "INSERT OR REPLACE INTO problem_states (problem_id, goal_id, state_json, iteration_count, confidence_score, created_at, updated_at) "
+                          "VALUES (?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        
+        sqlite3_bind_text(stmt, 1, record.problem_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, record.goal_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, record.state_json.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 4, record.iteration_count);
+        sqlite3_bind_double(stmt, 5, static_cast<double>(record.confidence_score));
+        sqlite3_bind_int64(stmt, 6, record.created_at);
+        sqlite3_bind_int64(stmt, 7, record.updated_at);
+
+        bool success = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return success;
+    } catch (...) { return false; }
+}
+
+std::optional<MemoryRepository::ProblemStateRecord> SQLiteMemoryRepository::loadProblemState(const std::string& problem_id) {
+    try {
+        const char* sql = "SELECT problem_id, goal_id, state_json, iteration_count, confidence_score, created_at, updated_at FROM problem_states WHERE problem_id = ?;";
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+        
+        sqlite3_bind_text(stmt, 1, problem_id.c_str(), -1, SQLITE_STATIC);
+        
+        std::optional<ProblemStateRecord> result;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            ProblemStateRecord rec;
+            rec.problem_id = safe_col_text(stmt, 0);
+            rec.goal_id = safe_col_text(stmt, 1);
+            rec.state_json = safe_col_text(stmt, 2);
+            rec.iteration_count = sqlite3_column_int(stmt, 3);
+            rec.confidence_score = static_cast<float>(sqlite3_column_double(stmt, 4));
+            rec.created_at = sqlite3_column_int64(stmt, 5);
+            rec.updated_at = sqlite3_column_int64(stmt, 7);
+            result = rec;
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    } catch (...) { return std::nullopt; }
+}
+
+std::optional<MemoryRepository::ProblemStateRecord> SQLiteMemoryRepository::getLatestProblemState(const std::string& goal_id) {
+    try {
+        const char* sql = "SELECT problem_id, goal_id, state_json, iteration_count, confidence_score, created_at, updated_at FROM problem_states WHERE goal_id = ? ORDER BY updated_at DESC LIMIT 1;";
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+        
+        sqlite3_bind_text(stmt, 1, goal_id.c_str(), -1, SQLITE_STATIC);
+        
+        std::optional<ProblemStateRecord> result;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            ProblemStateRecord rec;
+            rec.problem_id = safe_col_text(stmt, 0);
+            rec.goal_id = safe_col_text(stmt, 1);
+            rec.state_json = safe_col_text(stmt, 2);
+            rec.iteration_count = sqlite3_column_int(stmt, 3);
+            rec.confidence_score = static_cast<float>(sqlite3_column_double(stmt, 4));
+            rec.created_at = sqlite3_column_int64(stmt, 5);
+            rec.updated_at = sqlite3_column_int64(stmt, 6);
+            result = rec;
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    } catch (...) { return std::nullopt; }
 }
 
 } // namespace Thoth

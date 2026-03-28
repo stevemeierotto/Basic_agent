@@ -9,6 +9,7 @@
 #pragma once
 
 #include "iexecution_mode.h"
+#include "problem_state.h"
 #include <vector>
 #include <string>
 
@@ -29,14 +30,16 @@ public:
     std::string name() const override { return "Scientific"; }
 
 private:
-    struct Hypothesis {
-        std::string description;
-        float confidence = 0.0f;
-        std::vector<std::string> evidence;
-    };
+    void generate_hypotheses(ExecutiveController& controller);
+    void extract_constraints(ExecutiveController& controller);
+    void evaluate_feasibility(ExecutiveController& controller);
+    void finalize_selection(ExecutiveController& controller);
+    bool is_converged(ExecutiveController& controller, const ProblemState& state) const;
+    float calculate_jaccard(const std::vector<std::string>& a, const std::vector<std::string>& b) const;
 
-    std::vector<Hypothesis> hypotheses_;
-    int reasoning_stage_ = 0; // 0: Hypothesis, 1: Constraints, 2: Evaluation...
+    int reasoning_stage_ = 0; // 0: Hypothesis, 1: Constraints, 2: Evaluation, 3: Selection
+    float current_confidence_ = 0.0f;
+    std::vector<std::string> last_hypothesis_set_;
 };
 
 } // namespace Thoth
