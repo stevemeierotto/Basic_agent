@@ -140,7 +140,7 @@ protected:
     void store_plan_history(float success_score);
     void reinforce_plan_graph();
     void record_trajectory_step(const PlanStep& step, const Thoth::StepResult& result);
-    float calculate_trajectory_score();
+    float calculate_trajectory_score(bool plan_completed_successfully);
     void persist_current_plan_unlocked();
     void persist_problem_state_unlocked();
 

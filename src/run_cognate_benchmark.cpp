@@ -133,7 +133,7 @@ int main() {
     // PASS 1: COLD START
     std::cout << "--- PASS 1: COLD START (No learned strategies) ---\n";
     for (const auto& task : tasks) {
-        std::cout << "Task: " << task.goal << "\n";
+        std::cout << "Task: " << task.goal << std::endl;
         runner.run_task(task.goal, "Scientific");
         
         // Thesis: Simulate 3 successful distinct trajectories for extraction proof
@@ -154,20 +154,20 @@ int main() {
             
             bool ok = runner.get_memory()->saveTrajectory(rec);
             if (!ok) {
-                std::cerr << "  [ERROR] Failed to save trajectory: " << rec.trajectory_id << "\n";
+                std::cerr << "  [ERROR] Failed to save trajectory: " << rec.trajectory_id << std::endl;
             }
         }
     }
-    std::cout << "Pass 1 Complete. Strategies: " << runner.get_strategy_count() << "\n\n";
+    std::cout << "Pass 1 Complete. Strategies: " << runner.get_strategy_count() << std::endl;
 
     // TRIGGER LEARNING
     runner.perform_learning();
-    std::cout << "Learning Complete. Strategies Promoted: " << runner.get_strategy_count() << "\n\n";
+    std::cout << "Learning Complete. Strategies Promoted: " << runner.get_strategy_count() << std::endl;
 
     // PASS 2: WARM START (Experience-Guided)
     std::cout << "--- PASS 2: WARM START (Experience-Guided) ---\n";
     for (const auto& task : tasks) {
-        std::cout << "Task: " << task.goal << "\n";
+        std::cout << "Task: " << task.goal << std::endl;
         auto res = runner.run_task(task.goal, "Scientific");
         // In this simulation, we check if strategies exist
     }
@@ -176,7 +176,7 @@ int main() {
     std::cout << " BENCHMARK SUMMARY - THESIS DATA POINTS             \n";
     std::cout << "====================================================\n";
     std::cout << "Strategy Promotion Threshold: 80% Success / 3 Runs\n";
-    std::cout << "Total Strategies in Library: " << runner.get_strategy_count() << "\n";
+    std::cout << "Total Strategies in Library: " << runner.get_strategy_count() << std::endl;
     std::cout << "Learning Effect: Patterns extracted and reused.\n";
     std::cout << "====================================================\n";
 

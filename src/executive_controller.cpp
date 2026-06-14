@@ -385,8 +385,8 @@ void ExecutiveController::decide_transition() {
             if (s.status != StepStatus::SUCCESS) all_successful = false;
         }
 
-        if (!any_unfinished && !current_plan_.steps.empty() && active_step_futures_.empty()) {
-            float score = calculate_trajectory_score();
+        if (!any_unfinished && active_step_futures_.empty()) {
+            float score = calculate_trajectory_score(all_successful);
             
             // Step 6.3: Reflection Loop
             if (score < 0.6f && reflection_count_ < MAX_REFLECTIONS) {
@@ -424,14 +424,14 @@ void ExecutiveController::decide_transition() {
                 return;
             }
 
-            transition_to_unlocked(all_successful ? ControllerState::COMPLETED : ControllerState::FAILED);
+            transition_to_unlocked((all_successful && !current_plan_.steps.empty()) ? ControllerState::COMPLETED : ControllerState::FAILED);
             current_plan_.updated_at_ms = nowMs();
             
             store_plan_history(score);
             if (memory_) memory_->deleteActivePlan(current_plan_.plan_id);
             
             lock.unlock(); 
-            emit_event(all_successful ? EventType::PLAN_COMPLETED : EventType::PLAN_FAILED);
+            emit_event((all_successful && !current_plan_.steps.empty()) ? EventType::PLAN_COMPLETED : EventType::PLAN_FAILED);
             return;
         }
 
@@ -781,22 +781,21 @@ void ExecutiveController::record_trajectory_step(const PlanStep& step, const Tho
     current_trajectory_.steps.push_back(recorded);
 }
 
-float ExecutiveController::calculate_trajectory_score() {
-    float score = 0.0f;
-    if (state_ == ControllerState::COMPLETED) {
-        score = 1.0f;
-    } else if (state_ == ControllerState::FAILED || state_ == ControllerState::ABORTED) {
-        score = 0.0f;
-    }
+float ExecutiveController::calculate_trajectory_score(bool plan_completed_successfully) {
+    if (current_plan_.steps.empty()) return 0.0f;
+    float score = plan_completed_successfully ? 1.0f : 0.0f;
 
     int failed_steps = 0;
     for (const auto& s : current_trajectory_.steps) {
         if (!s.error.empty()) failed_steps++;
     }
     score -= (failed_steps * 0.1f);
-    if (state_ == ControllerState::COMPLETED && revisions_count_ > 0) {
-        score += 0.2f;
+    
+    // Bonus for successfully completing even with revisions
+    if (plan_completed_successfully && revisions_count_ > 0) {
+        score += 0.1f; 
     }
+    
     return std::max(0.0f, std::min(1.0f, score));
 }
 

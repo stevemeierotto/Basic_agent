@@ -53,15 +53,15 @@ int main(int argc, char** argv) {
             // Hard reject prefix check
             std::string absPath = fs::absolute(f).lexically_normal().string();
             if (absPath.find("/home/steve/Thoth/agent_workspace/") == std::string::npos) {
-                std::cerr << "[SECURITY ALERT] REJECTED path outside sandbox: " << absPath << "\n";
+                std::cerr << "[SECURITY ALERT] REJECTED path outside sandbox: " << absPath << std::endl;
                 continue;
             }
             
             std::cout << "[Benchmark] Indexing: " << f << "...\n";
             indexManager.indexFile(f);
-            std::cout << "[Benchmark] Total chunks so far: " << indexManager.getChunks().size() << "\n";
+            std::cout << "[Benchmark] Total chunks so far: " << indexManager.getChunks().size() << std::endl;
         } else {
-            std::cerr << "[WARN] Benchmark corpus file missing: " << f << "\n";
+            std::cerr << "[WARN] Benchmark corpus file missing: " << f << std::endl;
         }
     }
 
