@@ -19,6 +19,7 @@
 #include "config.h"
 #include "strategy.h"
 #include "memory_pruner.h"
+#include "plan_reuse_config.h"
 
 namespace Thoth { class SQLiteMemoryRepository; }
 
@@ -85,7 +86,9 @@ public:
     using CognatePlanRecord = Thoth::MemoryRepository::CognatePlanRecord;
     bool saveCognatePlan(const CognatePlanRecord& record);
     std::optional<CognatePlanRecord> loadCognatePlan(const std::string& plan_id) const;
-    std::vector<CognatePlanRecord> retrieveSimilarPlans(const std::vector<float>& target_embedding, int limit) const;
+    std::vector<PastPlanRecord> retrieveSimilarPlans(
+        const std::vector<float>& target_embedding,
+        int limit = Thoth::PlanReuse::kDefaultRetrieveLimit) const;
 
     // Cognate Trajectory Persistence (Phase 7.2)
     using CognateTrajectoryRecord = Thoth::MemoryRepository::CognateTrajectoryRecord;

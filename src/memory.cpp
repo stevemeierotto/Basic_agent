@@ -1,5 +1,6 @@
 #include "../include/memory.h"
 #include "../include/grag_scorer.h"
+#include "../include/plan_reuse_config.h"
 #include "../include/sqlite_memory_repository.h"
 #include <iostream>
 #include <algorithm>
@@ -381,9 +382,36 @@ std::optional<Memory::CognatePlanRecord> Memory::loadCognatePlan(const std::stri
     return repo->loadCognatePlan(plan_id);
 }
 
-std::vector<Memory::CognatePlanRecord> Memory::retrieveSimilarPlans(const std::vector<float>& target_embedding, int limit) const {
-    // Placeholder
-    return {};
+std::vector<Memory::PastPlanRecord> Memory::retrieveSimilarPlans(
+    const std::vector<float>& target_embedding,
+    int limit) const {
+    std::shared_lock lock(mtx);
+    if (!repo || target_embedding.empty() || limit <= 0) return {};
+
+    std::vector<std::pair<PastPlanRecord, float>> ranked;
+
+    for (const auto& plan : repo->getAllPastPlans(2)) {
+        if (plan.goal_embedding.empty()) continue;
+        if (plan.success_score < Thoth::PlanReuse::kMinSuccessScore) continue;
+
+        float score = GragScorer::cosine_similarity(target_embedding, plan.goal_embedding);
+        if (plan.success_score >= Thoth::PlanReuse::kSuccessBoostThreshold) {
+            score += Thoth::PlanReuse::kSuccessBoost;
+        }
+        ranked.push_back({plan, score});
+    }
+
+    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+        return a.second > b.second;
+    });
+
+    std::vector<PastPlanRecord> results;
+    const int count = std::min(static_cast<int>(ranked.size()), limit);
+    results.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        results.push_back(std::move(ranked[static_cast<std::size_t>(i)].first));
+    }
+    return results;
 }
 
 bool Memory::saveTrajectory(const CognateTrajectoryRecord& record) {

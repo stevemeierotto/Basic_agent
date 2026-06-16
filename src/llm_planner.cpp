@@ -9,6 +9,7 @@
 #include "../include/llm_planner.h"
 #include "../include/logger.h"
 #include "../include/plan_parser.h"
+#include "../include/plan_reuse_config.h"
 #include <chrono>
 #include <sstream>
 #include <iomanip>
@@ -48,6 +49,8 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
     // Phase 3.2: Gather context for the prompt (Cognate V2)
     std::string strategy_context;
     std::string past_experience;
+    std::size_t trajectory_count = 0;
+    std::size_t strategy_count = 0;
     
     if (rag_ && rag_->engine && memory_) {
         auto goal_embedding = rag_->engine->embed(goal);
@@ -55,6 +58,7 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
         // 1. Past Trajectories (Experience-Guided Planning)
         auto trajectories = memory_->retrieveSimilarTrajectories(goal_embedding, 3);
         if (!trajectories.empty()) {
+            trajectory_count = trajectories.size();
             std::ostringstream traj_oss;
             traj_oss << "[PAST EXPERIENCE - RELEVANT TRAJECTORIES]\n";
             for (const auto& t : trajectories) {
@@ -71,6 +75,7 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
         // Thesis Differentiator: Prioritize strategies promoted by 80%/3-run threshold
         auto strats = memory_->getAllStrategies();
         if (!strats.empty()) {
+            strategy_count = strats.size();
             std::ostringstream strat_oss;
             strat_oss << "[LEARNED STRATEGIES - HIGH SUCCESS PATTERNS]\n";
             for (const auto& s : strats) {
@@ -86,6 +91,26 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
                 {{"goal", goal}, {"strategy_count", strats.size()}});
         }
     }
+
+    const bool plan_reuse_in_goal = goal.find("[RELEVANT PAST APPROACHES") != std::string::npos;
+
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "planner",
+        "PLANNER_CONTEXT_ASSEMBLY",
+        "Assembled planner prompt context from memory subsystems",
+        {
+            {"goal", goal},
+            {"trajectory_injection", trajectory_count > 0},
+            {"trajectory_count", trajectory_count},
+            {"trajectory_min_episode_steps", Thoth::TrajectoryReuse::kMinEpisodeStepsForEmbedding},
+            {"strategy_injection", strategy_count > 0},
+            {"strategy_count", strategy_count},
+            {"plan_reuse_in_goal", plan_reuse_in_goal},
+            {"plan_reuse_marker", "[RELEVANT PAST APPROACHES"},
+            {"past_plans_table", plan_reuse_in_goal ? "past_plans (injected by ExecutiveController)" : "not injected"},
+            {"cognate_plans_table", "cognate_plans (active plan snapshots via save_plan)"}
+        });
 
     std::string prompt = prompt_factory_->buildPlanPrompt(goal, strategy_context, past_experience);
     std::string llm_response = llm_->query(prompt);
@@ -196,5 +221,17 @@ void LLMPlanner::save_plan(const Plan& plan) {
     }
 
     memory_->saveCognatePlan(rec);
+
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "planner",
+        "COGNATE_PLAN_PERSISTED",
+        "Saved plan snapshot to cognate_plans table",
+        {
+            {"plan_id", rec.plan_id},
+            {"table", "cognate_plans"},
+            {"step_count", plan.steps.size()},
+            {"has_embedding", !rec.embedding.empty()}
+        });
 }
 

@@ -8,6 +8,7 @@
 
 #include "../include/run_tests_tool.h"
 #include "../include/file_handler.h"
+#include "../include/config.h"
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
@@ -15,6 +16,15 @@
 #include <array>
 #include <regex>
 #include <iostream>
+
+namespace {
+
+constexpr const char* kShellExecDenied =
+    "Shell execution is disabled. Set allow_shell_exec to true in config.json to enable this operation.";
+
+} // namespace
+
+RunTestsTool::RunTestsTool(Config* config) : config_(config) {}
 
 nlohmann::json RunTestsTool::input_schema() const {
     return {
@@ -63,6 +73,14 @@ nlohmann::json RunTestsTool::execute(const nlohmann::json& input) const {
                 {"raw_output", "MOCK: All unit tests passed."}
             }},
             {"error_message", nullptr}
+        };
+    }
+
+    if (!config_ || !config_->allow_shell_exec) {
+        return {
+            {"status", "error"},
+            {"data", nlohmann::json::object()},
+            {"error_message", kShellExecDenied}
         };
     }
 

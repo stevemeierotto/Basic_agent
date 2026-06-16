@@ -1,4 +1,5 @@
 #include "tools.h"
+#include "config.h"
 #include "gmail_read_labels_tool.h"
 #include "summarize_text_tool.h"
 #include "project_analyze_tool.h"
@@ -29,6 +30,11 @@ void ToolRegistry::initialize(std::shared_ptr<Thoth::FactStore> factStore, class
     if (llm) {
         registerTool(std::make_unique<SelfCorrectTool>(*llm));
     }
+}
+
+void ToolRegistry::setConfig(Config* cfg) {
+    registerTool(std::make_unique<RunTestsTool>(cfg));
+    registerTool(std::make_unique<CodeModifyTool>(cfg));
 }
 
 void ToolRegistry::registerTool(std::unique_ptr<ITool> tool) {

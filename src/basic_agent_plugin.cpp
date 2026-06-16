@@ -75,6 +75,7 @@ BasicAgentPlugin::BasicAgentPlugin()
 
     // Set model based on config if available
     llm.setConfig(&config);
+    ToolRegistry::instance().setConfig(&config);
 
     // --- Initialize RAG index ---
     std::string ragIndexPath = fileHandler.getRagPath("rag_index.bin");

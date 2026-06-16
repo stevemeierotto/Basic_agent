@@ -10,6 +10,8 @@
 
 #include "itool.h"
 
+class Config;
+
 /**
  * @class CodeModifyTool
  * @brief Enables the agent to read and modify its own codebase via diffs.
@@ -18,6 +20,8 @@
  */
 class CodeModifyTool : public ITool {
 public:
+    explicit CodeModifyTool(Config* config = nullptr);
+
     std::string name() const override { return "code_modify"; }
     
     std::string description() const override {
@@ -42,6 +46,8 @@ private:
      * Note: This is a simplified diff applicator for v1.0.
      */
     std::string applyDiff(const std::string& original, const std::string& diff, std::string& error) const;
+
+    Config* config_ = nullptr;
 };
 
 #endif // THOTH_CODE_MODIFY_TOOL_H

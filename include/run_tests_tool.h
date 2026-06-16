@@ -10,6 +10,8 @@
 
 #include "itool.h"
 
+class Config;
+
 /**
  * @class RunTestsTool
  * @brief Executes the Thoth unit test suite and returns structured results.
@@ -18,6 +20,8 @@
  */
 class RunTestsTool : public ITool {
 public:
+    explicit RunTestsTool(Config* config = nullptr);
+
     std::string name() const override { return "run_tests"; }
     
     std::string description() const override {
@@ -28,6 +32,8 @@ public:
     bool requires_confirmation() const override;
     nlohmann::json execute(const nlohmann::json& input) const override;
 
+private:
+    Config* config_ = nullptr;
 };
 
 #endif // THOTH_RUN_TESTS_TOOL_H

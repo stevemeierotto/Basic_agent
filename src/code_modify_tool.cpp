@@ -8,6 +8,7 @@
 
 #include "../include/code_modify_tool.h"
 #include "../include/file_handler.h"
+#include "../include/config.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -17,6 +18,15 @@
 #include <array>
 
 namespace fs = std::filesystem;
+
+namespace {
+
+constexpr const char* kShellExecDenied =
+    "Shell execution is disabled. Set allow_shell_exec to true in config.json to enable this operation.";
+
+} // namespace
+
+CodeModifyTool::CodeModifyTool(Config* config) : config_(config) {}
 
 nlohmann::json CodeModifyTool::input_schema() const {
     return {
@@ -106,6 +116,13 @@ nlohmann::json CodeModifyTool::execute(const nlohmann::json& input) const {
             {"error_message", nullptr}
         };
     } else if (operation == "build") {
+        if (!config_ || !config_->allow_shell_exec) {
+            return {
+                {"status", "error"},
+                {"data", nlohmann::json::object()},
+                {"error_message", kShellExecDenied}
+            };
+        }
         // Use the build preset from CMakePresets.json
         std::string build_cmd = "cmake --build " + project_root + "/build/debug --preset build-debug";
         std::string output;

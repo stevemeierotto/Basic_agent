@@ -10,6 +10,8 @@
 #pragma once
 
 #include "itool.h"
+
+class Config;
 #include <memory>
 #include <mutex>
 #include <string>
@@ -36,6 +38,11 @@ public:
      * @brief Initializes tools that require external dependencies (like FactStore and LLM).
      */
     void initialize(std::shared_ptr<Thoth::FactStore> factStore, class LLMInterface* llm);
+
+    /**
+     * @brief Binds runtime config to tools that enforce security flags (e.g. allow_shell_exec).
+     */
+    void setConfig(Config* cfg);
 
     /**
      * @brief Executes a tool by name with the given JSON input.

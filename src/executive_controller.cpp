@@ -10,6 +10,7 @@
 #include "../include/logger.h"
 #include "../include/grag_scorer.h"
 #include "../include/memory.h"
+#include "../include/plan_reuse_config.h"
 #include "../include/grag_metrics.h"
 #include "../include/step_metrics_repository.h"
 #include "../include/file_handler.h"
@@ -91,6 +92,7 @@ std::string ExecutiveController::execute_goal(const std::string& goal) {
 
     emit_event(EventType::STATE_CHANGED);
 
+    nlohmann::json plan_reuse_meta;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         update_goal_embedding_unlocked(goal);
@@ -98,15 +100,11 @@ std::string ExecutiveController::execute_goal(const std::string& goal) {
         // Phase 5: Plan History Reuse logic
         std::string enhanced_goal = goal;
         if (memory_ && rag_) {
-            auto past_plans = memory_->retrieveSimilarPlans(goal_embedding_, 3);
+            auto past_plans = memory_->retrieveSimilarPlans(goal_embedding_, Thoth::PlanReuse::kDefaultRetrieveLimit);
             if (!past_plans.empty()) {
-                std::ostringstream oss;
-                oss << goal << "\n\nRelevant past approaches:\n";
-                for (const auto& p : past_plans) {
-                    oss << "- Goal: " << p.goal << "\n";
-                }
-                enhanced_goal = oss.str();
+                enhanced_goal = goal + build_plan_reuse_context(past_plans);
                 plan_reused_ = true;
+                plan_reuse_meta = log_plan_reuse_injection(past_plans, "execute_goal");
             }
         }
 
@@ -131,6 +129,10 @@ std::string ExecutiveController::execute_goal(const std::string& goal) {
         loop_thread_ = std::make_unique<std::thread>([this]() {
             run_loop();
         });
+    }
+
+    if (!plan_reuse_meta.is_null()) {
+        emit_event(EventType::PLAN_REUSE_INJECTION, "", plan_reuse_meta);
     }
     
     emit_event(EventType::PLAN_CREATED);
@@ -389,18 +391,34 @@ void ExecutiveController::decide_transition() {
             float score = calculate_trajectory_score(all_successful);
             
             // Step 6.3: Reflection Loop
-            if (score < 0.6f && reflection_count_ < MAX_REFLECTIONS) {
+            if (score < Reflection::kScoreThreshold && reflection_count_ < MAX_REFLECTIONS) {
                 std::cout << "[DEBUG] Low success score (" << score << "), triggering reflection cycle " << (reflection_count_ + 1) << "\n";
                 reflection_count_++;
+
+                auto reflection_meta = log_reflection_replan(score, reflection_count_);
                 
                 store_plan_history(score);
                 transition_to_unlocked(ControllerState::PLANNING);
                 
                 // Re-run planning with context
                 std::string reflection_goal = current_plan_.goal + " (Reflection: previous attempt had low success score " + std::to_string(score) + ")";
+                nlohmann::json plan_reuse_meta;
+
+                if (memory_ && rag_) {
+                    auto past_plans = memory_->retrieveSimilarPlans(goal_embedding_, Thoth::PlanReuse::kDefaultRetrieveLimit);
+                    if (!past_plans.empty()) {
+                        reflection_goal += build_plan_reuse_context(past_plans);
+                        plan_reused_ = true;
+                        plan_reuse_meta = log_plan_reuse_injection(past_plans, "reflection_replan");
+                    }
+                }
                 
                 // We must unlock to call planner
                 lock.unlock();
+                emit_event(EventType::REFLECTION_REPLAN, "", reflection_meta);
+                if (!plan_reuse_meta.is_null()) {
+                    emit_event(EventType::PLAN_REUSE_INJECTION, "", plan_reuse_meta);
+                }
                 auto new_plan = planner_->create_plan(reflection_goal);
                 lock.lock();
                 
@@ -427,10 +445,13 @@ void ExecutiveController::decide_transition() {
             transition_to_unlocked((all_successful && !current_plan_.steps.empty()) ? ControllerState::COMPLETED : ControllerState::FAILED);
             current_plan_.updated_at_ms = nowMs();
             
-            store_plan_history(score);
+            auto history_meta = store_plan_history(score);
             if (memory_) memory_->deleteActivePlan(current_plan_.plan_id);
             
-            lock.unlock(); 
+            lock.unlock();
+            if (!history_meta.is_null()) {
+                emit_event(EventType::PLAN_HISTORY_STORED, "", history_meta);
+            }
             emit_event((all_successful && !current_plan_.steps.empty()) ? EventType::PLAN_COMPLETED : EventType::PLAN_FAILED);
             return;
         }
@@ -852,6 +873,9 @@ void ExecutiveController::log_to_trace(const ControllerEvent& event) {
         case EventType::RETRIEVAL_DIAGNOSTICS: type_str = "RETRIEVAL_DIAGNOSTICS"; break;
         case EventType::INDEXING_STARTED: type_str = "INDEXING_STARTED"; break;
         case EventType::INDEXING_COMPLETED: type_str = "INDEXING_COMPLETED"; break;
+        case EventType::PLAN_REUSE_INJECTION: type_str = "PLAN_REUSE_INJECTION"; break;
+        case EventType::REFLECTION_REPLAN: type_str = "REFLECTION_REPLAN"; break;
+        case EventType::PLAN_HISTORY_STORED: type_str = "PLAN_HISTORY_STORED"; break;
     }
 
     nlohmann::json entry;
@@ -940,7 +964,7 @@ void ExecutiveController::update_trajectory_embedding_unlocked() {
         
         bool is_zero = true;
         for (float v : trajectory_embedding_) {
-            if (std::abs(v) > 1e-6f) {
+            if (std::abs(v) > TrajectoryReuse::kZeroVectorEpsilon) {
                 is_zero = false;
                 break;
             }
@@ -974,8 +998,8 @@ void ExecutiveController::clear_embeddings_unlocked() {
     }
 }
 
-void ExecutiveController::store_plan_history(float success_score) {
-    if (!memory_ || current_plan_.plan_id.empty()) return;
+nlohmann::json ExecutiveController::store_plan_history(float success_score) {
+    if (!memory_ || current_plan_.plan_id.empty()) return nlohmann::json();
 
     Memory::PastPlanRecord record;
     record.plan_id = current_plan_.plan_id;
@@ -990,6 +1014,8 @@ void ExecutiveController::store_plan_history(float success_score) {
     record.goal_embedding = goal_embedding_;
 
     memory_->storePastPlan(record);
+
+    nlohmann::json history_meta = log_plan_history_persisted(success_score, record);
 
     // Phase 5.6: Reinforce Graph Memory
     reinforce_plan_graph();
@@ -1043,6 +1069,126 @@ void ExecutiveController::store_plan_history(float success_score) {
     metrics.status = state_to_name(state_);
 
     Thoth::GragMetricsLogger::instance().logMetrics(metrics);
+    return history_meta;
+}
+
+namespace {
+
+int countStepsFromOutline(const std::string& outline) {
+    try {
+        auto j = nlohmann::json::parse(outline);
+        if (j.contains("steps") && j["steps"].is_array()) {
+            return static_cast<int>(j["steps"].size());
+        }
+    } catch (...) {
+    }
+    return 0;
+}
+
+std::string truncateOutline(const std::string& outline) {
+    if (outline.size() <= Thoth::PlanReuse::kOutlineMaxChars) return outline;
+    return outline.substr(0, Thoth::PlanReuse::kOutlineMaxChars) + "...";
+}
+
+nlohmann::json pastPlansToJson(const std::vector<Memory::PastPlanRecord>& plans) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& p : plans) {
+        arr.push_back({
+            {"plan_id", p.plan_id},
+            {"goal", p.goal},
+            {"success_score", p.success_score},
+            {"step_count", countStepsFromOutline(p.outline)},
+            {"outline_preview", truncateOutline(p.outline)}
+        });
+    }
+    return arr;
+}
+
+} // namespace
+
+std::string ExecutiveController::build_plan_reuse_context(const std::vector<Memory::PastPlanRecord>& plans) const {
+    std::ostringstream oss;
+    oss << "\n\n[RELEVANT PAST APPROACHES — similar goals, prior success >= "
+        << Thoth::PlanReuse::kMinSuccessScore << "]\n";
+    for (const auto& p : plans) {
+        oss << "- Plan ID: " << p.plan_id << "\n";
+        oss << "  Goal: " << p.goal << "\n";
+        oss << "  Success: " << std::fixed << std::setprecision(2) << p.success_score;
+        oss << " | Steps: " << countStepsFromOutline(p.outline) << "\n";
+        oss << "  Outline: " << truncateOutline(p.outline) << "\n";
+    }
+    return oss.str();
+}
+
+nlohmann::json ExecutiveController::log_plan_reuse_injection(
+    const std::vector<Memory::PastPlanRecord>& plans,
+    const std::string& source) {
+    nlohmann::json meta = {
+        {"source", source},
+        {"plan_count", plans.size()},
+        {"min_success_score", Thoth::PlanReuse::kMinSuccessScore},
+        {"success_boost_threshold", Thoth::PlanReuse::kSuccessBoostThreshold},
+        {"success_boost", Thoth::PlanReuse::kSuccessBoost},
+        {"retrieve_limit", Thoth::PlanReuse::kDefaultRetrieveLimit},
+        {"plans", pastPlansToJson(plans)}
+    };
+
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "executive",
+        "PLAN_REUSE_INJECTION",
+        "Injected similar past plans into planner context",
+        meta,
+        "",
+        session_id_);
+
+    return meta;
+}
+
+nlohmann::json ExecutiveController::log_reflection_replan(float score, int reflection_cycle) {
+    nlohmann::json meta = {
+        {"trajectory_score", score},
+        {"reflection_threshold", Thoth::Reflection::kScoreThreshold},
+        {"reflection_cycle", reflection_cycle},
+        {"max_reflections", MAX_REFLECTIONS},
+        {"plan_id", current_plan_.plan_id}
+    };
+
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "executive",
+        "REFLECTION_REPLAN",
+        "Low trajectory score triggered reflection replan",
+        meta,
+        "",
+        session_id_);
+
+    return meta;
+}
+
+nlohmann::json ExecutiveController::log_plan_history_persisted(float success_score, const Memory::PastPlanRecord& past_record) {
+    nlohmann::json meta = {
+        {"plan_id", past_record.plan_id},
+        {"success_score", success_score},
+        {"failure_count", past_record.failure_count},
+        {"duration_ms", past_record.duration_ms},
+        {"storage_targets", nlohmann::json::array({"past_plans", "cognate_plans", "trajectories"})},
+        {"past_plans_table", "past_plans"},
+        {"cognate_plans_table", "cognate_plans"},
+        {"embedding_version", 2},
+        {"min_success_for_reuse", Thoth::PlanReuse::kMinSuccessScore}
+    };
+
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "executive",
+        "PLAN_HISTORY_STORED",
+        "Persisted completed plan to past_plans and cognate_plans",
+        meta,
+        "",
+        session_id_);
+
+    return meta;
 }
 
 } // namespace Thoth

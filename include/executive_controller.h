@@ -137,7 +137,7 @@ protected:
     void update_current_embedding_unlocked();
     void update_trajectory_embedding_unlocked();
     void clear_embeddings_unlocked();
-    void store_plan_history(float success_score);
+    nlohmann::json store_plan_history(float success_score);
     void reinforce_plan_graph();
     void record_trajectory_step(const PlanStep& step, const Thoth::StepResult& result);
     float calculate_trajectory_score(bool plan_completed_successfully);
@@ -151,6 +151,11 @@ protected:
     void evaluate_state();
 
     void log_to_trace(const ControllerEvent& event);
+
+    std::string build_plan_reuse_context(const std::vector<Memory::PastPlanRecord>& plans) const;
+    nlohmann::json log_plan_reuse_injection(const std::vector<Memory::PastPlanRecord>& plans, const std::string& source);
+    nlohmann::json log_plan_history_persisted(float success_score, const Memory::PastPlanRecord& past_record);
+    nlohmann::json log_reflection_replan(float score, int reflection_cycle);
 
     std::shared_ptr<IPlanner> planner_;
     std::shared_ptr<ToolRegistry> tool_registry_;

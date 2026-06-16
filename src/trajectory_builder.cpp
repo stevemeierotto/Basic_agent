@@ -7,6 +7,7 @@
  */
 
 #include "../include/trajectory_builder.h"
+#include "../include/plan_reuse_config.h"
 #include <iostream>
 #include <algorithm>
 
@@ -21,7 +22,7 @@ std::vector<float> TrajectoryBuilder::buildTrajectory(const std::string& goal_id
     auto steps = repo_->getRecentEpisodeSteps(goal_id, n);
     
     // Requirement: If fewer than 3 episode steps exist, return a zero vector
-    if (steps.size() < 3) {
+    if (steps.size() < static_cast<std::size_t>(TrajectoryReuse::kMinEpisodeStepsForEmbedding)) {
         return std::vector<float>(engine_->getDimension(), 0.0f);
     }
 
