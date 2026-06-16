@@ -19,6 +19,7 @@
 #include "config.h"
 #include "strategy.h"
 #include "memory_pruner.h"
+#include "memory_pruning_config.h"
 #include "plan_reuse_config.h"
 
 namespace Thoth { class SQLiteMemoryRepository; }
@@ -50,6 +51,10 @@ public:
     void load();            // loads from disk (overwrites memory)
     void save() const;      // flushes to disk if dirty
     void flush() const;     // unconditional save, clears dirty flag
+
+    // Session scoping (must be set before conversation writes)
+    void setActiveSessionId(const std::string& sessionId);
+    std::string getActiveSessionId() const;
 
     // Conversation
     void addMessage(const std::string& role, const std::string& content);
@@ -159,6 +164,7 @@ public:
 
 private:
     void migrateEmbeddings(); // Step 2 migration path
+    void maybePruneAfterWrite(const std::string& sessionId);
 
     std::unique_ptr<Thoth::MemoryRepository> repo;
     std::unique_ptr<Thoth::MemoryPruner> pruner;

@@ -9,6 +9,7 @@
 #define THOTH_MEMORY_PRUNER_H
 
 #include "memory_repository.h"
+#include "memory_pruning_config.h"
 #include <string>
 #include <vector>
 
@@ -19,10 +20,10 @@ namespace Thoth {
  * @brief Configuration for the MemoryPruner logic.
  */
 struct PruningPolicy {
-    size_t max_hot_messages = 50;      // Capacity of the Hot Tier (raw turns)
+    size_t max_hot_messages = Thoth::MemoryPruning::kMaxHotMessages;
     int max_hot_age_days = 30;         // Retention period for the Hot Tier (not yet implemented)
     bool summarize_before_pruning = true;
-    size_t prune_batch_size = 10;      // Number of turns to archive when threshold is hit
+    size_t prune_batch_size = Thoth::MemoryPruning::kPruneBatchSize;
 };
 
 /**

@@ -128,6 +128,9 @@ void BasicAgentPlugin::setRagFiles(const std::vector<std::string>& filePaths) {
 }
 
 void BasicAgentPlugin::setSessionId(const std::string& sessionId) {
+    if (!sessionId.empty()) {
+        memory.setActiveSessionId(sessionId);
+    }
     if (controller) controller->set_session_id(sessionId);
     cmdProcessor.set_session_id(sessionId);
     if (indexManager) indexManager->setSessionId(sessionId);

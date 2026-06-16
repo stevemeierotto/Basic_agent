@@ -14,6 +14,9 @@ Memory::Memory(const Config& config) {
     
     if (!repo) {
         std::cerr << "[Memory] CRITICAL: Failed to initialize repository backend.\n";
+    } else {
+        Thoth::PruningPolicy policy;
+        pruner = std::make_unique<Thoth::MemoryPruner>(*repo, policy);
     }
 
     // Phase 4: Embedding Migration
@@ -24,6 +27,19 @@ Memory::Memory(const Config& config) {
 }
 
 Memory::~Memory() = default;
+
+void Memory::setActiveSessionId(const std::string& sessionId) {
+    if (sessionId.empty()) {
+        return;
+    }
+    std::unique_lock lock(mtx);
+    activeSessionId = sessionId;
+}
+
+std::string Memory::getActiveSessionId() const {
+    std::shared_lock lock(mtx);
+    return activeSessionId;
+}
 
 void Memory::migrateEmbeddings() {
     std::unique_lock lock(mtx);
@@ -42,20 +58,39 @@ void Memory::migrateEmbeddings() {
 }
 
 void Memory::addMessage(const std::string& role, const std::string& content) {
-    std::unique_lock lock(mtx);
-    if (!repo) return;
+    std::string sessionForPrune;
+    {
+        std::unique_lock lock(mtx);
+        if (!repo) return;
 
-    // Ensure session exists
-    repo->createSession(activeSessionId, std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count());
+        // Ensure session exists
+        repo->createSession(activeSessionId, std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
 
-    Thoth::MessageRecord msg;
-    msg.role = role;
-    msg.content = content;
-    msg.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count();
+        Thoth::MessageRecord msg;
+        msg.role = role;
+        msg.content = content;
+        msg.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
 
-    repo->appendMessage(activeSessionId, msg);
+        repo->appendMessage(activeSessionId, msg);
+        sessionForPrune = activeSessionId;
+    }
+
+    maybePruneAfterWrite(sessionForPrune);
+}
+
+void Memory::maybePruneAfterWrite(const std::string& sessionId) {
+    if (!pruner || sessionId.empty()) {
+        return;
+    }
+
+    const int archived = pruner->prune(sessionId);
+    if (archived > 0) {
+        std::cerr << "[Memory] Pruned " << archived << " turn(s) for session "
+                  << sessionId << " (hot cap "
+                  << Thoth::MemoryPruning::kMaxHotMessages << ")\n";
+    }
 }
 
 std::vector<json> Memory::getConversation() const {
