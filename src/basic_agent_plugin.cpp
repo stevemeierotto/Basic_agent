@@ -92,12 +92,24 @@ BasicAgentPlugin::~BasicAgentPlugin() {
     std::cerr << "[BasicAgentPlugin] Destroyed.\n";
 }
 
+void BasicAgentPlugin::bootstrapSandboxIfEmpty() {
+    if (!indexManager) return;
+    if (indexManager->getChunks().empty()) {
+        FileHandler fh;
+        const std::string corpus = fh.getAgentWorkspacePath("rag/test_suite_corpus");
+        std::filesystem::create_directories(corpus);
+        std::cerr << "[BasicAgentPlugin] Indexing TEST_SUITE corpus: " << corpus << "\n";
+        indexManager->indexProject(corpus);
+        indexManager->saveIndex();
+    }
+    cmdProcessor.setInitialized(true);
+}
+
 std::string BasicAgentPlugin::processInput(const std::string& input) {
     if (input.empty()) return "";
 
     if (input[0] == '/') {
-        cmdProcessor.handleCommand(input);
-        return "[Command Executed]";
+        return cmdProcessor.handleCommand(input);
     }
 
     return cmdProcessor.processQuery(input);
@@ -114,7 +126,52 @@ void BasicAgentPlugin::setConversationMemory(const std::vector<std::pair<std::st
     }
 }
 
+bool BasicAgentPlugin::ragPathsNeedIndexing(const std::vector<std::string>& filePaths) const {
+    if (!indexManager) {
+        return false;
+    }
+
+    for (const auto& path : filePaths) {
+        if (!std::filesystem::exists(path)) {
+            continue;
+        }
+        if (std::filesystem::is_directory(path)) {
+            try {
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(path)) {
+                    if (!entry.is_regular_file()) {
+                        continue;
+                    }
+                    const std::string fullPath =
+                        std::filesystem::absolute(entry.path()).lexically_normal().string();
+                    if (indexManager->shouldReindexFile(fullPath)) {
+                        return true;
+                    }
+                }
+            } catch (...) {
+                return true;
+            }
+            continue;
+        }
+
+        try {
+            const std::string normalized =
+                std::filesystem::absolute(path).lexically_normal().string();
+            if (indexManager->shouldReindexFile(normalized)) {
+                return true;
+            }
+        } catch (...) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void BasicAgentPlugin::setRagFiles(const std::vector<std::string>& filePaths) {
+    if (filePaths == lastRagFilePaths_ && !ragPathsNeedIndexing(filePaths)) {
+        cmdProcessor.setInitialized(true);
+        return;
+    }
+
     for (const auto& path : filePaths) {
         if (std::filesystem::exists(path)) {
             if (std::filesystem::is_directory(path)) {
@@ -124,6 +181,7 @@ void BasicAgentPlugin::setRagFiles(const std::vector<std::string>& filePaths) {
             }
         }
     }
+    lastRagFilePaths_ = filePaths;
     cmdProcessor.setInitialized(true);
 }
 

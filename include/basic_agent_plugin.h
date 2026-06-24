@@ -41,6 +41,9 @@ public:
     void abort() { if (controller) controller->abort(); }
     void executeGoal(const std::string& goal) { if (controller) controller->execute_goal(goal); }
 
+    /** Headless TEST_SUITE: index sandbox rag/ only if empty, then skip full re-init. */
+    void bootstrapSandboxIfEmpty();
+
     // --- Cognate UI Integration ---
     std::vector<Memory::CognateStrategyRecord> getAllStrategies() const;
     std::vector<Memory::CognateTrajectoryRecord> getAllTrajectories() const;
@@ -79,5 +82,8 @@ private:
     CommandProcessor cmdProcessor;
     std::shared_ptr<IPlanner> planner;
     std::shared_ptr<Thoth::ExecutiveController> controller;
+
+    std::vector<std::string> lastRagFilePaths_;
+    bool ragPathsNeedIndexing(const std::vector<std::string>& filePaths) const;
 };
 

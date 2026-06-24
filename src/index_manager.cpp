@@ -13,6 +13,34 @@ using json = nlohmann::json;
 
 namespace fs = std::filesystem;
 
+namespace {
+
+std::string agentWorkspaceRoot() {
+    FileHandler fh;
+    try {
+        return fs::absolute(fh.getAgentWorkspacePath()).lexically_normal().string();
+    } catch (...) {
+        return fh.getAgentWorkspacePath();
+    }
+}
+
+bool isUnderAgentWorkspace(const std::string& normalizedPath) {
+    const std::string root = agentWorkspaceRoot();
+    if (root.empty() || normalizedPath.size() < root.size()) {
+        return false;
+    }
+    if (normalizedPath.compare(0, root.size(), root) != 0) {
+        return false;
+    }
+    if (normalizedPath.size() == root.size()) {
+        return true;
+    }
+    const char next = normalizedPath[root.size()];
+    return next == '/';
+}
+
+} // namespace
+
 IndexManager::IndexManager(EmbeddingEngine* eng)
     : store(eng), engine(eng), localTfIdfEngine(std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf)) 
 {
@@ -250,7 +278,7 @@ void IndexManager::indexFile(const std::string& filePath) {
     } catch (...) { normalizedPath = filePath; }
 
     // STRICT SANDBOX ENFORCEMENT
-    if (normalizedPath.find("/home/steve/Thoth/agent_workspace/") == std::string::npos) {
+    if (!isUnderAgentWorkspace(normalizedPath)) {
         std::cerr << "[SECURITY] REJECTED path outside sandbox: " << normalizedPath << "\n";
         return;
     }
@@ -384,7 +412,7 @@ void IndexManager::indexProject(const std::string& rootPath) {
     std::string rootAbs = fs::absolute(rootPath).lexically_normal().string();
 
     // STRICT SANDBOX ENFORCEMENT
-    if (rootAbs.find("/home/steve/Thoth/agent_workspace/") == std::string::npos) {
+    if (!isUnderAgentWorkspace(rootAbs)) {
         std::cerr << "[SECURITY] REJECTED rootPath outside sandbox: " << rootAbs << "\n";
         return;
     }
