@@ -17,6 +17,8 @@
 #include "../include/file_handler.h"
 #include "../include/goal_text_utils.h"
 #include "../include/cognitive_metrics.h"
+#include "../include/reflection_utils.h"
+#include "../include/graph_refiner.h"
 #include <chrono>
 #include <thread>
 #include <iostream>
@@ -24,6 +26,7 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <cstdlib>
 
 namespace Thoth {
 
@@ -67,6 +70,12 @@ ExecutiveController::ExecutiveController(
     std::shared_ptr<RAGPipeline> rag,
     std::shared_ptr<Memory> memory
 ) : planner_(planner), tool_registry_(tool_registry), rag_(rag), memory_(memory) {
+    if (const char* envMax = std::getenv("THOTH_MAX_REFLECTIONS")) {
+        try {
+            max_reflections_ = std::max(0, std::stoi(envMax));
+        } catch (...) {
+        }
+    }
     metrics_repo_ = std::make_shared<Thoth::StepMetricsRepository>("");
     workflow_engine_ = std::make_shared<Thoth::WorkflowEngine>(tool_registry, rag, memory, metrics_repo_);
     strategy_engine_ = std::make_shared<Thoth::StrategyEngine>(memory);
@@ -95,6 +104,21 @@ void ExecutiveController::set_llm_interface(LLMInterface* llm) {
     if (workflow_engine_) {
         workflow_engine_->setLLMInterface(llm);
     }
+}
+
+void ExecutiveController::set_max_reflections(int value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    max_reflections_ = std::max(0, value);
+}
+
+int ExecutiveController::get_max_reflections() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return max_reflections_;
+}
+
+int ExecutiveController::get_reflection_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return reflection_count_;
 }
 
 std::string ExecutiveController::execute_goal(const std::string& goal) {
@@ -423,10 +447,21 @@ void ExecutiveController::decide_transition() {
 
         if (!any_unfinished && active_step_futures_.empty()) {
             float score = calculate_trajectory_score(all_successful);
-            
-            // Step 6.3: Reflection Loop
-            if (score < Reflection::kScoreThreshold && reflection_count_ < MAX_REFLECTIONS) {
-                std::cout << "[DEBUG] Low success score (" << score << "), triggering reflection cycle " << (reflection_count_ + 1) << "\n";
+            const bool timeout_failure = trajectoryHasTimeoutFailure(current_trajectory_);
+            reflection_skip_reason_.clear();
+
+            const bool reflectionEnabled = max_reflections_ > 0;
+            const std::string skipReason = reflectionSkipReason(
+                reflectionEnabled,
+                reflection_count_,
+                max_reflections_,
+                score,
+                Reflection::kScoreThreshold,
+                timeout_failure);
+
+            if (score < Reflection::kScoreThreshold && reflectionEnabled && skipReason.empty()) {
+                std::cout << "[DEBUG] Low success score (" << score << "), triggering reflection cycle "
+                          << (reflection_count_ + 1) << "\n";
                 reflection_count_++;
 
                 auto reflection_meta = log_reflection_replan(score, reflection_count_);
@@ -467,6 +502,9 @@ void ExecutiveController::decide_transition() {
             }
 
             final_trajectory_score_ = score;
+            if (!skipReason.empty() && score < Reflection::kScoreThreshold) {
+                reflection_skip_reason_ = skipReason;
+            }
 
             transition_to_unlocked((all_successful && !current_plan_.steps.empty()) ? ControllerState::COMPLETED : ControllerState::FAILED);
             current_plan_.updated_at_ms = nowMs();
@@ -1117,6 +1155,7 @@ void ExecutiveController::reset_goal_metrics_unlocked() {
     last_grag_alpha_ = 0.0f;
     last_grag_routing_mode_.clear();
     final_trajectory_score_ = 0.0f;
+    reflection_skip_reason_.clear();
 }
 
 void ExecutiveController::record_step_metrics_unlocked(const PlanStep& step, const StepResult& result) {
@@ -1168,7 +1207,9 @@ void ExecutiveController::emit_goal_cognitive_metrics_unlocked(const std::string
     record.final_success_score = trajectory_score;
     record.reflection_count = reflection_count_;
     record.revisions_count = revisions_count_;
+    record.max_reflections = max_reflections_;
     record.plan_reused = plan_reused_;
+    record.reflection_skip_reason = reflection_skip_reason_;
 
     CognitiveMetricsLogger::instance().logGoalMetrics(record);
     StructuredLogger::instance().log(LogLevel::Info,
@@ -1256,7 +1297,7 @@ nlohmann::json ExecutiveController::log_reflection_replan(float score, int refle
         {"trajectory_score", score},
         {"reflection_threshold", Thoth::Reflection::kScoreThreshold},
         {"reflection_cycle", reflection_cycle},
-        {"max_reflections", MAX_REFLECTIONS},
+        {"max_reflections", max_reflections_},
         {"plan_id", current_plan_.plan_id}
     };
 

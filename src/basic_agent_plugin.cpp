@@ -36,6 +36,7 @@ BasicAgentPlugin::BasicAgentPlugin()
     controller = std::make_shared<Thoth::ExecutiveController>(planner, registry_ptr, rag_ptr, memory_ptr);
     cmdProcessor.setController(controller);
     controller->set_llm_interface(&llm);
+    controller->set_max_reflections(config.max_reflections);
     
     // Set event callback
     auto cb = [this](const ControllerEvent& ev) {

@@ -81,6 +81,8 @@ set(BASIC_AGENT_SOURCES
     src/chat_rag_golden_cases.cpp
     src/chat_retrieval_boost.cpp
     src/chat_query_utils.cpp
+    src/reflection_utils.cpp
+    src/reflection_ab_cases.cpp
     src/cognitive_metrics_logger.cpp
 )
 
@@ -97,6 +99,9 @@ target_link_libraries(run_cognate_benchmark PRIVATE basic_agent)
 
 add_executable(run_chat_rag_benchmark src/run_chat_rag_benchmark.cpp)
 target_link_libraries(run_chat_rag_benchmark PRIVATE basic_agent)
+
+add_executable(run_reflection_ab_benchmark src/run_reflection_ab_benchmark.cpp)
+target_link_libraries(run_reflection_ab_benchmark PRIVATE basic_agent)
 
 # CLI executable for debugging or standalone use
 # Only build CLI tool if we're building standalone

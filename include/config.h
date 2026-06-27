@@ -52,6 +52,9 @@ public:
     int stability_window = 2;
     int max_scientific_iterations = 5;
 
+    /** Reflection replan cycles allowed per goal (0 = disabled). Env: THOTH_MAX_REFLECTIONS. */
+    int max_reflections = 2;
+
     // Load/Save from JSON or ENV
     bool loadFromJson(const std::string& path);
     bool saveToJson(const std::string& path) const;

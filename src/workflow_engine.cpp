@@ -63,6 +63,11 @@ bool mockLLMEnabled() {
     return mock && (std::string(mock) == "1" || std::string(mock) == "true");
 }
 
+bool mockStepTimeoutEnabled() {
+    const char* mock = std::getenv("THOTH_MOCK_STEP_TIMEOUT");
+    return mock && (std::string(mock) == "1" || std::string(mock) == "true");
+}
+
 std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorSteps) {
     std::ostringstream oss;
     for (const auto& prior : priorSteps) {
@@ -158,6 +163,16 @@ StepResult WorkflowEngine::executeStep(const PlanStep& step,
     DecisionTrace trace = traceLogger.startTrace("workflow_step", step.description.size());
     traceLogger.addStage(trace, "dispatch", true, "Executing step: " + step.description, 
         {{"plan_id", planId}, {"step_id", step.step_id}, {"type", static_cast<int>(step.type)}});
+
+    if (mockStepTimeoutEnabled() && step.step_id == "timeout-step") {
+        result.success = false;
+        result.error_message = "Step execution timed out after 1ms";
+        result.latency_ms = nowMs() - startTime;
+        result.data = {{"status", "failed"}, {"error_message", result.error_message}};
+        traceLogger.finishTrace(trace, false, result.error_message);
+        traceLogger.writeTrace(trace);
+        return result;
+    }
 
     int maxAttempts = 1 + step.failure_policy.max_retries;
     bool success = false;

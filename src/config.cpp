@@ -1,7 +1,9 @@
 #include "../include/config.h"
+#include "../include/plan_reuse_config.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <cstdlib>
 #include <../include/json.hpp>
 
 using json = nlohmann::json;
@@ -33,7 +35,14 @@ Config::Config()
       wt(0.2f),
       keyword_weight(0.3f),
       graph_weight(0.3f)
-{}
+{
+    if (const char* maxReflections = std::getenv("THOTH_MAX_REFLECTIONS")) {
+        try {
+            max_reflections = std::stoi(maxReflections);
+        } catch (...) {
+        }
+    }
+}
 
 bool Config::loadFromJson(const std::string& path) {
     std::lock_guard<std::mutex> lock(mtx);

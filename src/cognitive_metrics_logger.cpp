@@ -68,6 +68,8 @@ nlohmann::json CognitiveMetricsLogger::toJson(const GoalCognitiveMetricsRecord& 
         {"final_success_score", record.final_success_score},
         {"reflection_count", record.reflection_count},
         {"revisions_count", record.revisions_count},
+        {"max_reflections", record.max_reflections},
+        {"reflection_skip_reason", record.reflection_skip_reason},
         {"plan_reused", record.plan_reused},
         {"total_tokens", record.total_tokens},
     };

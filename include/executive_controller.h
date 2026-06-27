@@ -27,7 +27,7 @@
 #include "decision_trace.h"
 #include "constraint_checker.h"
 #include "trajectory_builder.h"
-#include "graph_refiner.h"
+#include "reflection_utils.h"
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -36,6 +36,8 @@ class Memory;
 class LLMInterface;
 
 namespace Thoth {
+
+class GraphRefiner;
 
 enum class ControllerState {
     IDLE,
@@ -88,6 +90,11 @@ public:
         workflow_engine_ = engine; 
     }
     void set_llm_interface(LLMInterface* llm);
+
+    /** C3: reflection replan limit (0 disables). Overrides default and env when set explicitly. */
+    void set_max_reflections(int value);
+    int get_max_reflections() const;
+    int get_reflection_count() const;
 
     // State inspection (for UI highlighting and trace logging)
     ControllerState get_state() const;
@@ -188,7 +195,8 @@ protected:
     std::vector<ActiveStepSet> active_sets_;
     int revisions_count_ = 0;
     int reflection_count_ = 0;
-    const int MAX_REFLECTIONS = 2;
+    int max_reflections_ = Reflection::kMaxReflections;
+    std::string reflection_skip_reason_;
     std::string session_id_;
     bool plan_reused_ = false;
 

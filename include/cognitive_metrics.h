@@ -37,9 +37,11 @@ struct GoalCognitiveMetricsRecord {
     float final_success_score = 0.0f;
     int reflection_count = 0;
     int revisions_count = 0;
+    int max_reflections = 0;
     bool plan_reused = false;
 
     std::int64_t total_tokens = 0; // reserved; 0 until LLMInterface exposes counts
+    std::string reflection_skip_reason;
 };
 
 class CognitiveMetricsLogger {
