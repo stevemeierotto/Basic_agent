@@ -50,6 +50,9 @@ public:
                                     const std::string& existing_plan_json,
                                     const std::string& failed_step_result_json);
 
+    /** Writes bundled plan templates into agent_workspace when missing. */
+    static void ensureDefaultTemplatesExist();
+
 private:
     std::string truncateToLimit(const std::string& input, size_t maxLen) const;
     std::string loadTemplate(const std::string& filename, const std::string& defaultValue);

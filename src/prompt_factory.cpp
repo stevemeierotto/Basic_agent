@@ -5,6 +5,35 @@
 #include <iostream>
 #include <fstream>
 #include <unordered_map>
+#include <filesystem>
+
+namespace {
+
+const char* kDefaultPlanGenerationTemplate =
+    "Generate a JSON plan for the goal below using ONLY retrieval and synthesis.\n"
+    "Goal: {{goal}}\n"
+    "{{strategy_context}}\n"
+    "{{past_experience}}\n"
+    "Rules:\n"
+    "- Respond with JSON only (no markdown fences).\n"
+    "- Minimum 2 steps.\n"
+    "- Step 1 MUST be step_type RETRIEVAL with payload {\"query\": \"<short query derived from goal>\", \"top_k\": 5}.\n"
+    "- Step 2 MUST be step_type LLM to synthesize the answer from retrieved context.\n"
+    "- Do NOT emit TOOL steps.\n"
+    "Schema:\n"
+    "{\"plan\":[{\"step_id\":\"retrieve-context\",\"step_type\":\"RETRIEVAL\","
+    "\"description\":\"Retrieve relevant corpus context\",\"payload\":{\"query\":\"...\",\"top_k\":5}},"
+    "{\"step_id\":\"synthesize\",\"step_type\":\"LLM\",\"description\":\"Summarize findings\","
+    "\"payload\":{}}]}\n";
+
+const char* kDefaultPlanRevisionTemplate =
+    "Revise the plan for goal: {{goal}}\n"
+    "Existing Plan: {{existing_plan}}\n"
+    "Failed Step Result: {{failed_step_result}}\n"
+    "Use the same schema as plan generation: RETRIEVAL first, then LLM. No TOOL steps.\n"
+    "Respond with JSON plan ONLY.\n";
+
+} // namespace
 
 // Default constructor uses default PromptConfig()
 PromptFactory::PromptFactory(Memory& mem, RAGPipeline& r)
@@ -54,13 +83,7 @@ std::string PromptFactory::buildRagQueryPrompt(const std::string& query) {
 std::string PromptFactory::buildPlanPrompt(const std::string& goal,
                                             const std::string& strategy_context,
                                             const std::string& past_experience) {
-    std::string defaultTemplate = 
-        "Generate a JSON plan for the following goal:\n"
-        "Goal: {{goal}}\n"
-        "Available Tools: {{available_tools}}\n"
-        "Respond with JSON only.";
-
-    std::string templateStr = loadTemplate("plan_generation.tmpl", defaultTemplate);
+    std::string templateStr = loadTemplate("plan_generation.tmpl", kDefaultPlanGenerationTemplate);
 
     std::unordered_map<std::string, std::string> subs;
     subs["{{goal}}"] = goal;
@@ -75,13 +98,7 @@ std::string PromptFactory::buildPlanPrompt(const std::string& goal,
 std::string PromptFactory::buildRevisionPrompt(const std::string& goal,
                                                 const std::string& existing_plan_json,
                                                 const std::string& failed_step_result_json) {
-    std::string defaultTemplate = 
-        "Revise the following plan for goal: {{goal}}\n"
-        "Existing Plan: {{existing_plan}}\n"
-        "Failed Step Result: {{failed_step_result}}\n"
-        "Respond with JSON plan ONLY.";
-
-    std::string templateStr = loadTemplate("plan_revision.tmpl", defaultTemplate);
+    std::string templateStr = loadTemplate("plan_revision.tmpl", kDefaultPlanRevisionTemplate);
 
     std::unordered_map<std::string, std::string> subs;
     subs["{{goal}}"] = goal;
@@ -90,6 +107,26 @@ std::string PromptFactory::buildRevisionPrompt(const std::string& goal,
 
     std::string result = applySubstitutions(templateStr, subs);
     return truncateToLimit(result, config.maxContextLength);
+}
+
+void PromptFactory::ensureDefaultTemplatesExist() {
+    FileHandler fh;
+    const std::filesystem::path dir(fh.getAgentWorkspacePath("prompt_templates"));
+    std::filesystem::create_directories(dir);
+
+    auto writeIfMissing = [&](const char* filename, const char* content) {
+        const std::filesystem::path path = dir / filename;
+        if (std::filesystem::exists(path)) {
+            return;
+        }
+        std::ofstream out(path);
+        if (out.is_open()) {
+            out << content;
+        }
+    };
+
+    writeIfMissing("plan_generation.tmpl", kDefaultPlanGenerationTemplate);
+    writeIfMissing("plan_revision.tmpl", kDefaultPlanRevisionTemplate);
 }
 
 std::string PromptFactory::truncateToLimit(const std::string& input, size_t maxLen) const {

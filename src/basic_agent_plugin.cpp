@@ -19,8 +19,8 @@ BasicAgentPlugin::BasicAgentPlugin()
     // Setup Planner
     auto memory_ptr = std::shared_ptr<Memory>(&memory, [](Memory*) {});
     auto rag_ptr = std::shared_ptr<RAGPipeline>(&rag, [](RAGPipeline*){});
-    auto prompt_factory = std::make_shared<PromptFactory>(memory, rag);
-    planner = std::make_shared<LLMPlanner>(memory_ptr, rag_ptr, prompt_factory, &llm);
+    planner_prompt_factory_ = std::make_shared<PromptFactory>(memory, rag);
+    planner = std::make_shared<LLMPlanner>(memory_ptr, rag_ptr, planner_prompt_factory_, &llm);
 
     // Initialize FactStore and ToolRegistry
     if (auto sqlite_repo = memory.getSQLiteRepo()) {
@@ -43,19 +43,15 @@ BasicAgentPlugin::BasicAgentPlugin()
     indexManager->setEventCallback(cb);
 
     FileHandler fileHandler;
+    PromptFactory::ensureDefaultTemplatesExist();
 
     // --- Load config.json ---
     std::string configPath = fileHandler.getAgentWorkspacePath("config.json");
     if (std::filesystem::exists(configPath)) {
-        std::ifstream f(configPath);
-        if (f.is_open()) {
-            try {
-                nlohmann::json j = nlohmann::json::parse(f);
-                config.loadFromJson(j);
-                std::cerr << "[BasicAgentPlugin] Config loaded from: " << configPath << "\n";
-            } catch (...) {
-                std::cerr << "[BasicAgentPlugin] Error parsing config.json\n";
-            }
+        if (config.loadFromJson(configPath)) {
+            std::cerr << "[BasicAgentPlugin] Config loaded from: " << configPath << "\n";
+        } else {
+            std::cerr << "[BasicAgentPlugin] Error parsing config.json\n";
         }
     }
 
@@ -76,6 +72,8 @@ BasicAgentPlugin::BasicAgentPlugin()
     // Set model based on config if available
     llm.setConfig(&config);
     ToolRegistry::instance().setConfig(&config);
+    syncPlannerPromptConfig();
+    cmdProcessor.syncPromptConfig();
 
     // --- Initialize RAG index ---
     std::string ragIndexPath = fileHandler.getRagPath("rag_index.bin");
@@ -233,4 +231,14 @@ bool BasicAgentPlugin::saveExperiment(const Memory::CognateExperimentRecord& rec
 
 Memory::GraphStatistics BasicAgentPlugin::getGraphStatistics() const {
     return memory.getGraphStatistics();
+}
+
+void BasicAgentPlugin::syncPlannerPromptConfig() {
+    if (!planner_prompt_factory_) {
+        return;
+    }
+    auto pCfg = planner_prompt_factory_->getConfig();
+    pCfg.enableTools = config.enable_tools;
+    pCfg.maxContextLength = static_cast<size_t>(config.max_tokens) * 4;
+    planner_prompt_factory_->setConfig(pCfg);
 }

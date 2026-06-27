@@ -10,6 +10,7 @@
 #include "../include/logger.h"
 #include "../include/plan_parser.h"
 #include "../include/plan_reuse_config.h"
+#include "../include/goal_text_utils.h"
 #include <chrono>
 #include <sstream>
 #include <iomanip>
@@ -46,6 +47,8 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
         return plan;
     }
 
+    auto [prompt_goal, reuse_block] = Thoth::splitPlanReuseInjection(goal);
+
     // Phase 3.2: Gather context for the prompt (Cognate V2)
     std::string strategy_context;
     std::string past_experience;
@@ -53,7 +56,7 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
     std::size_t strategy_count = 0;
     
     if (rag_ && rag_->engine && memory_) {
-        auto goal_embedding = rag_->engine->embed(goal);
+        auto goal_embedding = rag_->engine->embed(prompt_goal);
         
         // 1. Past Trajectories (Experience-Guided Planning)
         auto trajectories = memory_->retrieveSimilarTrajectories(goal_embedding, 3);
@@ -92,7 +95,14 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
         }
     }
 
-    const bool plan_reuse_in_goal = goal.find("[RELEVANT PAST APPROACHES") != std::string::npos;
+    if (!reuse_block.empty()) {
+        if (!past_experience.empty()) {
+            past_experience += "\n\n";
+        }
+        past_experience += reuse_block;
+    }
+
+    const bool plan_reuse_in_goal = !reuse_block.empty();
 
     StructuredLogger::instance().log(
         LogLevel::Info,
@@ -100,7 +110,7 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
         "PLANNER_CONTEXT_ASSEMBLY",
         "Assembled planner prompt context from memory subsystems",
         {
-            {"goal", goal},
+            {"goal", prompt_goal},
             {"trajectory_injection", trajectory_count > 0},
             {"trajectory_count", trajectory_count},
             {"trajectory_min_episode_steps", Thoth::TrajectoryReuse::kMinEpisodeStepsForEmbedding},
@@ -112,7 +122,7 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
             {"cognate_plans_table", "cognate_plans (active plan snapshots via save_plan)"}
         });
 
-    std::string prompt = prompt_factory_->buildPlanPrompt(goal, strategy_context, past_experience);
+    std::string prompt = prompt_factory_->buildPlanPrompt(prompt_goal, strategy_context, past_experience);
     std::string llm_response = llm_->query(prompt);
 
     auto parsed_plan = Thoth::PlanParser::parse(llm_response, plan.plan_id);
@@ -128,7 +138,7 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
 
     if (parsed_plan.has_value()) {
         plan = parsed_plan.value();
-        plan.goal = goal; // Ensure goal matches
+        plan.goal = prompt_goal;
         plan.created_at_ms = nowMs();
         plan.updated_at_ms = plan.created_at_ms;
         plan.status = PlanStatus::ACTIVE;
@@ -141,7 +151,7 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
             {{"plan_id", plan.plan_id}, {"step_count", plan.steps.size()}});
     } else {
         plan.status = PlanStatus::FAILED;
-        StructuredLogger::instance().log(LogLevel::Error, "planner", "plan_failed", "Plan generation failed after retry", {{"goal", goal}});
+        StructuredLogger::instance().log(LogLevel::Error, "planner", "plan_failed", "Plan generation failed after retry", {{"goal", prompt_goal}});
     }
 
     save_plan(plan);
@@ -156,7 +166,14 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
         return revised;
     }
 
-    std::string prompt = prompt_factory_->buildRevisionPrompt(existing_plan.goal, 
+    auto [prompt_goal, reuse_block] = Thoth::splitPlanReuseInjection(existing_plan.goal);
+    std::string revision_goal = prompt_goal;
+    if (!reuse_block.empty()) {
+        revision_goal += "\n\n";
+        revision_goal += reuse_block;
+    }
+
+    std::string prompt = prompt_factory_->buildRevisionPrompt(revision_goal, 
                                                                existing_plan.to_json().dump(), 
                                                                step_result.dump());
     
@@ -175,7 +192,7 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
 
     if (parsed_plan.has_value()) {
         Plan revised = parsed_plan.value();
-        revised.goal = existing_plan.goal; // Ensure goal remains the same
+        revised.goal = prompt_goal;
         revised.created_at_ms = existing_plan.created_at_ms; // Maintain creation time
         revised.updated_at_ms = nowMs();
         revised.status = PlanStatus::ACTIVE;

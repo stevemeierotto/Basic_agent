@@ -15,6 +15,7 @@
 #include "executive_controller.h"
 #include "default_planner.h"
 #include "iplanner.h"
+#include "prompt_factory.h"
 
 //#include "Plugin.h"  // Plugin interface
 
@@ -81,9 +82,11 @@ private:
     LLMInterface llm;
     CommandProcessor cmdProcessor;
     std::shared_ptr<IPlanner> planner;
+    std::shared_ptr<PromptFactory> planner_prompt_factory_;
     std::shared_ptr<Thoth::ExecutiveController> controller;
 
     std::vector<std::string> lastRagFilePaths_;
     bool ragPathsNeedIndexing(const std::vector<std::string>& filePaths) const;
+    void syncPlannerPromptConfig();
 };
 

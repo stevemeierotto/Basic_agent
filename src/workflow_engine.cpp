@@ -18,6 +18,43 @@
 
 namespace Thoth {
 
+namespace {
+
+std::string extractToolName(const nlohmann::json& payload) {
+    std::string name = payload.value("tool", "");
+    if (name.empty()) {
+        name = payload.value("tool_name", "");
+    }
+    return name;
+}
+
+nlohmann::json extractToolArgs(const nlohmann::json& payload) {
+    nlohmann::json args = nlohmann::json::object();
+    if (payload.contains("args") && payload["args"].is_object()) {
+        args = payload["args"];
+    } else {
+        static const char* skipKeys[] = {"tool", "tool_name", "query", "top_k", "plan_id", "args"};
+        for (auto it = payload.begin(); it != payload.end(); ++it) {
+            bool skip = false;
+            for (const char* key : skipKeys) {
+                if (it.key() == key) {
+                    skip = true;
+                    break;
+                }
+            }
+            if (!skip) {
+                args[it.key()] = it.value();
+            }
+        }
+    }
+    if (payload.contains("operation") && payload["operation"].is_string()) {
+        args["operation"] = payload["operation"];
+    }
+    return args;
+}
+
+} // namespace
+
 static int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -112,7 +149,10 @@ StepResult WorkflowEngine::executeStep(const PlanStep& step, const std::string& 
             if (step.payload.contains("plan_id")) {
                 metric.plan_id = step.payload["plan_id"];
             }
-            metric.tool_name = (step.type == StepType::TOOL) ? step.payload.value("tool", "unknown") : "";
+            metric.tool_name = (step.type == StepType::TOOL) ? extractToolName(step.payload) : "";
+            if (metric.tool_name.empty()) {
+                metric.tool_name = "unknown";
+            }
             metric.latency_ms = result.latency_ms;
             metric.retry_count = result.final_retry_count;
             metric.status = success ? "success" : "failed";
@@ -173,8 +213,11 @@ StepResult WorkflowEngine::executeTool(const PlanStep& step) {
             return result;
         }
 
-        std::string toolName = step.payload.value("tool", "");
-        nlohmann::json toolArgs = step.payload.value("args", nlohmann::json::object());
+        std::string toolName = extractToolName(step.payload);
+        nlohmann::json toolArgs = extractToolArgs(step.payload);
+        if (!toolArgs.contains("confirmed")) {
+            toolArgs["confirmed"] = true;
+        }
 
         auto tools = toolRegistry_->getAvailableTools();
         const ITool* targetTool = nullptr;
@@ -235,7 +278,14 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step, const std::str
             return result;
         }
 
+        if (!extractToolName(step.payload).empty()) {
+            return executeTool(step);
+        }
+
         std::string query = step.payload.value("query", "");
+        if (query.empty()) {
+            query = step.description;
+        }
         int topK = step.payload.value("top_k", 5);
 
         if (query.empty()) {

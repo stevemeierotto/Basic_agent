@@ -43,11 +43,11 @@ public:
     void setInitialized(bool value) { initialized = value; }
     void setController(std::shared_ptr<Thoth::ExecutiveController> ctrl) { controller = ctrl; }
     void set_session_id(const std::string& id) { session_id = id; }
+    void syncPromptConfig();
 
     std::string processToolCall(const std::string& response, DecisionTrace& trace);
 
 private:
-    void syncPromptConfig();
     std::string session_id;
     static constexpr size_t DEFAULT_MAX_QUERY_LENGTH = 10000;
     static constexpr size_t DEFAULT_MAX_COMMAND_ARGS_LENGTH = 2048;
