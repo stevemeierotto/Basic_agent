@@ -6,6 +6,8 @@
 #include "../include/logger.h"
 #include "../include/grag_metrics.h"
 #include "../include/memory.h"
+#include "../include/chat_retrieval_boost.h"
+#include "../include/chat_retrieval_config.h"
 #include <iostream>
 #include <algorithm>
 #include <filesystem>
@@ -36,10 +38,16 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
                                                    const std::string& sId,
                                                    const std::vector<float>& g_emb,
                                                    const std::vector<float>& c_emb,
-                                                   const std::vector<float>& t_emb) {
+                                                   const std::vector<float>& t_emb,
+                                                   GragDiagnostics* outDiagnostics) {
     
     std::vector<CodeChunk> finalMatches;
-    if (!indexManager) return finalMatches;
+    if (!indexManager) {
+        if (outDiagnostics) {
+            *outDiagnostics = GragDiagnostics{};
+        }
+        return finalMatches;
+    }
 
     // Use passed embeddings if provided, otherwise fallback to internal state
     const std::vector<float>& activeGoal = g_emb.empty() ? goalEmbedding : g_emb;
@@ -59,17 +67,36 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
     }
 
     int recallK = std::max(topK * 4, 40);
+    if (activeGoal.empty()) {
+        recallK = std::max(topK * 12, 120);
+    }
     
     // Note: indexManager->retrieveChunks usually handles its own locking for the search,
     // but we need the chunks themselves to stay valid while we rescore.
     auto rawResults = indexManager->retrieveChunks(query, recallK);
 
-    if (rawResults.empty()) return finalMatches;
+    if (rawResults.empty()) {
+        if (outDiagnostics) {
+            *outDiagnostics = diagnostics;
+        }
+        return finalMatches;
+    }
 
     std::vector<std::pair<CodeChunk, float>> rag_results;
     for (const auto& [chunkCode, score] : rawResults) {
         const auto* chunk = indexManager->getChunkByCode(chunkCode);
         if (chunk) rag_results.push_back({*chunk, score});
+    }
+
+    if (activeGoal.empty() && !query.empty()) {
+        auto filenameTokens = Thoth::ChatRetrieval::extractFilenameTokens(query);
+        if (Thoth::ChatRetrieval::isUsageQuery(query)) {
+            filenameTokens.push_back("howto");
+        }
+        if (!filenameTokens.empty()) {
+            Thoth::ChatRetrieval::ensureFilenameCoverage(
+                indexManager, filenameTokens, query, rag_results, 3);
+        }
     }
 
     try {
@@ -91,12 +118,20 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
             rescored_results = GragScorer::rescore(rag_results, {}, {}, {}, {}, retrievalConfig, diagnostics, {}, tfidf, query, memory);
         }
 
-        for (const auto& [chunk, score] : rescored_results) {
-            finalMatches.push_back(chunk);
-        }
-
-        if (finalMatches.size() > static_cast<size_t>(topK)) {
-            finalMatches.resize(topK);
+        if (activeGoal.empty()) {
+            Thoth::ChatRetrieval::applyConversationalBoosts(rescored_results, query, diagnostics);
+            const auto selected = Thoth::ChatRetrieval::selectTopKForInjection(
+                rescored_results, topK, Thoth::ChatRetrieval::kMinChunkChars, diagnostics);
+            for (const auto& [chunk, score] : selected) {
+                finalMatches.push_back(chunk);
+            }
+        } else {
+            for (const auto& [chunk, score] : rescored_results) {
+                finalMatches.push_back(chunk);
+            }
+            if (finalMatches.size() > static_cast<size_t>(topK)) {
+                finalMatches.resize(topK);
+            }
         }
 
         diagnostics.plan_id = pId.empty() ? planId : pId;
@@ -112,10 +147,17 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
 
         logGragBenchmark(requestId, query, diagnostics);
 
+        if (outDiagnostics) {
+            *outDiagnostics = diagnostics;
+        }
+
     } catch (const std::exception& e) {
         std::cerr << "[RAG] Rescoring failed: " << e.what() << "\n";
         for (size_t i = 0; i < std::min(rag_results.size(), static_cast<size_t>(topK)); ++i) {
             finalMatches.push_back(rag_results[i].first);
+        }
+        if (outDiagnostics) {
+            *outDiagnostics = diagnostics;
         }
     }
 

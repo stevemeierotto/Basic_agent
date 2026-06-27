@@ -23,10 +23,20 @@ namespace PlanReuse {
     inline constexpr float kSuccessBoostThreshold = 0.8f;
     /** Added to cosine similarity when success_score >= kSuccessBoostThreshold. */
     inline constexpr float kSuccessBoost = 0.1f;
-    /** Default top-K returned by retrieveSimilarPlans (ExecutiveController uses this). */
-    inline constexpr int kDefaultRetrieveLimit = 3;
-    /** Max characters of plan outline JSON injected into planner context. */
+    /** Default top-K returned by retrieveSimilarPlans (planner gets one similar plan). */
+    inline constexpr int kDefaultRetrieveLimit = 1;
+    /** Minimum cosine similarity to inject a past plan (below this: inject nothing). */
+    inline constexpr float kMinSimilarityFloor = 0.55f;
+    /** Max characters of sanitized plan outline injected into planner context. */
     inline constexpr std::size_t kOutlineMaxChars = 500;
+}
+
+/**
+ * @brief Trajectory injection into planner prompts (separate from GRAG wt).
+ */
+namespace PlannerTrajectory {
+    /** Minimum cosine similarity to inject a trajectory snippet. */
+    inline constexpr float kMinSimilarityFloor = 0.55f;
 }
 
 /**

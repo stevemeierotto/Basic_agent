@@ -9,11 +9,113 @@
 #include "../include/llm_planner.h"
 #include "../include/logger.h"
 #include "../include/plan_parser.h"
+#include "../include/plan_validator.h"
 #include "../include/plan_reuse_config.h"
 #include "../include/goal_text_utils.h"
+#include "../include/planner_injection_config.h"
+#include "../include/grag_scorer.h"
+#include "../include/embedding_engine.h"
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <optional>
+
+namespace {
+
+std::optional<Memory::CognateStrategyRecord> selectRelevantStrategy(
+    Memory& memory,
+    EmbeddingEngine& engine,
+    const std::vector<float>& goal_embedding) {
+    auto strategies = memory.getAllStrategies();
+    if (strategies.empty() || goal_embedding.empty()) {
+        return std::nullopt;
+    }
+
+    float bestScore = -1.0f;
+    std::optional<Memory::CognateStrategyRecord> best;
+    for (const auto& strategy : strategies) {
+        const std::string embedText = strategy.description + " " + strategy.step_pattern_json;
+        const auto strategyEmbedding = engine.embed(embedText);
+        if (strategyEmbedding.empty()) {
+            continue;
+        }
+        const float score = GragScorer::cosine_similarity(goal_embedding, strategyEmbedding);
+        if (score > bestScore) {
+            bestScore = score;
+            best = strategy;
+        }
+    }
+
+    if (!best.has_value() || bestScore < Thoth::PlannerInjection::kMinStrategySimilarity) {
+        return std::nullopt;
+    }
+    return best;
+}
+
+std::string formatStrategyContext(const Memory::CognateStrategyRecord& strategy, float similarity) {
+    std::ostringstream oss;
+    oss << "[RELEVANT STRATEGY — similarity " << std::fixed << std::setprecision(2) << similarity << "]\n";
+    oss << "- Strategy ID: " << strategy.strategy_id << "\n";
+    oss << "  Description: " << strategy.description << "\n";
+    oss << "  Pattern: " << strategy.step_pattern_json << "\n";
+    oss << "  Historical Success Rate: " << (strategy.success_rate * 100.0f) << "%\n";
+    return oss.str();
+}
+
+std::optional<Plan> parsePlanWithValidation(const std::string& llm_response,
+                                            const std::string& plan_id,
+                                            const std::string& prompt_goal,
+                                            bool allow_tool_steps,
+                                            bool& depends_on_repaired,
+                                            bool& fallback_used,
+                                            std::string& validation_reason) {
+    depends_on_repaired = false;
+    fallback_used = false;
+
+    auto parsed = Thoth::PlanParser::parse(llm_response, plan_id);
+    if (!parsed.has_value()) {
+        validation_reason = "JSON parse failed";
+        return std::nullopt;
+    }
+
+    Plan candidate = parsed.value();
+    candidate.goal = prompt_goal;
+
+    auto validation = Thoth::PlanValidator::validateAndRepair(candidate, allow_tool_steps);
+    depends_on_repaired = validation.depends_on_repaired;
+    if (validation.valid) {
+        validation_reason = validation.depends_on_repaired ? "depends_on wired" : "ok";
+        return candidate;
+    }
+
+    validation_reason = validation.reason;
+    return std::nullopt;
+}
+
+Plan finalizePlanOrFallback(const std::string& plan_id,
+                            const std::string& prompt_goal,
+                            std::optional<Plan> validated,
+                            bool& fallback_used) {
+    if (validated.has_value()) {
+        Plan plan = validated.value();
+        plan.created_at_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
+        plan.updated_at_ms = plan.created_at_ms;
+        plan.status = PlanStatus::ACTIVE;
+        return plan;
+    }
+
+    fallback_used = true;
+    Plan plan = Thoth::PlanValidator::createFallbackPlan(plan_id, prompt_goal);
+    plan.created_at_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+    plan.updated_at_ms = plan.created_at_ms;
+    return plan;
+}
+
+} // namespace
 
 LLMPlanner::LLMPlanner(std::shared_ptr<Memory> memory, 
                        std::shared_ptr<RAGPipeline> rag, 
@@ -49,110 +151,122 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
 
     auto [prompt_goal, reuse_block] = Thoth::splitPlanReuseInjection(goal);
 
-    // Phase 3.2: Gather context for the prompt (Cognate V2)
     std::string strategy_context;
     std::string past_experience;
     std::size_t trajectory_count = 0;
-    std::size_t strategy_count = 0;
-    
+    float strategy_similarity = 0.0f;
+    bool strategy_injected = false;
+
     if (rag_ && rag_->engine && memory_) {
-        auto goal_embedding = rag_->engine->embed(prompt_goal);
-        
-        // 1. Past Trajectories (Experience-Guided Planning)
-        auto trajectories = memory_->retrieveSimilarTrajectories(goal_embedding, 3);
+        const auto goal_embedding = rag_->engine->embed(prompt_goal);
+
+        const auto strategy = selectRelevantStrategy(*memory_, *rag_->engine, goal_embedding);
+        if (strategy.has_value()) {
+            const std::string embedText = strategy->description + " " + strategy->step_pattern_json;
+            strategy_similarity = GragScorer::cosine_similarity(
+                goal_embedding, rag_->engine->embed(embedText));
+            strategy_context = formatStrategyContext(*strategy, strategy_similarity);
+            strategy_injected = true;
+
+            StructuredLogger::instance().log(LogLevel::Info, "planner", "STRATEGY_INJECTION",
+                "Injected top-1 scored strategy into planner prompt",
+                {{"goal", prompt_goal},
+                 {"strategy_id", strategy->strategy_id},
+                 {"similarity", strategy_similarity},
+                 {"min_similarity", Thoth::PlannerInjection::kMinStrategySimilarity}});
+        }
+
+        auto trajectories = memory_->retrieveSimilarTrajectories(
+            goal_embedding, Thoth::PlannerInjection::kMaxTrajectoryInject);
         if (!trajectories.empty()) {
             trajectory_count = trajectories.size();
             std::ostringstream traj_oss;
-            traj_oss << "[PAST EXPERIENCE - RELEVANT TRAJECTORIES]\n";
-            for (const auto& t : trajectories) {
-                traj_oss << "- Goal: " << t.goal << "\n  Trajectory: " << t.trajectory_json << "\n\n";
-            }
+            traj_oss << "[PAST EXPERIENCE — RELEVANT TRAJECTORY]\n";
+            const auto& t = trajectories.front();
+            traj_oss << "- Goal: " << Thoth::cleanGoalForStorage(t.goal) << "\n";
+            traj_oss << "  Success: " << t.success_score << "\n";
             past_experience = traj_oss.str();
-            
-            StructuredLogger::instance().log(LogLevel::Info, "planner", "TRAJECTORY_INJECTION", 
-                "Injected " + std::to_string(trajectories.size()) + " trajectories as prior experience", 
-                {{"goal", goal}, {"trajectory_count", trajectories.size()}});
-        }
 
-        // 2. Emerged Strategies (The Learned proof)
-        // Thesis Differentiator: Prioritize strategies promoted by 80%/3-run threshold
-        auto strats = memory_->getAllStrategies();
-        if (!strats.empty()) {
-            strategy_count = strats.size();
-            std::ostringstream strat_oss;
-            strat_oss << "[LEARNED STRATEGIES - HIGH SUCCESS PATTERNS]\n";
-            for (const auto& s : strats) {
-                strat_oss << "- Strategy ID: " << s.strategy_id << "\n";
-                strat_oss << "  Description: " << s.description << "\n";
-                strat_oss << "  Pattern: " << s.step_pattern_json << "\n";
-                strat_oss << "  Historical Success Rate: " << (s.success_rate * 100.0f) << "%\n\n";
-            }
-            strategy_context = strat_oss.str();
-
-            StructuredLogger::instance().log(LogLevel::Info, "planner", "STRATEGY_INJECTION", 
-                "Injected " + std::to_string(strats.size()) + " learned strategies into prompt", 
-                {{"goal", goal}, {"strategy_count", strats.size()}});
+            StructuredLogger::instance().log(LogLevel::Info, "planner", "TRAJECTORY_INJECTION",
+                "Injected scored trajectory into planner prompt",
+                {{"goal", prompt_goal}, {"trajectory_count", trajectory_count}});
         }
     }
 
     if (!reuse_block.empty()) {
+        const std::string cappedReuse =
+            Thoth::capInjectionText(reuse_block, Thoth::PlannerInjection::kMaxPlanReuseChars);
         if (!past_experience.empty()) {
             past_experience += "\n\n";
         }
-        past_experience += reuse_block;
+        past_experience += cappedReuse;
     }
 
     const bool plan_reuse_in_goal = !reuse_block.empty();
+
+    Thoth::PlannerPromptMetrics prompt_metrics;
+    std::string prompt = prompt_factory_->buildPlanPrompt(
+        prompt_goal, strategy_context, past_experience, &prompt_metrics);
+    if (plan_reuse_in_goal) {
+        prompt_metrics.plan_reuse_bytes = reuse_block.size();
+    }
 
     StructuredLogger::instance().log(
         LogLevel::Info,
         "planner",
         "PLANNER_CONTEXT_ASSEMBLY",
-        "Assembled planner prompt context from memory subsystems",
+        "Assembled planner prompt with protected core sections",
         {
             {"goal", prompt_goal},
+            {"rules_bytes", prompt_metrics.rules_bytes},
+            {"schema_bytes", prompt_metrics.schema_bytes},
+            {"goal_bytes", prompt_metrics.goal_bytes},
+            {"strategy_bytes", prompt_metrics.strategy_bytes},
+            {"trajectory_bytes", prompt_metrics.trajectory_bytes},
+            {"plan_reuse_bytes", prompt_metrics.plan_reuse_bytes},
+            {"total_bytes", prompt_metrics.total_bytes},
+            {"experience_dropped", prompt_metrics.experience_dropped},
+            {"strategy_injection", strategy_injected},
+            {"strategy_similarity", strategy_similarity},
             {"trajectory_injection", trajectory_count > 0},
             {"trajectory_count", trajectory_count},
-            {"trajectory_min_episode_steps", Thoth::TrajectoryReuse::kMinEpisodeStepsForEmbedding},
-            {"strategy_injection", strategy_count > 0},
-            {"strategy_count", strategy_count},
             {"plan_reuse_in_goal", plan_reuse_in_goal},
-            {"plan_reuse_marker", "[RELEVANT PAST APPROACHES"},
-            {"past_plans_table", plan_reuse_in_goal ? "past_plans (injected by ExecutiveController)" : "not injected"},
-            {"cognate_plans_table", "cognate_plans (active plan snapshots via save_plan)"}
         });
 
-    std::string prompt = prompt_factory_->buildPlanPrompt(prompt_goal, strategy_context, past_experience);
     std::string llm_response = llm_->query(prompt);
 
-    auto parsed_plan = Thoth::PlanParser::parse(llm_response, plan.plan_id);
-    
-    // Step 9.4 Retry logic
-    if (!parsed_plan.has_value()) {
-        StructuredLogger::instance().log(LogLevel::Warn, "planner", "plan_parse_failed", "First plan parsing attempt failed, retrying...", {{"llm_response", llm_response}});
-        
-        std::string retry_prompt = prompt + "\n\nERROR: Your previous response was not a valid JSON plan. Please correct it and follow the schema exactly.\nPrevious Response:\n" + llm_response;
+    bool depends_on_repaired = false;
+    bool fallback_used = false;
+    std::string validation_reason;
+    auto validated = parsePlanWithValidation(
+        llm_response, plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
+
+    if (!validated.has_value()) {
+        StructuredLogger::instance().log(LogLevel::Warn, "planner", "plan_validation_failed",
+            "First plan attempt failed (" + validation_reason + "), retrying...",
+            {{"llm_response", llm_response}, {"reason", validation_reason}});
+
+        std::string retry_prompt = prompt + "\n\nERROR: " + validation_reason +
+            ". Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\nPrevious Response:\n" +
+            llm_response;
         llm_response = llm_->query(retry_prompt);
-        parsed_plan = Thoth::PlanParser::parse(llm_response, plan.plan_id);
+        validated = parsePlanWithValidation(
+            llm_response, plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
     }
 
-    if (parsed_plan.has_value()) {
-        plan = parsed_plan.value();
-        plan.goal = prompt_goal;
-        plan.created_at_ms = nowMs();
-        plan.updated_at_ms = plan.created_at_ms;
-        plan.status = PlanStatus::ACTIVE;
+    plan = finalizePlanOrFallback(plan.plan_id, prompt_goal, validated, fallback_used);
 
-        StructuredLogger::instance().log(
-            LogLevel::Info,
-            "planner",
-            "plan_generated",
-            "LLMPlanner created a dynamic multi-step plan",
-            {{"plan_id", plan.plan_id}, {"step_count", plan.steps.size()}});
-    } else {
-        plan.status = PlanStatus::FAILED;
-        StructuredLogger::instance().log(LogLevel::Error, "planner", "plan_failed", "Plan generation failed after retry", {{"goal", prompt_goal}});
-    }
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "planner",
+        fallback_used ? "plan_fallback_used" : "plan_generated",
+        fallback_used ? "Used programmatic RETRIEVAL→LLM fallback plan"
+                      : "LLMPlanner created a validated plan",
+        {{"plan_id", plan.plan_id},
+         {"step_count", plan.steps.size()},
+         {"depends_on_repaired", depends_on_repaired},
+         {"fallback_used", fallback_used},
+         {"validation_reason", validation_reason}});
 
     save_plan(plan);
     return plan;
@@ -166,40 +280,55 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
         return revised;
     }
 
-    auto [prompt_goal, reuse_block] = Thoth::splitPlanReuseInjection(existing_plan.goal);
-    std::string revision_goal = prompt_goal;
-    if (!reuse_block.empty()) {
-        revision_goal += "\n\n";
-        revision_goal += reuse_block;
-    }
+    const auto [prompt_goal, _] = Thoth::splitPlanReuseInjection(existing_plan.goal);
 
-    std::string prompt = prompt_factory_->buildRevisionPrompt(revision_goal, 
-                                                               existing_plan.to_json().dump(), 
-                                                               step_result.dump());
-    
+    Thoth::PlannerPromptMetrics prompt_metrics;
+    std::string prompt = prompt_factory_->buildRevisionPrompt(
+        prompt_goal,
+        existing_plan.to_json().dump(),
+        step_result.dump(),
+        &prompt_metrics);
+
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "planner",
+        "PLANNER_REVISION_CONTEXT",
+        "Assembled revision prompt (failure context only, no plan-reuse injection)",
+        {
+            {"plan_id", existing_plan.plan_id},
+            {"rules_bytes", prompt_metrics.rules_bytes},
+            {"schema_bytes", prompt_metrics.schema_bytes},
+            {"goal_bytes", prompt_metrics.goal_bytes},
+            {"total_bytes", prompt_metrics.total_bytes},
+        });
+
     std::string llm_response = llm_->query(prompt);
 
-    auto parsed_plan = Thoth::PlanParser::parse(llm_response, existing_plan.plan_id);
-    
-    // Retry logic
-    if (!parsed_plan.has_value()) {
-        StructuredLogger::instance().log(LogLevel::Warn, "planner", "revision_parse_failed", "First plan revision attempt failed, retrying...", {{"llm_response", llm_response}});
-        
-        std::string retry_prompt = prompt + "\n\nERROR: Your previous response was not a valid JSON plan. Please correct it and follow the schema exactly.\nPrevious Response:\n" + llm_response;
+    bool depends_on_repaired = false;
+    bool fallback_used = false;
+    std::string validation_reason;
+    auto validated = parsePlanWithValidation(
+        llm_response, existing_plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
+
+    if (!validated.has_value()) {
+        StructuredLogger::instance().log(LogLevel::Warn, "planner", "revision_validation_failed",
+            "First revision attempt failed (" + validation_reason + "), retrying...",
+            {{"llm_response", llm_response}, {"reason", validation_reason}});
+
+        std::string retry_prompt = prompt + "\n\nERROR: " + validation_reason +
+            ". Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\nPrevious Response:\n" +
+            llm_response;
         llm_response = llm_->query(retry_prompt);
-        parsed_plan = Thoth::PlanParser::parse(llm_response, existing_plan.plan_id);
+        validated = parsePlanWithValidation(
+            llm_response, existing_plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
     }
 
-    if (parsed_plan.has_value()) {
-        Plan revised = parsed_plan.value();
+    if (validated.has_value()) {
+        Plan revised = validated.value();
         revised.goal = prompt_goal;
-        revised.created_at_ms = existing_plan.created_at_ms; // Maintain creation time
+        revised.created_at_ms = existing_plan.created_at_ms;
         revised.updated_at_ms = nowMs();
         revised.status = PlanStatus::ACTIVE;
-        
-        // Reset current_index if the new plan starts from scratch or a new state
-        // For now, we assume the LLM generates the REMAINING steps or a FULL new plan.
-        // We set index to 0 for the new plan structure.
         revised.current_index = 0;
 
         StructuredLogger::instance().log(
@@ -207,17 +336,26 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
             "planner",
             "plan_revised",
             "LLMPlanner revised the existing plan",
-            {{"plan_id", revised.plan_id}, {"step_count", revised.steps.size()}});
+            {{"plan_id", revised.plan_id},
+             {"step_count", revised.steps.size()},
+             {"depends_on_repaired", depends_on_repaired},
+             {"fallback_used", false}});
 
         save_plan(revised);
         return revised;
-    } else {
-        StructuredLogger::instance().log(LogLevel::Error, "planner", "revision_failed", "Plan revision failed after retry", {{"plan_id", existing_plan.plan_id}});
-        Plan revised = existing_plan;
-        revised.updated_at_ms = nowMs();
-        save_plan(revised);
-        return revised;
     }
+
+    StructuredLogger::instance().log(
+        LogLevel::Warn,
+        "planner",
+        "revision_fallback_kept",
+        "Revision validation failed; keeping existing plan",
+        {{"plan_id", existing_plan.plan_id}, {"reason", validation_reason}});
+
+    Plan revised = existing_plan;
+    revised.updated_at_ms = nowMs();
+    save_plan(revised);
+    return revised;
 }
 
 void LLMPlanner::save_plan(const Plan& plan) {
@@ -228,13 +366,12 @@ void LLMPlanner::save_plan(const Plan& plan) {
     rec.goal = plan.goal;
     rec.plan_json = plan.to_json().dump();
     rec.status = static_cast<int>(plan.status);
-    rec.success_score = 0.0f; // Default for new/active plans
+    rec.success_score = 0.0f;
     rec.created_at = plan.created_at_ms;
     rec.updated_at = plan.updated_at_ms;
 
-    // Generate goal embedding (Phase 3.1)
     if (rag_ && rag_->engine) {
-        rec.embedding = rag_->engine->embed(plan.goal);
+        rec.embedding = rag_->engine->embed(Thoth::cleanGoalForStorage(plan.goal));
     }
 
     memory_->saveCognatePlan(rec);
@@ -251,4 +388,3 @@ void LLMPlanner::save_plan(const Plan& plan) {
             {"has_embedding", !rec.embedding.empty()}
         });
 }
-

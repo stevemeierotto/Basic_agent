@@ -10,6 +10,7 @@
 #include "../include/tools.h"
 #include "../include/rag.h"
 #include "../include/decision_trace.h"
+#include "../include/grag_diagnostics.h"
 #include "../include/memory.h"
 #include "../include/step_metrics_repository.h"
 #include "../include/llm_interface.h"
@@ -379,7 +380,9 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step, const std::str
             return result;
         }
 
-        auto chunks = ragPipeline_->retrieveRelevant(query, {}, topK, "", planId, step.step_id);
+        GragDiagnostics diagnostics;
+        auto chunks = ragPipeline_->retrieveRelevant(
+            query, {}, topK, "", planId, step.step_id, {}, {}, {}, &diagnostics);
         
         nlohmann::json chunksJson = nlohmann::json::array();
         for (const auto& chunk : chunks) {
@@ -393,10 +396,18 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step, const std::str
         if (chunks.empty()) {
             result.success = false;
             result.error_message = "No relevant chunks found for query: " + query;
-            result.data = {{"status", "error"}, {"error_message", result.error_message}};
+            result.data = {{"status", "error"},
+                           {"error_message", result.error_message},
+                           {"grag_alpha", diagnostics.alpha},
+                           {"grag_routing_mode", diagnostics.routing_mode},
+                           {"retrieved_chunk_count", 0}};
         } else {
             result.success = true;
-            result.data = {{"status", "success"}, {"data", {{"chunks", chunksJson}}}};
+            result.data = {{"status", "success"},
+                           {"data", {{"chunks", chunksJson}}},
+                           {"grag_alpha", diagnostics.alpha},
+                           {"grag_routing_mode", diagnostics.routing_mode},
+                           {"retrieved_chunk_count", static_cast<int>(chunks.size())}};
         }
     } catch (const std::exception& e) {
         result.success = false;

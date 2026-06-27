@@ -159,6 +159,10 @@ protected:
     nlohmann::json log_plan_history_persisted(float success_score, const Memory::PastPlanRecord& past_record);
     nlohmann::json log_reflection_replan(float score, int reflection_cycle);
 
+    void reset_goal_metrics_unlocked();
+    void record_step_metrics_unlocked(const PlanStep& step, const StepResult& result);
+    void emit_goal_cognitive_metrics_unlocked(const std::string& outcome, float trajectory_score);
+
     std::shared_ptr<IPlanner> planner_;
     std::shared_ptr<ToolRegistry> tool_registry_;
     std::shared_ptr<RAGPipeline> rag_;
@@ -187,6 +191,16 @@ protected:
     const int MAX_REFLECTIONS = 2;
     std::string session_id_;
     bool plan_reused_ = false;
+
+    std::int64_t goal_started_at_ms_ = 0;
+    std::int64_t planning_time_ms_ = 0;
+    std::int64_t retrieval_time_ms_ = 0;
+    std::int64_t llm_synthesis_time_ms_ = 0;
+    int retrieved_chunk_count_ = 0;
+    float last_grag_alpha_ = 0.0f;
+    std::string last_grag_routing_mode_;
+    float final_trajectory_score_ = 0.0f;
+
     ControllerState state_ = ControllerState::IDLE;
     bool paused_ = false;
     bool running_ = false;

@@ -181,6 +181,70 @@ void IndexManager::clear() {
     store.clear();
 }
 
+void IndexManager::setActiveCorpusFiles(const std::vector<std::string>& filePaths) {
+    std::unique_lock lock(chunksMutex);
+    activeCorpusFiles_.clear();
+    activeCorpusRoots_.clear();
+    for (const auto& path : filePaths) {
+        try {
+            const fs::path normalized = fs::absolute(path).lexically_normal();
+            if (fs::is_directory(normalized)) {
+                activeCorpusRoots_.push_back(normalized.string());
+            } else {
+                activeCorpusFiles_.insert(normalized.string());
+            }
+        } catch (...) {
+            activeCorpusFiles_.insert(path);
+        }
+    }
+}
+
+bool IndexManager::chunkInActiveCorpus(const CodeChunk& chunk) const {
+    if (activeCorpusFiles_.empty() && activeCorpusRoots_.empty()) {
+        return true;
+    }
+    if (activeCorpusFiles_.count(chunk.fileName) > 0) {
+        return true;
+    }
+    for (const auto& root : activeCorpusRoots_) {
+        if (chunk.fileName.rfind(root, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::pair<std::string, float>> IndexManager::retrieveChunks(const std::string& query, int topK) {
+    const bool filterCorpus = !activeCorpusFiles_.empty() || !activeCorpusRoots_.empty();
+    const int recallK = filterCorpus ? std::max(topK * 8, 80) : std::max(topK * 2, topK);
+    auto rawResults = store.retrieve(query, recallK);
+
+    if (!filterCorpus) {
+        if (static_cast<int>(rawResults.size()) > topK) {
+            rawResults.resize(static_cast<std::size_t>(topK));
+        }
+        return rawResults;
+    }
+
+    std::shared_lock<std::shared_mutex> lock(chunksMutex);
+    std::vector<std::pair<std::string, float>> filtered;
+    filtered.reserve(rawResults.size());
+    for (const auto& entry : rawResults) {
+        auto it = codeToChunkIndex.find(entry.first);
+        if (it == codeToChunkIndex.end() || it->second >= chunks.size()) {
+            continue;
+        }
+        if (!chunkInActiveCorpus(chunks[it->second])) {
+            continue;
+        }
+        filtered.push_back(entry);
+        if (static_cast<int>(filtered.size()) >= topK) {
+            break;
+        }
+    }
+    return filtered;
+}
+
 void IndexManager::addChunk(CodeChunk&& chunk) {
     if (chunk.code.empty()) {
         return;

@@ -20,6 +20,7 @@
 #include "config.h"
 #include "grag_scorer.h"
 #include "controller_event.h"
+#include "grag_diagnostics.h"
 
 class Memory;
 
@@ -39,7 +40,8 @@ public:
                                             const std::string& stepId = "",
                                             const std::vector<float>& g_emb = {},
                                             const std::vector<float>& c_emb = {},
-                                            const std::vector<float>& t_emb = {});
+                                            const std::vector<float>& t_emb = {},
+                                            GragDiagnostics* outDiagnostics = nullptr);
 
     // Simple textual query
     std::string query(const std::string& queryStr);

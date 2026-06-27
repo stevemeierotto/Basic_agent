@@ -16,6 +16,7 @@
 #include "../include/step_metrics_repository.h"
 #include "../include/file_handler.h"
 #include "../include/goal_text_utils.h"
+#include "../include/cognitive_metrics.h"
 #include <chrono>
 #include <thread>
 #include <iostream>
@@ -110,6 +111,7 @@ std::string ExecutiveController::execute_goal(const std::string& goal) {
         revisions_count_ = 0;
         reflection_count_ = 0;
         plan_reused_ = false;
+        reset_goal_metrics_unlocked();
         transition_to_unlocked(ControllerState::PLANNING);
         
         current_plan_ = Plan();
@@ -135,7 +137,9 @@ std::string ExecutiveController::execute_goal(const std::string& goal) {
             }
         }
 
+        const auto planStart = nowMs();
         current_plan_ = planner_->create_plan(enhanced_goal);
+        planning_time_ms_ += nowMs() - planStart;
         current_plan_.created_at_ms = nowMs();
         current_plan_.updated_at_ms = current_plan_.created_at_ms;
         
@@ -186,6 +190,7 @@ void ExecutiveController::abort() {
         transition_to_unlocked(ControllerState::ABORTED);
         stop_requested_ = true;
         current_plan_.updated_at_ms = nowMs();
+        emit_goal_cognitive_metrics_unlocked("aborted", final_trajectory_score_);
         persist_current_plan_unlocked();
         
         // Releasing lock to emit event (prevents deadlocks)
@@ -429,26 +434,16 @@ void ExecutiveController::decide_transition() {
                 store_plan_history(score);
                 transition_to_unlocked(ControllerState::PLANNING);
                 
-                // Re-run planning with context
-                std::string reflection_goal = current_plan_.goal + " (Reflection: previous attempt had low success score " + std::to_string(score) + ")";
-                nlohmann::json plan_reuse_meta;
+                // Re-run planning with failure context only (no plan-reuse injection)
+                const std::string reflection_goal =
+                    Thoth::cleanGoalForStorage(current_plan_.goal) +
+                    " (Reflection: previous attempt had low success score " + std::to_string(score) + ")";
 
-                if (memory_ && rag_) {
-                    auto past_plans = memory_->retrieveSimilarPlans(goal_embedding_, Thoth::PlanReuse::kDefaultRetrieveLimit);
-                    if (!past_plans.empty()) {
-                        reflection_goal += build_plan_reuse_context(past_plans);
-                        plan_reused_ = true;
-                        plan_reuse_meta = log_plan_reuse_injection(past_plans, "reflection_replan");
-                    }
-                }
-                
-                // We must unlock to call planner
                 lock.unlock();
                 emit_event(EventType::REFLECTION_REPLAN, "", reflection_meta);
-                if (!plan_reuse_meta.is_null()) {
-                    emit_event(EventType::PLAN_REUSE_INJECTION, "", plan_reuse_meta);
-                }
+                const auto planStart = nowMs();
                 auto new_plan = planner_->create_plan(reflection_goal);
+                planning_time_ms_ += nowMs() - planStart;
                 lock.lock();
                 
                 current_plan_ = new_plan;
@@ -471,8 +466,13 @@ void ExecutiveController::decide_transition() {
                 return;
             }
 
+            final_trajectory_score_ = score;
+
             transition_to_unlocked((all_successful && !current_plan_.steps.empty()) ? ControllerState::COMPLETED : ControllerState::FAILED);
             current_plan_.updated_at_ms = nowMs();
+
+            emit_goal_cognitive_metrics_unlocked(
+                (all_successful && !current_plan_.steps.empty()) ? "completed" : "failed", score);
             
             auto history_meta = store_plan_history(score);
             if (memory_) memory_->deleteActivePlan(current_plan_.plan_id);
@@ -575,6 +575,8 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
     step.status = result.success ? StepStatus::SUCCESS : StepStatus::FAILED;
     step.completed_at_ms = nowMs();
     current_plan_.updated_at_ms = step.completed_at_ms;
+
+    record_step_metrics_unlocked(step, result);
 
     // Record Step in Trajectory (Phase 7.3)
     record_trajectory_step(step, result);
@@ -680,6 +682,7 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
         } else if (step.failure_policy.abort_on_failure) {
             transition_to_unlocked(ControllerState::FAILED);
             current_plan_.updated_at_ms = nowMs();
+            emit_goal_cognitive_metrics_unlocked("failed", 0.0f);
             if (memory_) memory_->deleteActivePlan(current_plan_.plan_id);
             lock.unlock();
             emit_event(EventType::PLAN_FAILED);
@@ -1036,7 +1039,7 @@ nlohmann::json ExecutiveController::store_plan_history(float success_score) {
 
     Memory::PastPlanRecord record;
     record.plan_id = current_plan_.plan_id;
-    record.goal = current_plan_.goal;
+    record.goal = Thoth::cleanGoalForStorage(current_plan_.goal);
     record.outline = current_plan_.to_json().dump();
     record.success_score = success_score;
     record.duration_ms = nowMs() - current_plan_.created_at_ms;
@@ -1105,6 +1108,76 @@ nlohmann::json ExecutiveController::store_plan_history(float success_score) {
     return history_meta;
 }
 
+void ExecutiveController::reset_goal_metrics_unlocked() {
+    goal_started_at_ms_ = nowMs();
+    planning_time_ms_ = 0;
+    retrieval_time_ms_ = 0;
+    llm_synthesis_time_ms_ = 0;
+    retrieved_chunk_count_ = 0;
+    last_grag_alpha_ = 0.0f;
+    last_grag_routing_mode_.clear();
+    final_trajectory_score_ = 0.0f;
+}
+
+void ExecutiveController::record_step_metrics_unlocked(const PlanStep& step, const StepResult& result) {
+    if (step.type == StepType::RETRIEVAL) {
+        retrieval_time_ms_ += result.latency_ms;
+        if (result.data.contains("grag_alpha") && result.data["grag_alpha"].is_number()) {
+            last_grag_alpha_ = result.data["grag_alpha"].get<float>();
+        }
+        if (result.data.contains("grag_routing_mode") && result.data["grag_routing_mode"].is_string()) {
+            last_grag_routing_mode_ = result.data["grag_routing_mode"].get<std::string>();
+        }
+        if (result.data.contains("retrieved_chunk_count") && result.data["retrieved_chunk_count"].is_number()) {
+            retrieved_chunk_count_ += result.data["retrieved_chunk_count"].get<int>();
+        } else if (result.data.contains("data") && result.data["data"].is_object() &&
+                   result.data["data"].contains("chunks") && result.data["data"]["chunks"].is_array()) {
+            retrieved_chunk_count_ +=
+                static_cast<int>(result.data["data"]["chunks"].size());
+        }
+    } else if (step.type == StepType::LLM) {
+        llm_synthesis_time_ms_ += result.latency_ms;
+    }
+}
+
+void ExecutiveController::emit_goal_cognitive_metrics_unlocked(const std::string& outcome,
+                                                               float trajectory_score) {
+    if (current_plan_.plan_id.empty()) {
+        return;
+    }
+
+    const std::int64_t finished = nowMs();
+    GoalCognitiveMetricsRecord record;
+    record.plan_id = current_plan_.plan_id;
+    record.session_id = session_id_;
+    record.goal = cleanGoalForStorage(current_plan_.goal);
+    record.outcome = outcome;
+    record.goal_started_at_ms =
+        goal_started_at_ms_ > 0 ? goal_started_at_ms_ : current_plan_.created_at_ms;
+    record.goal_finished_at_ms = finished;
+    record.total_wall_clock_ms =
+        record.goal_started_at_ms > 0 ? finished - record.goal_started_at_ms : 0;
+    record.planning_time_ms = planning_time_ms_;
+    record.retrieval_time_ms = retrieval_time_ms_;
+    record.llm_synthesis_time_ms = llm_synthesis_time_ms_;
+    record.step_count = static_cast<int>(current_plan_.steps.size());
+    record.retrieved_chunk_count = retrieved_chunk_count_;
+    record.grag_alpha = last_grag_alpha_;
+    record.grag_routing_mode = last_grag_routing_mode_;
+    record.trajectory_score = trajectory_score;
+    record.final_success_score = trajectory_score;
+    record.reflection_count = reflection_count_;
+    record.revisions_count = revisions_count_;
+    record.plan_reused = plan_reused_;
+
+    CognitiveMetricsLogger::instance().logGoalMetrics(record);
+    StructuredLogger::instance().log(LogLevel::Info,
+                                     "controller",
+                                     "GOAL_COGNITIVE_METRICS",
+                                     "Per-goal cognitive metrics recorded",
+                                     CognitiveMetricsLogger::toJson(record));
+}
+
 namespace {
 
 int countStepsFromOutline(const std::string& outline) {
@@ -1145,10 +1218,10 @@ std::string ExecutiveController::build_plan_reuse_context(const std::vector<Memo
         << Thoth::PlanReuse::kMinSuccessScore << "]\n";
     for (const auto& p : plans) {
         oss << "- Plan ID: " << p.plan_id << "\n";
-        oss << "  Goal: " << p.goal << "\n";
+        oss << "  Goal: " << Thoth::cleanGoalForStorage(p.goal) << "\n";
         oss << "  Success: " << std::fixed << std::setprecision(2) << p.success_score;
         oss << " | Steps: " << countStepsFromOutline(p.outline) << "\n";
-        oss << "  Outline: " << truncateOutline(p.outline) << "\n";
+        oss << "  Outline: " << Thoth::sanitizePlanOutline(p.outline) << "\n";
     }
     return oss.str();
 }

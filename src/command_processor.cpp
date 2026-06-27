@@ -6,6 +6,9 @@
 #include "standard_execution_mode.h"
 #include "scientific_execution_mode.h"
 #include "decision_trace.h"
+#include "chat_rag_observability.h"
+#include "chat_retrieval_boost.h"
+#include "chat_query_utils.h"
 
 #include <algorithm>
 #include <chrono>
@@ -64,7 +67,124 @@ std::vector<nlohmann::json> readBenchmarkHistory(std::size_t limit) {
     }
     return entries;
 }
+
+std::string fileBasename(const std::string& path) {
+    try {
+        return fs::path(path).filename().string();
+    } catch (...) {
+        return path;
+    }
 }
+
+float safeRatio(std::size_t numerator, std::size_t denominator) {
+    if (denominator == 0) {
+        return 0.0f;
+    }
+    return static_cast<float>(numerator) / static_cast<float>(denominator);
+}
+
+std::vector<Thoth::ChatRagDocumentMetric> buildDocumentMetrics(
+    const std::vector<CodeChunk>& chunks,
+    const GragDiagnostics& diagnostics) {
+    std::vector<Thoth::ChatRagDocumentMetric> documents;
+    documents.reserve(chunks.size());
+
+    for (std::size_t i = 0; i < chunks.size(); ++i) {
+        Thoth::ChatRagDocumentMetric doc;
+        doc.rank = static_cast<int>(i) + 1;
+        doc.file = fileBasename(chunks[i].fileName);
+        doc.chunk_id = doc.rank;
+        doc.start_line = chunks[i].startLine;
+        doc.end_line = chunks[i].endLine;
+        doc.chars = chunks[i].code.size();
+        if (i < diagnostics.breakdowns.size()) {
+            doc.score = diagnostics.breakdowns[i].final_score;
+            if (doc.file.empty()) {
+                doc.file = fileBasename(diagnostics.breakdowns[i].file_name);
+            }
+        }
+        documents.push_back(doc);
+    }
+    return documents;
+}
+
+int countUniqueDocuments(const std::vector<Thoth::ChatRagDocumentMetric>& documents) {
+    std::unordered_map<std::string, bool> seen;
+    for (const auto& doc : documents) {
+        seen[doc.file] = true;
+    }
+    return static_cast<int>(seen.size());
+}
+
+Thoth::ChatRagContextRecord buildChatRagContextRecord(
+    const std::string& requestId,
+    const std::string& query,
+    int topK,
+    const std::string& ragContext,
+    const std::string& finalPrompt,
+    const std::vector<CodeChunk>& chunks,
+    const GragDiagnostics& diagnostics,
+    const Thoth::ConversationPromptMetrics& promptMetrics,
+    const std::string& llmModel,
+    const std::string& groundingMode) {
+    Thoth::ChatRagContextRecord record;
+    record.request_id = requestId;
+    record.query = query;
+    record.top_k = topK;
+    record.documents = buildDocumentMetrics(chunks, diagnostics);
+    record.retrieved_chars = ragContext.size();
+    record.conversation_history_chars = promptMetrics.conversation_history_chars;
+    record.tool_schema_chars = promptMetrics.tool_schema_chars_in_final;
+    record.memory_context_chars = promptMetrics.memory_context_chars;
+    record.system_prompt_chars = promptMetrics.system_prompt_chars;
+    record.assembled_conversation_chars = promptMetrics.assembled_prompt_chars;
+    record.final_prompt_chars = finalPrompt.size();
+    record.prompt_before_truncation_chars = promptMetrics.assembled_prompt_chars + promptMetrics.rag_context_chars;
+    record.prompt_after_truncation_chars = promptMetrics.final_prompt_chars;
+    record.truncated = promptMetrics.truncated;
+    record.truncated_section = promptMetrics.truncated_section;
+    record.llm_model = llmModel;
+    record.grounding_mode = groundingMode;
+
+    if (!ragContext.empty()) {
+        record.rag_wrapper_chars = promptMetrics.rag_context_chars +
+                                   std::char_traits<char>::length("[RAG Context]\n") +
+                                   std::char_traits<char>::length("[User Query]\n") + 1;
+    }
+
+    const std::size_t groundingChars = promptMetrics.rag_context_chars + promptMetrics.grounding_rules_chars;
+    record.grounding_ratio = safeRatio(groundingChars, record.final_prompt_chars);
+    record.tool_ratio = safeRatio(record.tool_schema_chars, record.final_prompt_chars);
+    record.history_ratio = safeRatio(record.conversation_history_chars, record.final_prompt_chars);
+    record.memory_ratio = safeRatio(record.memory_context_chars, record.final_prompt_chars);
+    return record;
+}
+
+void emitChatRagContext(const Thoth::ChatRagContextRecord& record) {
+    const nlohmann::json payload = Thoth::ChatRagLogger::contextToJson(record);
+    Thoth::ChatRagLogger::instance().logContext(record);
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "command_processor",
+        "CHAT_RAG_CONTEXT",
+        "Chat RAG context assembled",
+        payload,
+        record.request_id);
+}
+
+void emitChatRagResponse(const Thoth::ChatRagResponseRecord& record) {
+    const nlohmann::json payload = Thoth::ChatRagLogger::responseToJson(record);
+    Thoth::ChatRagLogger::instance().logResponse(record);
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "command_processor",
+        "CHAT_RAG_RESPONSE",
+        "Chat RAG response recorded",
+        payload,
+        record.request_id);
+}
+
+} // namespace
 
 static std::string backendToString(LLMBackend backend) {
     switch (backend) {
@@ -246,9 +366,37 @@ std::string CommandProcessor::processQuery(const std::string& input) {
         }
 
         if (indexManager && indexManager->getChunks().empty()) {
+            Thoth::ConversationPromptMetrics promptMetrics;
+            PromptFactory::ConversationBuildOptions options;
+            options.includeTools = config && config->enable_tools && Thoth::looksLikeToolIntent(input);
+            const std::string finalPrompt =
+                promptFactory.buildChatPrompt(input, "", false, options, &promptMetrics);
+            std::string llmModel = llm.getSelectedModel();
+            if (llmModel.empty() && config) {
+                llmModel = config->llm_model;
+            }
+
+            Thoth::ChatRagContextRecord contextRecord = buildChatRagContextRecord(
+                trace.requestId,
+                input,
+                DEFAULT_RAG_TOP_K,
+                "",
+                finalPrompt,
+                {},
+                GragDiagnostics{},
+                promptMetrics,
+                llmModel,
+                "no_index");
+            emitChatRagContext(contextRecord);
+            traceLogger.addStage(
+                trace,
+                "chat_rag_context",
+                true,
+                "Chat RAG context metrics recorded (no index)",
+                Thoth::ChatRagLogger::contextToJson(contextRecord));
+
             const auto generationStartMs = nowMs();
-            std::string convPrompt = promptFactory.buildConversationPrompt(input);
-            std::string response = llm.query(convPrompt);
+            std::string response = llm.query(finalPrompt);
             const auto generationLatencyMs = elapsedMs(generationStartMs);
 
             traceLogger.addStage(
@@ -273,6 +421,20 @@ std::string CommandProcessor::processQuery(const std::string& input) {
             }
 
             std::string finalResponse = processToolCall(response, trace);
+
+            Thoth::ChatRagResponseRecord responseRecord;
+            responseRecord.request_id = trace.requestId;
+            responseRecord.answer_chars = finalResponse.size();
+            responseRecord.retrieved_doc_count = 0;
+            responseRecord.grounding_mode = "no_index";
+            responseRecord.fallback_used = false;
+            emitChatRagResponse(responseRecord);
+            traceLogger.addStage(
+                trace,
+                "chat_rag_response",
+                true,
+                "Chat RAG response metrics recorded (no index)",
+                Thoth::ChatRagLogger::responseToJson(responseRecord));
 
             try {
                 memory.addMessage("user", input);
@@ -311,22 +473,49 @@ std::string CommandProcessor::processQuery(const std::string& input) {
             rag.setCurrentEmbedding(controller->get_current_embedding());
         }
 
-        std::vector<CodeChunk> contextChunks = rag.retrieveRelevant(input, {}, 5, trace.requestId, activePlanId, activeStepId);
+        GragDiagnostics retrievalDiagnostics;
+        const int topK = static_cast<int>(DEFAULT_RAG_TOP_K);
+        std::vector<CodeChunk> contextChunks = rag.retrieveRelevant(
+            input, {}, topK, trace.requestId, activePlanId, activeStepId, {}, {}, {}, &retrievalDiagnostics);
 
         std::ostringstream contextStream;
-        for (auto& c : contextChunks) {
-            contextStream << c.code << "\n---\n";
+        for (const auto& c : contextChunks) {
+            contextStream << Thoth::ChatRetrieval::formatChunkForPrompt(c) << "\n---\n";
         }
         std::string ragContext = contextStream.str();
 
-        // 2. Build prompt
-        std::string convPrompt = promptFactory.buildConversationPrompt(input);
-        std::string finalPrompt;
-        if (!ragContext.empty()) {
-            finalPrompt = "[RAG Context]\n" + ragContext + "\n[User Query]\n" + convPrompt;
-        } else {
-            finalPrompt = convPrompt;
+        PromptFactory::ConversationBuildOptions options;
+        options.grounded = !ragContext.empty();
+        options.includeTools =
+            config && config->enable_tools && Thoth::looksLikeToolIntent(input);
+
+        Thoth::ConversationPromptMetrics promptMetrics;
+        const std::string finalPrompt =
+            promptFactory.buildChatPrompt(input, ragContext, false, options, &promptMetrics);
+
+        std::string llmModel = llm.getSelectedModel();
+        if (llmModel.empty() && config) {
+            llmModel = config->llm_model;
         }
+        const std::string groundingMode = ragContext.empty() ? "no_retrieval_hits" : "retrieved_context";
+        Thoth::ChatRagContextRecord contextRecord = buildChatRagContextRecord(
+            trace.requestId,
+            input,
+            topK,
+            ragContext,
+            finalPrompt,
+            contextChunks,
+            retrievalDiagnostics,
+            promptMetrics,
+            llmModel,
+            groundingMode);
+        emitChatRagContext(contextRecord);
+        traceLogger.addStage(
+            trace,
+            "chat_rag_context",
+            true,
+            "Chat RAG context metrics recorded",
+            Thoth::ChatRagLogger::contextToJson(contextRecord));
 
         // 3. Query LLM
         const auto generationStartMs = nowMs();
@@ -342,6 +531,20 @@ std::string CommandProcessor::processQuery(const std::string& input) {
              {"generation_latency_ms", generationLatencyMs}});
 
         std::string finalResponse = processToolCall(response, trace);
+
+        Thoth::ChatRagResponseRecord responseRecord;
+        responseRecord.request_id = trace.requestId;
+        responseRecord.answer_chars = finalResponse.size();
+        responseRecord.retrieved_doc_count = countUniqueDocuments(contextRecord.documents);
+        responseRecord.grounding_mode = groundingMode;
+        responseRecord.fallback_used = false;
+        emitChatRagResponse(responseRecord);
+        traceLogger.addStage(
+            trace,
+            "chat_rag_response",
+            true,
+            "Chat RAG response metrics recorded",
+            Thoth::ChatRagLogger::responseToJson(responseRecord));
 
         // 4. Update memory
         try {

@@ -5,8 +5,10 @@
 #include "../include/standard_execution_mode.h"
 #include "../include/llm_planner.h"
 #include "../include/fact_store.h"
+#include "../include/planner_injection_config.h"
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 
 BasicAgentPlugin::BasicAgentPlugin()
     : config(),
@@ -180,6 +182,7 @@ void BasicAgentPlugin::setRagFiles(const std::vector<std::string>& filePaths) {
             }
         }
     }
+    indexManager->setActiveCorpusFiles(filePaths);
     lastRagFilePaths_ = filePaths;
     cmdProcessor.setInitialized(true);
 }
@@ -240,6 +243,7 @@ void BasicAgentPlugin::syncPlannerPromptConfig() {
     }
     auto pCfg = planner_prompt_factory_->getConfig();
     pCfg.enableTools = config.enable_tools;
-    pCfg.maxContextLength = static_cast<size_t>(config.max_tokens) * 4;
+    const size_t fromTokens = static_cast<size_t>(config.max_tokens) * 4;
+    pCfg.maxContextLength = std::max(fromTokens, Thoth::PlannerInjection::kMinPlanPromptBudget);
     planner_prompt_factory_->setConfig(pCfg);
 }

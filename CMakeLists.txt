@@ -49,6 +49,8 @@ set(BASIC_AGENT_SOURCES
     src/memory_pruner.cpp
     src/plan.cpp
     src/plan_parser.cpp
+    src/plan_validator.cpp
+    src/chat_rag_logger.cpp
     src/project_analyze_tool.cpp
     src/run_tests_tool.cpp
     src/trajectory.cpp
@@ -76,6 +78,10 @@ set(BASIC_AGENT_SOURCES
     src/benchmark_runner.cpp
     src/benchmark_reporter.cpp
     src/benchmark_case_registry.cpp
+    src/chat_rag_golden_cases.cpp
+    src/chat_retrieval_boost.cpp
+    src/chat_query_utils.cpp
+    src/cognitive_metrics_logger.cpp
 )
 
 # Create the shared library
@@ -88,6 +94,9 @@ target_link_libraries(run_grag_benchmark PRIVATE basic_agent)
 
 add_executable(run_cognate_benchmark src/run_cognate_benchmark.cpp)
 target_link_libraries(run_cognate_benchmark PRIVATE basic_agent)
+
+add_executable(run_chat_rag_benchmark src/run_chat_rag_benchmark.cpp)
+target_link_libraries(run_chat_rag_benchmark PRIVATE basic_agent)
 
 # CLI executable for debugging or standalone use
 # Only build CLI tool if we're building standalone

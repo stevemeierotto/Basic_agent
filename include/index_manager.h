@@ -49,12 +49,14 @@ public:
 
     void clear();
     void addChunkToIndex(CodeChunk&& chunk);
+
+    /** Limit retrieval to session RAG paths (files and directory roots). Empty = no filter. */
+    void setActiveCorpusFiles(const std::vector<std::string>& filePaths);
+
     VectorStore store;
     std::string getCurrentCommitHash() const;
     bool shouldReindexFile(const std::string& filePath);
-    std::vector<std::pair<std::string,float>> retrieveChunks(const std::string& query, int topK) {
-        return store.retrieve(query, topK);
-    }
+    std::vector<std::pair<std::string,float>> retrieveChunks(const std::string& query, int topK);
 
     EmbeddingEngine* getTfIdfEngine() const { return localTfIdfEngine.get(); }
 
@@ -108,5 +110,9 @@ private:
     size_t getCurrentMemoryUsage() const;
 
     std::unordered_map<std::string, std::uint64_t> indexedFileFingerprints;
+
+    std::set<std::string> activeCorpusFiles_;
+    std::vector<std::string> activeCorpusRoots_;
+    bool chunkInActiveCorpus(const CodeChunk& chunk) const;
 };
 

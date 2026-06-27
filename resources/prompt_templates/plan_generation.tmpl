@@ -1,8 +1,5 @@
-Generate a JSON plan for the goal below using ONLY retrieval and synthesis.
-Goal: {{goal}}
-{{strategy_context}}
-{{past_experience}}
 Rules:
+- Generate a JSON plan using ONLY retrieval and synthesis.
 - Respond with JSON only (no markdown fences).
 - Minimum 2 steps.
 - Step 1 MUST be step_type RETRIEVAL with payload {"query": "<short query derived from goal>", "top_k": 5}.
@@ -11,3 +8,6 @@ Rules:
 - Do NOT emit TOOL steps.
 Schema:
 {"plan":[{"step_id":"retrieve-context","step_type":"RETRIEVAL","description":"Retrieve relevant corpus context","payload":{"query":"...","top_k":5}},{"step_id":"synthesize","step_type":"LLM","description":"Summarize findings","depends_on":["retrieve-context"],"payload":{}}]}
+Goal: {{goal}}
+{{strategy_context}}
+{{past_experience}}

@@ -1,6 +1,7 @@
 #include "../include/memory.h"
 #include "../include/grag_scorer.h"
 #include "../include/plan_reuse_config.h"
+#include "../include/planner_injection_config.h"
 #include "../include/sqlite_memory_repository.h"
 #include <iostream>
 #include <algorithm>
@@ -130,6 +131,9 @@ std::vector<Memory::CognateTrajectoryRecord> Memory::retrieveSimilarTrajectories
     std::vector<CognateTrajectoryRecord> results;
     int count = std::min((int)ranked_ids.size(), limit);
     for (int i = 0; i < count; ++i) {
+        if (ranked_ids[i].second < Thoth::PlannerTrajectory::kMinSimilarityFloor) {
+            break;
+        }
         auto t = repo->loadTrajectory(ranked_ids[i].first);
         if (t) results.push_back(std::move(*t));
     }
@@ -444,6 +448,9 @@ std::vector<Memory::PastPlanRecord> Memory::retrieveSimilarPlans(
     const int count = std::min(static_cast<int>(ranked.size()), limit);
     results.reserve(static_cast<std::size_t>(count));
     for (int i = 0; i < count; ++i) {
+        if (ranked[static_cast<std::size_t>(i)].second < Thoth::PlanReuse::kMinSimilarityFloor) {
+            break;
+        }
         results.push_back(std::move(ranked[static_cast<std::size_t>(i)].first));
     }
     return results;
