@@ -12,9 +12,13 @@
 #include "../include/decision_trace.h"
 #include "../include/memory.h"
 #include "../include/step_metrics_repository.h"
+#include "../include/llm_interface.h"
+#include "../include/goal_text_utils.h"
 #include <chrono>
 #include <algorithm>
 #include <iostream>
+#include <sstream>
+#include <cstdlib>
 
 namespace Thoth {
 
@@ -53,6 +57,75 @@ nlohmann::json extractToolArgs(const nlohmann::json& payload) {
     return args;
 }
 
+bool mockLLMEnabled() {
+    const char* mock = std::getenv("THOTH_MOCK_LLM");
+    return mock && (std::string(mock) == "1" || std::string(mock) == "true");
+}
+
+std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorSteps) {
+    std::ostringstream oss;
+    for (const auto& prior : priorSteps) {
+        if (static_cast<StepType>(prior.step_type) != StepType::RETRIEVAL) {
+            continue;
+        }
+        if (!prior.result.contains("data") || !prior.result["data"].is_object()) {
+            continue;
+        }
+        const auto& data = prior.result["data"];
+        if (!data.contains("chunks") || !data["chunks"].is_array()) {
+            continue;
+        }
+        for (const auto& chunk : data["chunks"]) {
+            if (!chunk.is_object()) {
+                continue;
+            }
+            const std::string file = chunk.value("file", "");
+            const std::string content = chunk.value("content", "");
+            if (content.empty()) {
+                continue;
+            }
+            if (!file.empty()) {
+                oss << "--- " << file << " ---\n";
+            }
+            oss << content << "\n\n";
+        }
+    }
+    return oss.str();
+}
+
+std::string buildLLMSynthesisPrompt(const PlanStep& step, const StepExecutionContext& context) {
+    std::ostringstream prompt;
+
+    std::string goal = context.goal;
+    if (!goal.empty()) {
+        auto [cleanGoal, _] = Thoth::splitPlanReuseInjection(goal);
+        goal = cleanGoal;
+    }
+
+    std::string instruction = step.payload.value("prompt", "");
+    if (instruction.empty()) {
+        instruction = step.description;
+    }
+    if (instruction.empty()) {
+        instruction = "Synthesize a concise answer for the goal using the retrieved context.";
+    }
+
+    if (!goal.empty()) {
+        prompt << "Goal: " << goal << "\n\n";
+    }
+
+    const std::string retrieved = buildRetrievedContext(context.prior_steps);
+    if (!retrieved.empty()) {
+        prompt << "[Retrieved Context]\n" << retrieved;
+    } else {
+        prompt << "[Retrieved Context]\n(none — answer from the goal and task only)\n\n";
+    }
+
+    prompt << "[Task]\n" << instruction << "\n\n";
+    prompt << "Respond in natural language. Do not emit JSON or tool calls.";
+    return prompt.str();
+}
+
 } // namespace
 
 static int64_t nowMs() {
@@ -65,10 +138,17 @@ WorkflowEngine::WorkflowEngine(
     std::shared_ptr<ToolRegistry> toolRegistry,
     std::shared_ptr<RAGPipeline> ragPipeline,
     std::shared_ptr<Memory> memory,
-    std::shared_ptr<StepMetricsRepository> metricsRepo)
-    : toolRegistry_(toolRegistry), ragPipeline_(ragPipeline), memory_(memory), metricsRepo_(metricsRepo) {}
+    std::shared_ptr<StepMetricsRepository> metricsRepo,
+    LLMInterface* llm)
+    : toolRegistry_(toolRegistry),
+      ragPipeline_(ragPipeline),
+      memory_(memory),
+      metricsRepo_(metricsRepo),
+      llm_(llm) {}
 
-StepResult WorkflowEngine::executeStep(const PlanStep& step, const std::string& planId) {
+StepResult WorkflowEngine::executeStep(const PlanStep& step,
+                                       const std::string& planId,
+                                       const StepExecutionContext& context) {
     StepResult result;
     result.step_id = step.step_id;
     int64_t startTime = nowMs();
@@ -95,7 +175,7 @@ StepResult WorkflowEngine::executeStep(const PlanStep& step, const std::string& 
                     currentAttempt = executeRetrieval(step, planId);
                     break;
                 case StepType::LLM:
-                    currentAttempt = executeLLM(step, planId);
+                    currentAttempt = executeLLM(step, planId, context);
                     break;
                 case StepType::NODE:
                     currentAttempt = executeNode(step);
@@ -164,16 +244,21 @@ StepResult WorkflowEngine::executeStep(const PlanStep& step, const std::string& 
     return result;
 }
 
-std::future<StepResult> WorkflowEngine::executeStepAsync(const PlanStep& step, const std::string& planId) {
-    // Capture by value to ensure safety in parallel execution
-    return std::async(std::launch::async, [this, step, planId]() -> StepResult {
+std::future<StepResult> WorkflowEngine::executeStepAsync(const PlanStep& step,
+                                                       const std::string& planId,
+                                                       const StepExecutionContext& context) {
+    return std::async(std::launch::async, [this, step, planId, context]() -> StepResult {
         try {
-            auto executionFuture = std::async(std::launch::async, [this, step, planId]() {
-                return this->executeStep(step, planId);
+            auto executionFuture = std::async(std::launch::async, [this, step, planId, context]() {
+                return this->executeStep(step, planId, context);
             });
 
             int timeoutMs = step.failure_policy.timeout_ms;
-            if (timeoutMs <= 0) timeoutMs = 30000;
+            if (timeoutMs <= 0) {
+                timeoutMs = (step.type == StepType::LLM) ? 180000 : 30000;
+            } else if (step.type == StepType::LLM && timeoutMs < 120000) {
+                timeoutMs = 120000;
+            }
 
             auto status = executionFuture.wait_for(std::chrono::milliseconds(timeoutMs));
 
@@ -323,12 +408,58 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step, const std::str
     return result;
 }
 
-StepResult WorkflowEngine::executeLLM(const PlanStep& step, const std::string& planId) {
-    (void)step;
+StepResult WorkflowEngine::executeLLM(const PlanStep& step,
+                                      const std::string& planId,
+                                      const StepExecutionContext& context) {
     (void)planId;
     StepResult result;
-    result.success = true;
-    result.data = {{"status", "success"}, {"data", {{"response", "LLM step executed (stub)"}}}};
+
+    try {
+        if (mockLLMEnabled()) {
+            result.success = true;
+            result.data = {
+                {"status", "success"},
+                {"data", {{"response", "Mock LLM synthesis for tests"}}}};
+            return result;
+        }
+
+        if (!llm_) {
+            result.success = false;
+            result.error_message = "LLMInterface not available for LLM step";
+            result.data = {{"status", "error"}, {"error_message", result.error_message}};
+            return result;
+        }
+
+        const std::string prompt = buildLLMSynthesisPrompt(step, context);
+        if (prompt.empty()) {
+            result.success = false;
+            result.error_message = "Empty LLM synthesis prompt";
+            result.data = {{"status", "error"}, {"error_message", result.error_message}};
+            return result;
+        }
+
+        const std::string response = llm_->query(prompt);
+        if (response.empty()) {
+            result.success = false;
+            result.error_message = "LLM returned an empty response";
+            result.data = {{"status", "error"}, {"error_message", result.error_message}};
+            return result;
+        }
+
+        result.success = true;
+        result.data = {
+            {"status", "success"},
+            {"data", {{"response", response}, {"prompt_chars", prompt.size()}}}};
+    } catch (const std::exception& e) {
+        result.success = false;
+        result.error_message = std::string("LLM step exception: ") + e.what();
+        result.data = {{"status", "error"}, {"error_message", result.error_message}};
+    } catch (...) {
+        result.success = false;
+        result.error_message = "LLM step unknown exception";
+        result.data = {{"status", "error"}, {"error_message", result.error_message}};
+    }
+
     return result;
 }
 

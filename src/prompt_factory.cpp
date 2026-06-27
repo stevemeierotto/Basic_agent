@@ -19,12 +19,13 @@ const char* kDefaultPlanGenerationTemplate =
     "- Minimum 2 steps.\n"
     "- Step 1 MUST be step_type RETRIEVAL with payload {\"query\": \"<short query derived from goal>\", \"top_k\": 5}.\n"
     "- Step 2 MUST be step_type LLM to synthesize the answer from retrieved context.\n"
+    "- Step 2 MUST set depends_on to the RETRIEVAL step_id.\n"
     "- Do NOT emit TOOL steps.\n"
     "Schema:\n"
     "{\"plan\":[{\"step_id\":\"retrieve-context\",\"step_type\":\"RETRIEVAL\","
     "\"description\":\"Retrieve relevant corpus context\",\"payload\":{\"query\":\"...\",\"top_k\":5}},"
     "{\"step_id\":\"synthesize\",\"step_type\":\"LLM\",\"description\":\"Summarize findings\","
-    "\"payload\":{}}]}\n";
+    "\"depends_on\":[\"retrieve-context\"],\"payload\":{}}]}\n";
 
 const char* kDefaultPlanRevisionTemplate =
     "Revise the plan for goal: {{goal}}\n"

@@ -33,6 +33,7 @@
 #include <mutex>
 
 class Memory;
+class LLMInterface;
 
 namespace Thoth {
 
@@ -86,6 +87,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         workflow_engine_ = engine; 
     }
+    void set_llm_interface(LLMInterface* llm);
 
     // State inspection (for UI highlighting and trace logging)
     ControllerState get_state() const;

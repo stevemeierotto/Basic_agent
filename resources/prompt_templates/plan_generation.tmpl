@@ -7,6 +7,7 @@ Rules:
 - Minimum 2 steps.
 - Step 1 MUST be step_type RETRIEVAL with payload {"query": "<short query derived from goal>", "top_k": 5}.
 - Step 2 MUST be step_type LLM to synthesize the answer from retrieved context.
+- Step 2 MUST set depends_on to the RETRIEVAL step_id.
 - Do NOT emit TOOL steps.
 Schema:
-{"plan":[{"step_id":"retrieve-context","step_type":"RETRIEVAL","description":"Retrieve relevant corpus context","payload":{"query":"...","top_k":5}},{"step_id":"synthesize","step_type":"LLM","description":"Summarize findings","payload":{}}]}
+{"plan":[{"step_id":"retrieve-context","step_type":"RETRIEVAL","description":"Retrieve relevant corpus context","payload":{"query":"...","top_k":5}},{"step_id":"synthesize","step_type":"LLM","description":"Summarize findings","depends_on":["retrieve-context"],"payload":{}}]}

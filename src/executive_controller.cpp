@@ -7,6 +7,7 @@
  */
 
 #include "../include/executive_controller.h"
+#include "../include/llm_interface.h"
 #include "../include/logger.h"
 #include "../include/grag_scorer.h"
 #include "../include/memory.h"
@@ -14,6 +15,7 @@
 #include "../include/grag_metrics.h"
 #include "../include/step_metrics_repository.h"
 #include "../include/file_handler.h"
+#include "../include/goal_text_utils.h"
 #include <chrono>
 #include <thread>
 #include <iostream>
@@ -38,6 +40,24 @@ static void cognatePlanRecordFromPlan(const Plan& plan, MemoryRepository::Cognat
     record.success_score = 0.0f;
     record.created_at = plan.created_at_ms;
     record.updated_at = plan.updated_at_ms;
+}
+
+static StepExecutionContext buildStepExecutionContext(const Plan& plan) {
+    StepExecutionContext ctx;
+    auto [cleanGoal, _] = splitPlanReuseInjection(plan.goal);
+    ctx.goal = cleanGoal;
+    for (const auto& step : plan.steps) {
+        if (step.status != StepStatus::SUCCESS || step.result.is_null()) {
+            continue;
+        }
+        ctx.prior_steps.push_back({
+            step.step_id,
+            static_cast<int>(step.type),
+            step.description,
+            step.result
+        });
+    }
+    return ctx;
 }
 
 ExecutiveController::ExecutiveController(
@@ -66,6 +86,13 @@ ExecutiveController::~ExecutiveController() {
     }
     if (thread_to_join && thread_to_join->joinable()) {
         thread_to_join->join();
+    }
+}
+
+void ExecutiveController::set_llm_interface(LLMInterface* llm) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (workflow_engine_) {
+        workflow_engine_->setLLMInterface(llm);
     }
 }
 
@@ -364,6 +391,8 @@ void ExecutiveController::evaluate_state() {
 
 void ExecutiveController::decide_transition() {
     std::vector<PlanStep> steps_to_start;
+    std::string plan_id_for_dispatch;
+    StepExecutionContext execution_context;
 
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -514,13 +543,16 @@ void ExecutiveController::decide_transition() {
             current_plan_.updated_at_ms = nowMs();
             persist_current_plan_unlocked();
         }
+
+        plan_id_for_dispatch = current_plan_.plan_id;
+        execution_context = buildStepExecutionContext(current_plan_);
     }
 
     for (const auto& step : steps_to_start) {
         emit_event(EventType::STEP_STARTED, step.step_id);
 
         if (workflow_engine_) {
-            auto fut = workflow_engine_->executeStepAsync(step, current_plan_.plan_id);
+            auto fut = workflow_engine_->executeStepAsync(step, plan_id_for_dispatch, execution_context);
             std::lock_guard<std::mutex> lock(mutex_);
             active_step_futures_.push_back(std::move(fut));
             active_step_ids_.push_back(step.step_id);
@@ -663,7 +695,8 @@ nlohmann::json ExecutiveController::dispatch_step(PlanStep& step) {
     if (!workflow_engine_) {
         return {{"status", "error"}, {"error_message", "WorkflowEngine not available"}};
     }
-    auto result = workflow_engine_->executeStep(step, current_plan_.plan_id);
+    const StepExecutionContext context = buildStepExecutionContext(current_plan_);
+    auto result = workflow_engine_->executeStep(step, current_plan_.plan_id, context);
     return result.data;
 }
 

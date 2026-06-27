@@ -18,6 +18,7 @@
 class ToolRegistry;
 class RAGPipeline;
 class Memory;
+class LLMInterface;
 
 namespace Thoth {
 
@@ -36,6 +37,21 @@ struct StepResult {
 };
 
 /**
+ * @brief Prior completed steps passed into LLM synthesis.
+ */
+struct PriorStepContext {
+    std::string step_id;
+    int step_type = 0;
+    std::string description;
+    nlohmann::json result;
+};
+
+struct StepExecutionContext {
+    std::string goal;
+    std::vector<PriorStepContext> prior_steps;
+};
+
+/**
  * @brief The WorkflowEngine is the execution harness for Thoth.
  */
 class WorkflowEngine {
@@ -44,24 +60,34 @@ public:
         std::shared_ptr<ToolRegistry> toolRegistry,
         std::shared_ptr<RAGPipeline> ragPipeline,
         std::shared_ptr<Memory> memory,
-        std::shared_ptr<StepMetricsRepository> metricsRepo);
+        std::shared_ptr<StepMetricsRepository> metricsRepo,
+        LLMInterface* llm = nullptr);
+
+    void setLLMInterface(LLMInterface* llm) { llm_ = llm; }
+
     virtual ~WorkflowEngine() = default;
 
     /**
      * @brief Executes a single PlanStep synchronously.
      */
-    virtual StepResult executeStep(const PlanStep& step, const std::string& planId = "");
+    virtual StepResult executeStep(const PlanStep& step,
+                                   const std::string& planId = "",
+                                   const StepExecutionContext& context = {});
 
     /**
      * @brief Executes a single PlanStep asynchronously with timeout.
      */
-    virtual std::future<StepResult> executeStepAsync(const PlanStep& step, const std::string& planId = "");
+    virtual std::future<StepResult> executeStepAsync(const PlanStep& step,
+                                                     const std::string& planId = "",
+                                                     const StepExecutionContext& context = {});
 
 private:
     StepResult executeTool(const PlanStep& step);
     StepResult executeRetrieval(const PlanStep& step, const std::string& planId = "");
     StepResult executeNode(const PlanStep& step);
-    StepResult executeLLM(const PlanStep& step, const std::string& planId = "");
+    StepResult executeLLM(const PlanStep& step,
+                          const std::string& planId,
+                          const StepExecutionContext& context);
 
     bool validateInput(const nlohmann::json& input, const nlohmann::json& schema, std::string& error);
 
@@ -69,6 +95,7 @@ private:
     std::shared_ptr<RAGPipeline> ragPipeline_;
     std::shared_ptr<Memory> memory_;
     std::shared_ptr<StepMetricsRepository> metricsRepo_;
+    LLMInterface* llm_ = nullptr;
 };
 
 } // namespace Thoth

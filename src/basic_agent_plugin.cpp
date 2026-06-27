@@ -33,6 +33,7 @@ BasicAgentPlugin::BasicAgentPlugin()
 
     controller = std::make_shared<Thoth::ExecutiveController>(planner, registry_ptr, rag_ptr, memory_ptr);
     cmdProcessor.setController(controller);
+    controller->set_llm_interface(&llm);
     
     // Set event callback
     auto cb = [this](const ControllerEvent& ev) {
