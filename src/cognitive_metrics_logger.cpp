@@ -72,6 +72,8 @@ nlohmann::json CognitiveMetricsLogger::toJson(const GoalCognitiveMetricsRecord& 
         {"reflection_skip_reason", record.reflection_skip_reason},
         {"plan_reused", record.plan_reused},
         {"total_tokens", record.total_tokens},
+        {"synthesis_prompt_chars", record.synthesis_prompt_chars},
+        {"synthesis_context_truncated", record.synthesis_context_truncated},
     };
 }
 

@@ -83,6 +83,9 @@ set(BASIC_AGENT_SOURCES
     src/chat_query_utils.cpp
     src/reflection_utils.cpp
     src/reflection_ab_cases.cpp
+    src/robustness_mock_responses.cpp
+    src/robustness_cases.cpp
+    src/test_suite_dev.cpp
     src/cognitive_metrics_logger.cpp
 )
 
@@ -102,6 +105,9 @@ target_link_libraries(run_chat_rag_benchmark PRIVATE basic_agent)
 
 add_executable(run_reflection_ab_benchmark src/run_reflection_ab_benchmark.cpp)
 target_link_libraries(run_reflection_ab_benchmark PRIVATE basic_agent)
+
+add_executable(run_robustness_suite src/run_robustness_suite.cpp)
+target_link_libraries(run_robustness_suite PRIVATE basic_agent)
 
 # CLI executable for debugging or standalone use
 # Only build CLI tool if we're building standalone

@@ -42,6 +42,10 @@ struct GoalCognitiveMetricsRecord {
 
     std::int64_t total_tokens = 0; // reserved; 0 until LLMInterface exposes counts
     std::string reflection_skip_reason;
+
+    /** C7: last LLM synthesis prompt size and whether retrieved context was capped. */
+    int synthesis_prompt_chars = 0;
+    bool synthesis_context_truncated = false;
 };
 
 class CognitiveMetricsLogger {

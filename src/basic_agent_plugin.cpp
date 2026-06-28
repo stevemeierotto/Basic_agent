@@ -9,11 +9,20 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <cstdlib>
 
 BasicAgentPlugin::BasicAgentPlugin()
     : config(),
       memory(config),
-      embeddingEngine(std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::External, &config)),
+      embeddingEngine(std::make_unique<EmbeddingEngine>(
+          []() {
+              const char* dev = std::getenv("THOTH_TEST_SUITE_DEV");
+              if (dev && (std::string(dev) == "1" || std::string(dev) == "true")) {
+                  return EmbeddingEngine::Method::TfIdf;
+              }
+              return EmbeddingEngine::Method::External;
+          }(),
+          &config)),
       indexManager(new IndexManager(embeddingEngine.get())),
       rag(std::move(embeddingEngine), indexManager, &config, &memory),
       cmdProcessor(memory, rag, llm, &config) 
@@ -36,6 +45,7 @@ BasicAgentPlugin::BasicAgentPlugin()
     controller = std::make_shared<Thoth::ExecutiveController>(planner, registry_ptr, rag_ptr, memory_ptr);
     cmdProcessor.setController(controller);
     controller->set_llm_interface(&llm);
+    controller->set_config(&config);
     controller->set_max_reflections(config.max_reflections);
     
     // Set event callback
@@ -80,12 +90,18 @@ BasicAgentPlugin::BasicAgentPlugin()
     cmdProcessor.syncPromptConfig();
 
     // --- Initialize RAG index ---
-    std::string ragIndexPath = fileHandler.getRagPath("rag_index.bin");
-    if (std::filesystem::exists(ragIndexPath)) {
-        indexManager->init(ragIndexPath);
-        std::cerr << "[BasicAgentPlugin] RAG index loaded successfully.\n";
+    const char* testIndexPath = std::getenv("THOTH_TEST_SUITE_INDEX");
+    if (testIndexPath && *testIndexPath) {
+        indexManager->init(testIndexPath);
+        std::cerr << "[BasicAgentPlugin] TEST_SUITE index path: " << testIndexPath << "\n";
     } else {
-        std::cerr << "[BasicAgentPlugin] RAG index path: " << ragIndexPath << "\n";
+        std::string ragIndexPath = fileHandler.getRagPath("rag_index.bin");
+        if (std::filesystem::exists(ragIndexPath)) {
+            indexManager->init(ragIndexPath);
+            std::cerr << "[BasicAgentPlugin] RAG index loaded successfully.\n";
+        } else {
+            std::cerr << "[BasicAgentPlugin] RAG index path: " << ragIndexPath << "\n";
+        }
     }
 }
 
@@ -185,6 +201,13 @@ void BasicAgentPlugin::setRagFiles(const std::vector<std::string>& filePaths) {
     }
     indexManager->setActiveCorpusFiles(filePaths);
     lastRagFilePaths_ = filePaths;
+
+    if (const char* cachePath = std::getenv("THOTH_TEST_SUITE_INDEX")) {
+        if (cachePath[0] != '\0') {
+            indexManager->saveIndex(cachePath);
+        }
+    }
+
     cmdProcessor.setInitialized(true);
 }
 

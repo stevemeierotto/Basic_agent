@@ -1,5 +1,7 @@
 #include "../include/llm_interface.h"
 #include "../include/decision_trace.h"
+#include "../include/test_suite_dev.h"
+#include "../include/robustness_mock_responses.h"
 #include <../include/json.hpp>
 #include <curl/curl.h>
 #include <iostream>
@@ -138,9 +140,31 @@ void LLMInterface::setBackend(LLMBackend b) {
 }
 
 std::string LLMInterface::query(const std::string& prompt) {
+    return query(prompt, -1);
+}
+
+static bool envTruthy(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) {
+        return false;
+    }
+    const std::string flag(value);
+    return flag == "1" || flag == "true" || flag == "TRUE" || flag == "yes";
+}
+
+std::string LLMInterface::query(const std::string& prompt, int num_predict_override) {
     try {
+        if (auto scripted = Thoth::RobustnessMockResponses::pop()) {
+            return *scripted;
+        }
+        if (envTruthy("THOTH_MOCK_LLM_UNAVAILABLE")) {
+            return "Assistant: [Error] LLM service unavailable (mock).";
+        }
+        if (Thoth::testSuiteDevTierEnabled()) {
+            return Thoth::mockTestSuiteLlmResponse(prompt);
+        }
         if (backend == LLMBackend::Ollama) {
-            return askOllama(prompt);
+            return askOllama(prompt, num_predict_override);
         } else {
             return askOpenAI(prompt);
         }
@@ -157,6 +181,10 @@ std::string LLMInterface::query(const std::string& prompt) {
 
 
 std::string LLMInterface::askOllama(const std::string& prompt) {
+    return askOllama(prompt, -1);
+}
+
+std::string LLMInterface::askOllama(const std::string& prompt, int num_predict_override) {
     std::lock_guard<std::recursive_mutex> lock(llmMutex);
     if (!curl) return "Assistant: [Error] Ollama CURL handle not initialized.";
 
@@ -165,6 +193,9 @@ std::string LLMInterface::askOllama(const std::string& prompt) {
         double temperature = config ? config->temperature : 0.7;
         double topP        = config ? config->top_p : 1.0;
         int maxTokens      = config ? config->max_tokens : 2048;
+        if (num_predict_override >= 0) {
+            maxTokens = num_predict_override;
+        }
         std::string model = resolveOllamaModel();
         
         if (model.empty()) {
@@ -176,9 +207,11 @@ std::string LLMInterface::askOllama(const std::string& prompt) {
             payload["model"] = modelName;
             payload["prompt"] = prompt;
             payload["stream"] = false;
-            payload["temperature"] = temperature;
-            payload["top_p"] = topP;
-            payload["max_tokens"] = maxTokens;
+            payload["options"] = {
+                {"temperature", temperature},
+                {"top_p", topP},
+                {"num_predict", maxTokens},
+            };
             std::string jsonStr = payload.dump();
 
             curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:11434/api/generate");

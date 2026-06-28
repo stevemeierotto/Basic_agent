@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <unordered_map>
 
 float GragScorer::cosine_similarity(const std::vector<float>& a,
                                    const std::vector<float>& b) {
@@ -127,6 +128,19 @@ std::vector<std::pair<CodeChunk, float>> GragScorer::rescore(
         tfidf_query = tfidf_engine->embed(query_text);
     }
 
+    std::unordered_map<std::string, std::vector<float>> chunk_tfidf_cache;
+    if (tfidf_engine && !tfidf_query.empty() && !rag_results.empty()) {
+        std::vector<std::string> chunk_codes;
+        chunk_codes.reserve(rag_results.size());
+        for (const auto& [chunk, _] : rag_results) {
+            chunk_codes.push_back(chunk.code);
+        }
+        const auto chunk_embeddings = tfidf_engine->embedBatch(chunk_codes);
+        for (size_t i = 0; i < rag_results.size() && i < chunk_embeddings.size(); ++i) {
+            chunk_tfidf_cache.emplace(rag_results[i].first.code, chunk_embeddings[i]);
+        }
+    }
+
     // Phase 5.6: Identify high-confidence query hits for graph activation
     struct HighConfHit {
         std::string hash;
@@ -166,8 +180,13 @@ std::vector<std::pair<CodeChunk, float>> GragScorer::rescore(
 
         // Dynamic Keyword Signal
         if (!tfidf_query.empty()) {
-            auto tfidf_chunk = tfidf_engine->embed(chunk.code);
-            sb.keyword_score = cosine_similarity(tfidf_query, tfidf_chunk);
+            const auto cached = chunk_tfidf_cache.find(chunk.code);
+            if (cached != chunk_tfidf_cache.end()) {
+                sb.keyword_score = cosine_similarity(tfidf_query, cached->second);
+            } else if (tfidf_engine) {
+                sb.keyword_score =
+                    cosine_similarity(tfidf_query, tfidf_engine->embed(chunk.code));
+            }
         } else {
             sb.keyword_score = chunk.keyword_score;
         }

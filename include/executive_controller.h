@@ -31,9 +31,11 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
 
 class Memory;
 class LLMInterface;
+class Config;
 
 namespace Thoth {
 
@@ -90,6 +92,7 @@ public:
         workflow_engine_ = engine; 
     }
     void set_llm_interface(LLMInterface* llm);
+    void set_config(Config* cfg);
 
     /** C3: reflection replan limit (0 disables). Overrides default and env when set explicitly. */
     void set_max_reflections(int value);
@@ -144,6 +147,8 @@ protected:
     void transition_to_unlocked(ControllerState new_state);
     void update_goal_embedding_unlocked(const std::string& goal);
     void update_current_embedding_unlocked();
+    /** C7: single embedBatch call for goal G and current-state C vectors. */
+    void refresh_goal_state_embeddings_unlocked();
     void update_trajectory_embedding_unlocked();
     void clear_embeddings_unlocked();
     nlohmann::json store_plan_history(float success_score);
@@ -169,6 +174,17 @@ protected:
     void reset_goal_metrics_unlocked();
     void record_step_metrics_unlocked(const PlanStep& step, const StepResult& result);
     void emit_goal_cognitive_metrics_unlocked(const std::string& outcome, float trajectory_score);
+
+    int countActiveRetrievals_unlocked() const;
+    const PlanStep* findStepById_unlocked(const std::string& step_id) const;
+    PlanStep* findStepById_unlocked(const std::string& step_id);
+    void attachEmbeddingSnapshot_unlocked(StepExecutionContext& ctx) const;
+    bool isRetrievalPrefetchCandidate_unlocked(const PlanStep& step) const;
+    bool isPrefetchStillValid_unlocked(const PlanStep& step) const;
+    void invalidatePrefetchForStep_unlocked(const std::string& failed_step_id);
+    void collectPrefetchResults_unlocked();
+    int maxParallelRetrieval_unlocked() const;
+    bool retrievalPrefetchEnabled_unlocked() const;
 
     std::shared_ptr<IPlanner> planner_;
     std::shared_ptr<ToolRegistry> tool_registry_;
@@ -205,6 +221,8 @@ protected:
     std::int64_t retrieval_time_ms_ = 0;
     std::int64_t llm_synthesis_time_ms_ = 0;
     int retrieved_chunk_count_ = 0;
+    int synthesis_prompt_chars_ = 0;
+    bool synthesis_context_truncated_ = false;
     float last_grag_alpha_ = 0.0f;
     std::string last_grag_routing_mode_;
     float final_trajectory_score_ = 0.0f;
@@ -218,6 +236,12 @@ protected:
     DecisionTraceLogger trace_logger_;
     std::vector<std::future<StepResult>> active_step_futures_;
     std::vector<std::string> active_step_ids_;
+
+    Config* config_ = nullptr;
+    std::unordered_map<std::string, StepResult> prefetch_cache_;
+    std::vector<std::future<StepResult>> prefetch_futures_;
+    std::vector<std::string> prefetch_step_ids_;
+    int retrieval_prefetch_hits_ = 0;
 
     // GRAG embeddings
     std::vector<float> goal_embedding_;    // G

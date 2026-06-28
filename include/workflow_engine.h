@@ -19,6 +19,7 @@ class ToolRegistry;
 class RAGPipeline;
 class Memory;
 class LLMInterface;
+class Config;
 
 namespace Thoth {
 
@@ -49,6 +50,10 @@ struct PriorStepContext {
 struct StepExecutionContext {
     std::string goal;
     std::vector<PriorStepContext> prior_steps;
+    /** C7 Phase 3: snapshot G/C/T at dispatch — safe for parallel RETRIEVAL. */
+    std::vector<float> goal_embedding;
+    std::vector<float> current_embedding;
+    std::vector<float> trajectory_embedding;
 };
 
 /**
@@ -64,6 +69,7 @@ public:
         LLMInterface* llm = nullptr);
 
     void setLLMInterface(LLMInterface* llm) { llm_ = llm; }
+    void setConfig(Config* cfg) { config_ = cfg; }
 
     virtual ~WorkflowEngine() = default;
 
@@ -83,7 +89,9 @@ public:
 
 private:
     StepResult executeTool(const PlanStep& step);
-    StepResult executeRetrieval(const PlanStep& step, const std::string& planId = "");
+    StepResult executeRetrieval(const PlanStep& step,
+                                const std::string& planId,
+                                const StepExecutionContext& context);
     StepResult executeNode(const PlanStep& step);
     StepResult executeLLM(const PlanStep& step,
                           const std::string& planId,
@@ -96,6 +104,7 @@ private:
     std::shared_ptr<Memory> memory_;
     std::shared_ptr<StepMetricsRepository> metricsRepo_;
     LLMInterface* llm_ = nullptr;
+    Config* config_ = nullptr;
 };
 
 } // namespace Thoth

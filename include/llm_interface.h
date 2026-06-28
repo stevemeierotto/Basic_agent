@@ -26,9 +26,12 @@ public:
 
     // Internal helpers
     std::string askOllama(const std::string& prompt);
+    std::string askOllama(const std::string& prompt, int num_predict_override);
     std::string askOpenAI(const std::string& prompt);
 
     std::string query(const std::string& prompt);
+    /** @param num_predict_override Ollama num_predict; -1 uses config->max_tokens. */
+    std::string query(const std::string& prompt, int num_predict_override);
     LLMBackend getBackend() const { return backend; }
     
     // Allow switching dynamically

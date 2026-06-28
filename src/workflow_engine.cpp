@@ -10,16 +10,19 @@
 #include "../include/tools.h"
 #include "../include/rag.h"
 #include "../include/decision_trace.h"
+#include "../include/config.h"
+#include "../include/runtime_latency_config.h"
+#include "../include/goal_text_utils.h"
 #include "../include/grag_diagnostics.h"
 #include "../include/memory.h"
 #include "../include/step_metrics_repository.h"
 #include "../include/llm_interface.h"
-#include "../include/goal_text_utils.h"
 #include <chrono>
 #include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <cstdlib>
+#include <thread>
 
 namespace Thoth {
 
@@ -63,13 +66,36 @@ bool mockLLMEnabled() {
     return mock && (std::string(mock) == "1" || std::string(mock) == "true");
 }
 
+bool mockLLMDelayEnabled(int& delayMsOut) {
+    const char* mock = std::getenv("THOTH_MOCK_LLM_DELAY_MS");
+    if (!mock || !*mock) {
+        return false;
+    }
+    try {
+        delayMsOut = std::max(0, std::stoi(mock));
+        return delayMsOut > 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool llmResponseIsError(const std::string& response) {
+    return response.find("[Error]") != std::string::npos;
+}
+
 bool mockStepTimeoutEnabled() {
     const char* mock = std::getenv("THOTH_MOCK_STEP_TIMEOUT");
     return mock && (std::string(mock) == "1" || std::string(mock) == "true");
 }
 
-std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorSteps) {
+std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorSteps,
+                                  std::size_t maxChars,
+                                  bool* truncatedOut) {
+    if (truncatedOut) {
+        *truncatedOut = false;
+    }
     std::ostringstream oss;
+    std::size_t used = 0;
     for (const auto& prior : priorSteps) {
         if (static_cast<StepType>(prior.step_type) != StepType::RETRIEVAL) {
             continue;
@@ -90,16 +116,33 @@ std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorStep
             if (content.empty()) {
                 continue;
             }
+            std::ostringstream block;
             if (!file.empty()) {
-                oss << "--- " << file << " ---\n";
+                block << "--- " << file << " ---\n";
             }
-            oss << content << "\n\n";
+            block << content << "\n\n";
+            const std::string piece = block.str();
+            if (maxChars > 0 && used + piece.size() > maxChars) {
+                if (truncatedOut) {
+                    *truncatedOut = true;
+                }
+                return oss.str();
+            }
+            oss << piece;
+            used += piece.size();
         }
     }
     return oss.str();
 }
 
-std::string buildLLMSynthesisPrompt(const PlanStep& step, const StepExecutionContext& context) {
+std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorSteps) {
+    return buildRetrievedContext(priorSteps, 0, nullptr);
+}
+
+std::string buildLLMSynthesisPrompt(const PlanStep& step,
+                                    const StepExecutionContext& context,
+                                    Config* config,
+                                    bool* contextTruncatedOut) {
     std::ostringstream prompt;
 
     std::string goal = context.goal;
@@ -108,7 +151,10 @@ std::string buildLLMSynthesisPrompt(const PlanStep& step, const StepExecutionCon
         goal = cleanGoal;
     }
 
-    std::string instruction = step.payload.value("prompt", "");
+    std::string instruction;
+    if (step.payload.is_object()) {
+        instruction = step.payload.value("prompt", "");
+    }
     if (instruction.empty()) {
         instruction = step.description;
     }
@@ -120,11 +166,19 @@ std::string buildLLMSynthesisPrompt(const PlanStep& step, const StepExecutionCon
         prompt << "Goal: " << goal << "\n\n";
     }
 
-    const std::string retrieved = buildRetrievedContext(context.prior_steps);
+    std::size_t maxContext = Thoth::RuntimeLatency::kDefaultSynthesisMaxContextChars;
+    if (config && config->synthesis_max_context_chars > 0) {
+        maxContext = static_cast<std::size_t>(config->synthesis_max_context_chars);
+    }
+    bool truncated = false;
+    const std::string retrieved = buildRetrievedContext(context.prior_steps, maxContext, &truncated);
+    if (contextTruncatedOut) {
+        *contextTruncatedOut = truncated;
+    }
     if (!retrieved.empty()) {
         prompt << "[Retrieved Context]\n" << retrieved;
     } else {
-        prompt << "[Retrieved Context]\n(none — answer from the goal and task only)\n\n";
+        prompt << "[Retrieved Context]\nNo relevant documents found.\n\n";
     }
 
     prompt << "[Task]\n" << instruction << "\n\n";
@@ -188,7 +242,7 @@ StepResult WorkflowEngine::executeStep(const PlanStep& step,
                     currentAttempt = executeTool(step);
                     break;
                 case StepType::RETRIEVAL:
-                    currentAttempt = executeRetrieval(step, planId);
+                    currentAttempt = executeRetrieval(step, planId, context);
                     break;
                 case StepType::LLM:
                     currentAttempt = executeLLM(step, planId, context);
@@ -370,7 +424,9 @@ StepResult WorkflowEngine::executeTool(const PlanStep& step) {
     return result;
 }
 
-StepResult WorkflowEngine::executeRetrieval(const PlanStep& step, const std::string& planId) {
+StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
+                                            const std::string& planId,
+                                            const StepExecutionContext& context) {
     StepResult result;
     try {
         if (!ragPipeline_) {
@@ -383,11 +439,15 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step, const std::str
             return executeTool(step);
         }
 
-        std::string query = step.payload.value("query", "");
+        std::string query;
+        int topK = 5;
+        if (step.payload.is_object()) {
+            query = step.payload.value("query", "");
+            topK = step.payload.value("top_k", 5);
+        }
         if (query.empty()) {
             query = step.description;
         }
-        int topK = step.payload.value("top_k", 5);
 
         if (query.empty()) {
             result.success = false;
@@ -397,7 +457,9 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step, const std::str
 
         GragDiagnostics diagnostics;
         auto chunks = ragPipeline_->retrieveRelevant(
-            query, {}, topK, "", planId, step.step_id, {}, {}, {}, &diagnostics);
+            query, {}, topK, "", planId, step.step_id,
+            context.goal_embedding, context.current_embedding, context.trajectory_embedding,
+            &diagnostics);
         
         nlohmann::json chunksJson = nlohmann::json::array();
         for (const auto& chunk : chunks) {
@@ -409,13 +471,30 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step, const std::str
         }
 
         if (chunks.empty()) {
-            result.success = false;
-            result.error_message = "No relevant chunks found for query: " + query;
-            result.data = {{"status", "error"},
-                           {"error_message", result.error_message},
-                           {"grag_alpha", diagnostics.alpha},
-                           {"grag_routing_mode", diagnostics.routing_mode},
-                           {"retrieved_chunk_count", 0}};
+            const bool indexPopulated =
+                ragPipeline_->indexManager &&
+                !ragPipeline_->indexManager->getChunks().empty();
+
+            if (!indexPopulated) {
+                result.success = false;
+                result.error_message = "No relevant chunks found for query: " + query;
+                result.data = {{"status", "error"},
+                               {"error_message", result.error_message},
+                               {"retrieval_empty", true},
+                               {"index_populated", false},
+                               {"grag_alpha", diagnostics.alpha},
+                               {"grag_routing_mode", diagnostics.routing_mode},
+                               {"retrieved_chunk_count", 0}};
+            } else {
+                result.success = true;
+                result.data = {{"status", "success"},
+                               {"data", {{"chunks", nlohmann::json::array()}}},
+                               {"retrieval_empty", true},
+                               {"index_populated", true},
+                               {"grag_alpha", diagnostics.alpha},
+                               {"grag_routing_mode", diagnostics.routing_mode},
+                               {"retrieved_chunk_count", 0}};
+            }
         } else {
             result.success = true;
             result.data = {{"status", "success"},
@@ -441,11 +520,29 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
     StepResult result;
 
     try {
+        bool contextTruncated = false;
+        const std::string prompt =
+            buildLLMSynthesisPrompt(step, context, config_, &contextTruncated);
+        if (prompt.empty()) {
+            result.success = false;
+            result.error_message = "Empty LLM synthesis prompt";
+            result.data = {{"status", "error"}, {"error_message", result.error_message}};
+            return result;
+        }
+
         if (mockLLMEnabled()) {
+            int delayMs = 0;
+            if (mockLLMDelayEnabled(delayMs)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+            }
             result.success = true;
             result.data = {
                 {"status", "success"},
-                {"data", {{"response", "Mock LLM synthesis for tests"}}}};
+                {"synthesis_prompt_chars", static_cast<int>(prompt.size())},
+                {"synthesis_context_truncated", contextTruncated},
+                {"data", {{"response", "Mock LLM synthesis for tests"},
+                          {"prompt_chars", prompt.size()},
+                          {"synthesis_prompt", prompt}}}};
             return result;
         }
 
@@ -456,18 +553,14 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
             return result;
         }
 
-        const std::string prompt = buildLLMSynthesisPrompt(step, context);
-        if (prompt.empty()) {
-            result.success = false;
-            result.error_message = "Empty LLM synthesis prompt";
-            result.data = {{"status", "error"}, {"error_message", result.error_message}};
-            return result;
+        int numPredict = Thoth::RuntimeLatency::kDefaultSynthesisNumPredict;
+        if (config_ && config_->synthesis_num_predict > 0) {
+            numPredict = config_->synthesis_num_predict;
         }
-
-        const std::string response = llm_->query(prompt);
-        if (response.empty()) {
+        const std::string response = llm_->query(prompt, numPredict);
+        if (response.empty() || llmResponseIsError(response)) {
             result.success = false;
-            result.error_message = "LLM returned an empty response";
+            result.error_message = response.empty() ? "LLM returned an empty response" : response;
             result.data = {{"status", "error"}, {"error_message", result.error_message}};
             return result;
         }
@@ -475,6 +568,8 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
         result.success = true;
         result.data = {
             {"status", "success"},
+            {"synthesis_prompt_chars", static_cast<int>(prompt.size())},
+            {"synthesis_context_truncated", contextTruncated},
             {"data", {{"response", response}, {"prompt_chars", prompt.size()}}}};
     } catch (const std::exception& e) {
         result.success = false;

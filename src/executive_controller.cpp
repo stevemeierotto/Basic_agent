@@ -17,6 +17,8 @@
 #include "../include/file_handler.h"
 #include "../include/goal_text_utils.h"
 #include "../include/cognitive_metrics.h"
+#include "../include/runtime_latency_config.h"
+#include "../include/config.h"
 #include "../include/reflection_utils.h"
 #include "../include/graph_refiner.h"
 #include <chrono>
@@ -64,6 +66,150 @@ static StepExecutionContext buildStepExecutionContext(const Plan& plan) {
     return ctx;
 }
 
+PlanStep* ExecutiveController::findStepById_unlocked(const std::string& step_id) {
+    for (auto& step : current_plan_.steps) {
+        if (step.step_id == step_id) {
+            return &step;
+        }
+    }
+    return nullptr;
+}
+
+const PlanStep* ExecutiveController::findStepById_unlocked(const std::string& step_id) const {
+    for (const auto& step : current_plan_.steps) {
+        if (step.step_id == step_id) {
+            return &step;
+        }
+    }
+    return nullptr;
+}
+
+void ExecutiveController::attachEmbeddingSnapshot_unlocked(StepExecutionContext& ctx) const {
+    ctx.goal_embedding = goal_embedding_;
+    ctx.current_embedding = current_embedding_;
+    ctx.trajectory_embedding = trajectory_embedding_;
+}
+
+int ExecutiveController::maxParallelRetrieval_unlocked() const {
+    if (config_ && config_->max_parallel_retrieval > 0) {
+        return config_->max_parallel_retrieval;
+    }
+    return Thoth::RuntimeLatency::kDefaultMaxParallelRetrieval;
+}
+
+bool ExecutiveController::retrievalPrefetchEnabled_unlocked() const {
+    if (config_) {
+        return config_->enable_retrieval_prefetch;
+    }
+    return Thoth::RuntimeLatency::kDefaultEnableRetrievalPrefetch;
+}
+
+int ExecutiveController::countActiveRetrievals_unlocked() const {
+    int count = 0;
+    for (const auto& step_id : active_step_ids_) {
+        if (const PlanStep* step = findStepById_unlocked(step_id)) {
+            if (step->type == StepType::RETRIEVAL) {
+                ++count;
+            }
+        }
+    }
+    count += static_cast<int>(prefetch_step_ids_.size());
+    return count;
+}
+
+bool ExecutiveController::isRetrievalPrefetchCandidate_unlocked(const PlanStep& step) const {
+    if (step.type != StepType::RETRIEVAL || step.status != StepStatus::PENDING) {
+        return false;
+    }
+    if (prefetch_cache_.count(step.step_id) > 0) {
+        return false;
+    }
+    if (std::find(active_step_ids_.begin(), active_step_ids_.end(), step.step_id) != active_step_ids_.end()) {
+        return false;
+    }
+    if (std::find(prefetch_step_ids_.begin(), prefetch_step_ids_.end(), step.step_id) != prefetch_step_ids_.end()) {
+        return false;
+    }
+    if (step.depends_on.empty()) {
+        return false;
+    }
+
+    int running_unmet = 0;
+    for (const auto& dep_id : step.depends_on) {
+        const PlanStep* dep = findStepById_unlocked(dep_id);
+        if (!dep) {
+            continue;
+        }
+        if (dep->status == StepStatus::SUCCESS || dep->status == StepStatus::FAILED) {
+            continue;
+        }
+        if (dep->status == StepStatus::RUNNING) {
+            ++running_unmet;
+            continue;
+        }
+        return false;
+    }
+    return running_unmet == 1;
+}
+
+bool ExecutiveController::isPrefetchStillValid_unlocked(const PlanStep& step) const {
+    for (const auto& dep_id : step.depends_on) {
+        const PlanStep* dep = findStepById_unlocked(dep_id);
+        if (!dep) {
+            continue;
+        }
+        if (dep->status == StepStatus::FAILED) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void ExecutiveController::invalidatePrefetchForStep_unlocked(const std::string& failed_step_id) {
+    for (auto it = prefetch_cache_.begin(); it != prefetch_cache_.end();) {
+        const PlanStep* step = findStepById_unlocked(it->first);
+        if (!step) {
+            it = prefetch_cache_.erase(it);
+            continue;
+        }
+        const auto& deps = step->depends_on;
+        if (std::find(deps.begin(), deps.end(), failed_step_id) != deps.end()) {
+            it = prefetch_cache_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void ExecutiveController::collectPrefetchResults_unlocked() {
+    auto fut_it = prefetch_futures_.begin();
+    auto id_it = prefetch_step_ids_.begin();
+
+    while (fut_it != prefetch_futures_.end()) {
+        if (fut_it->valid() && fut_it->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            StepResult result;
+            try {
+                result = fut_it->get();
+            } catch (const std::exception& e) {
+                result.step_id = *id_it;
+                result.success = false;
+                result.error_message = std::string("Prefetch future exception: ") + e.what();
+            }
+
+            const PlanStep* step = findStepById_unlocked(result.step_id);
+            if (step && isPrefetchStillValid_unlocked(*step)) {
+                prefetch_cache_[result.step_id] = result;
+            }
+
+            fut_it = prefetch_futures_.erase(fut_it);
+            id_it = prefetch_step_ids_.erase(id_it);
+        } else {
+            ++fut_it;
+            ++id_it;
+        }
+    }
+}
+
 ExecutiveController::ExecutiveController(
     std::shared_ptr<IPlanner> planner,
     std::shared_ptr<ToolRegistry> tool_registry,
@@ -89,13 +235,35 @@ ExecutiveController::ExecutiveController(
 
 ExecutiveController::~ExecutiveController() {
     std::unique_ptr<std::thread> thread_to_join;
+    std::vector<std::future<StepResult>> step_futures;
+    std::vector<std::future<StepResult>> preload_futures;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stop_requested_ = true;
         thread_to_join = std::move(loop_thread_);
+        step_futures = std::move(active_step_futures_);
+        preload_futures = std::move(prefetch_futures_);
+        active_step_ids_.clear();
+        prefetch_step_ids_.clear();
     }
     if (thread_to_join && thread_to_join->joinable()) {
         thread_to_join->join();
+    }
+    for (auto& fut : step_futures) {
+        if (fut.valid()) {
+            try {
+                fut.wait();
+            } catch (...) {
+            }
+        }
+    }
+    for (auto& fut : preload_futures) {
+        if (fut.valid()) {
+            try {
+                fut.wait();
+            } catch (...) {
+            }
+        }
     }
 }
 
@@ -103,6 +271,14 @@ void ExecutiveController::set_llm_interface(LLMInterface* llm) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (workflow_engine_) {
         workflow_engine_->setLLMInterface(llm);
+    }
+}
+
+void ExecutiveController::set_config(Config* cfg) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_ = cfg;
+    if (workflow_engine_) {
+        workflow_engine_->setConfig(cfg);
     }
 }
 
@@ -175,7 +351,7 @@ std::string ExecutiveController::execute_goal(const std::string& goal) {
         current_trajectory_.created_at = current_plan_.created_at_ms;
         current_trajectory_.embedding = goal_embedding_;
 
-        update_current_embedding_unlocked();
+        refresh_goal_state_embeddings_unlocked();
         persist_current_plan_unlocked();
 
         // Start the execution loop
@@ -247,7 +423,7 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
         // For now, we rely on the controller already having session_id set by the AgentInterface.
         
         update_goal_embedding_unlocked(current_plan_.goal);
-        update_current_embedding_unlocked();
+        refresh_goal_state_embeddings_unlocked();
         persist_current_plan_unlocked();
         
         state_ = ControllerState::IDLE;
@@ -382,7 +558,7 @@ void ExecutiveController::evaluate_state() {
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        update_current_embedding_unlocked();
+        collectPrefetchResults_unlocked();
 
         // Check for completed futures
         auto fut_it = active_step_futures_.begin();
@@ -420,6 +596,8 @@ void ExecutiveController::evaluate_state() {
 
 void ExecutiveController::decide_transition() {
     std::vector<PlanStep> steps_to_start;
+    std::vector<PlanStep> steps_to_prefetch;
+    std::vector<std::pair<std::string, StepResult>> prefetched_completions;
     std::string plan_id_for_dispatch;
     StepExecutionContext execution_context;
 
@@ -547,6 +725,20 @@ void ExecutiveController::decide_transition() {
             }
 
             if (deps_met) {
+                if (prefetch_cache_.count(step.step_id) > 0) {
+                    step.status = StepStatus::RUNNING;
+                    step.started_at_ms = nowMs();
+                    prefetched_completions.push_back({step.step_id, prefetch_cache_.at(step.step_id)});
+                    prefetch_cache_.erase(step.step_id);
+                    ++retrieval_prefetch_hits_;
+                    continue;
+                }
+
+                if (step.type == StepType::RETRIEVAL &&
+                    countActiveRetrievals_unlocked() >= maxParallelRetrieval_unlocked()) {
+                    continue;
+                }
+
                 // Step 6.2: Global Constraint Check
                 std::string action_type = "unknown";
                 nlohmann::json check_payload = step.payload;
@@ -576,6 +768,26 @@ void ExecutiveController::decide_transition() {
             }
         }
 
+        if (retrievalPrefetchEnabled_unlocked()) {
+            for (auto& step : current_plan_.steps) {
+                if (!isRetrievalPrefetchCandidate_unlocked(step)) {
+                    continue;
+                }
+                if (countActiveRetrievals_unlocked() >= maxParallelRetrieval_unlocked()) {
+                    break;
+                }
+
+                nlohmann::json check_payload = step.payload;
+                auto check_result = constraint_checker_.check_action(
+                    "file_read", {{"file_path", check_payload.value("query", "")}});
+                if (!check_result.allowed) {
+                    continue;
+                }
+
+                steps_to_prefetch.push_back(step);
+            }
+        }
+
         if (!steps_to_start.empty()) {
             transition_to_unlocked(ControllerState::EXECUTING_STEP);
             current_plan_.updated_at_ms = nowMs();
@@ -584,6 +796,12 @@ void ExecutiveController::decide_transition() {
 
         plan_id_for_dispatch = current_plan_.plan_id;
         execution_context = buildStepExecutionContext(current_plan_);
+        attachEmbeddingSnapshot_unlocked(execution_context);
+    }
+
+    for (const auto& [step_id, cached] : prefetched_completions) {
+        emit_event(EventType::STEP_STARTED, step_id);
+        handle_step_completion(cached);
     }
 
     for (const auto& step : steps_to_start) {
@@ -594,6 +812,15 @@ void ExecutiveController::decide_transition() {
             std::lock_guard<std::mutex> lock(mutex_);
             active_step_futures_.push_back(std::move(fut));
             active_step_ids_.push_back(step.step_id);
+        }
+    }
+
+    for (const auto& step : steps_to_prefetch) {
+        if (workflow_engine_) {
+            auto fut = workflow_engine_->executeStepAsync(step, plan_id_for_dispatch, execution_context);
+            std::lock_guard<std::mutex> lock(mutex_);
+            prefetch_futures_.push_back(std::move(fut));
+            prefetch_step_ids_.push_back(step.step_id);
         }
     }
 }
@@ -697,6 +924,7 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
         emit_event(EventType::STEP_FAILED, step.step_id, {{"error", err}});
 
         lock.lock();
+        invalidatePrefetchForStep_unlocked(step.step_id);
         if (step.failure_policy.revise_plan_on_failure) {
             transition_to_unlocked(ControllerState::REVISING_PLAN);
             current_plan_.updated_at_ms = nowMs();
@@ -736,7 +964,11 @@ nlohmann::json ExecutiveController::dispatch_step(PlanStep& step) {
     if (!workflow_engine_) {
         return {{"status", "error"}, {"error_message", "WorkflowEngine not available"}};
     }
-    const StepExecutionContext context = buildStepExecutionContext(current_plan_);
+    const StepExecutionContext context = [&]() {
+        StepExecutionContext ctx = buildStepExecutionContext(current_plan_);
+        attachEmbeddingSnapshot_unlocked(ctx);
+        return ctx;
+    }();
     auto result = workflow_engine_->executeStep(step, current_plan_.plan_id, context);
     return result.data;
 }
@@ -1005,21 +1237,62 @@ void ExecutiveController::update_current_embedding_unlocked() {
 
     nlohmann::json state;
     state["schema_version"] = 2;
-    state["goal"] = current_plan_.goal;
-    
+    state["goal"] = Thoth::cleanGoalForStorage(current_plan_.goal);
     state["completed_steps_summary"] = "none";
     state["remaining_steps_summary"] = "none";
     state["constraints"] = "none";
     state["known_blockers"] = "none";
 
-    std::string state_str = state.dump();
+    const std::string state_str = state.dump();
     current_embedding_ = rag_->engine->embed(state_str);
-    
+
     if (current_embedding_.empty()) {
         emit_event(EventType::EMBEDDING_FAILED, "", {{"type", "state"}, {"input", state_str}});
     }
 
     rag_->setCurrentEmbedding(current_embedding_);
+}
+
+void ExecutiveController::refresh_goal_state_embeddings_unlocked() {
+    if (!rag_ || !rag_->engine || current_plan_.goal.empty()) {
+        return;
+    }
+
+    const std::string clean_goal = Thoth::cleanGoalForStorage(current_plan_.goal);
+
+    nlohmann::json structured_goal;
+    structured_goal["schema_version"] = 2;
+    structured_goal["type"] = "goal";
+    structured_goal["content"] = clean_goal;
+
+    nlohmann::json state;
+    state["schema_version"] = 2;
+    state["goal"] = clean_goal;
+    state["completed_steps_summary"] = "none";
+    state["remaining_steps_summary"] = "none";
+    state["constraints"] = "none";
+    state["known_blockers"] = "none";
+
+    const std::string goal_str = structured_goal.dump();
+    const std::string state_str = state.dump();
+    const auto batch = rag_->engine->embedBatch({goal_str, state_str});
+    if (batch.size() < 2) {
+        return;
+    }
+
+    goal_embedding_ = batch[0];
+    current_embedding_ = batch[1];
+
+    if (goal_embedding_.empty()) {
+        emit_event(EventType::EMBEDDING_FAILED, "", {{"type", "goal"}, {"input", goal_str}});
+    }
+    if (current_embedding_.empty()) {
+        emit_event(EventType::EMBEDDING_FAILED, "", {{"type", "state"}, {"input", state_str}});
+    }
+
+    rag_->setGoalEmbedding(goal_embedding_);
+    rag_->setCurrentEmbedding(current_embedding_);
+    current_trajectory_.embedding = goal_embedding_;
 }
 
 void ExecutiveController::update_trajectory_embedding() {
@@ -1152,10 +1425,16 @@ void ExecutiveController::reset_goal_metrics_unlocked() {
     retrieval_time_ms_ = 0;
     llm_synthesis_time_ms_ = 0;
     retrieved_chunk_count_ = 0;
+    synthesis_prompt_chars_ = 0;
+    synthesis_context_truncated_ = false;
     last_grag_alpha_ = 0.0f;
     last_grag_routing_mode_.clear();
     final_trajectory_score_ = 0.0f;
     reflection_skip_reason_.clear();
+    prefetch_cache_.clear();
+    prefetch_futures_.clear();
+    prefetch_step_ids_.clear();
+    retrieval_prefetch_hits_ = 0;
 }
 
 void ExecutiveController::record_step_metrics_unlocked(const PlanStep& step, const StepResult& result) {
@@ -1176,6 +1455,13 @@ void ExecutiveController::record_step_metrics_unlocked(const PlanStep& step, con
         }
     } else if (step.type == StepType::LLM) {
         llm_synthesis_time_ms_ += result.latency_ms;
+        if (result.data.contains("synthesis_prompt_chars") && result.data["synthesis_prompt_chars"].is_number()) {
+            synthesis_prompt_chars_ = result.data["synthesis_prompt_chars"].get<int>();
+        }
+        if (result.data.contains("synthesis_context_truncated") &&
+            result.data["synthesis_context_truncated"].is_boolean()) {
+            synthesis_context_truncated_ = result.data["synthesis_context_truncated"].get<bool>();
+        }
     }
 }
 
@@ -1210,6 +1496,8 @@ void ExecutiveController::emit_goal_cognitive_metrics_unlocked(const std::string
     record.max_reflections = max_reflections_;
     record.plan_reused = plan_reused_;
     record.reflection_skip_reason = reflection_skip_reason_;
+    record.synthesis_prompt_chars = synthesis_prompt_chars_;
+    record.synthesis_context_truncated = synthesis_context_truncated_;
 
     CognitiveMetricsLogger::instance().logGoalMetrics(record);
     StructuredLogger::instance().log(LogLevel::Info,

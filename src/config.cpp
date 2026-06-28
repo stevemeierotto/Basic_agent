@@ -1,5 +1,6 @@
 #include "../include/config.h"
 #include "../include/plan_reuse_config.h"
+#include "../include/runtime_latency_config.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -34,7 +35,12 @@ Config::Config()
       wd(0.4f),
       wt(0.2f),
       keyword_weight(0.3f),
-      graph_weight(0.3f)
+      graph_weight(0.3f),
+      synthesis_max_context_chars(
+          static_cast<int>(Thoth::RuntimeLatency::kDefaultSynthesisMaxContextChars)),
+      synthesis_num_predict(Thoth::RuntimeLatency::kDefaultSynthesisNumPredict),
+      max_parallel_retrieval(Thoth::RuntimeLatency::kDefaultMaxParallelRetrieval),
+      enable_retrieval_prefetch(Thoth::RuntimeLatency::kDefaultEnableRetrievalPrefetch)
 {
     if (const char* maxReflections = std::getenv("THOTH_MAX_REFLECTIONS")) {
         try {
@@ -83,6 +89,12 @@ bool Config::loadFromJson(const std::string& path) {
     if (j.contains("similarity_threshold")) similarity_threshold = j["similarity_threshold"];
     if (j.contains("llm_model")) llm_model = j["llm_model"];
     if (j.contains("embedding_model")) embedding_model = j["embedding_model"];
+    if (j.contains("synthesis_max_context_chars")) {
+        synthesis_max_context_chars = j["synthesis_max_context_chars"];
+    }
+    if (j.contains("synthesis_num_predict")) synthesis_num_predict = j["synthesis_num_predict"];
+    if (j.contains("max_parallel_retrieval")) max_parallel_retrieval = j["max_parallel_retrieval"];
+    if (j.contains("enable_retrieval_prefetch")) enable_retrieval_prefetch = j["enable_retrieval_prefetch"];
 
     return true;
 }
@@ -115,6 +127,10 @@ bool Config::saveToJson(const std::string& path) const {
     j["allow_shell_exec"] = allow_shell_exec;
     j["allow_web"] = allow_web;
     j["allow_file_io"] = allow_file_io;
+    j["synthesis_max_context_chars"] = synthesis_max_context_chars;
+    j["synthesis_num_predict"] = synthesis_num_predict;
+    j["max_parallel_retrieval"] = max_parallel_retrieval;
+    j["enable_retrieval_prefetch"] = enable_retrieval_prefetch;
 
     std::ofstream file(path);
     if (!file.is_open()) return false;

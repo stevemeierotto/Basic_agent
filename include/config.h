@@ -55,6 +55,15 @@ public:
     /** Reflection replan cycles allowed per goal (0 = disabled). Env: THOTH_MAX_REFLECTIONS. */
     int max_reflections = 2;
 
+    /** C7: cap retrieved context chars for LLM synthesis steps. */
+    int synthesis_max_context_chars = 8192;
+    /** C7: Ollama num_predict for synthesis steps (planner uses max_tokens). */
+    int synthesis_num_predict = 512;
+    /** C7 Phase 3: cap concurrent RETRIEVAL steps (dispatch + prefetch). */
+    int max_parallel_retrieval = 4;
+    /** C7 Phase 3: start RETRIEVAL when only one RUNNING dependency remains. */
+    bool enable_retrieval_prefetch = true;
+
     // Load/Save from JSON or ENV
     bool loadFromJson(const std::string& path);
     bool saveToJson(const std::string& path) const;
