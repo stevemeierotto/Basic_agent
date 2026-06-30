@@ -15,14 +15,20 @@
 #include <shared_mutex>
 #include <chrono>
 #include <memory>
+#include <unordered_set>
 #include "memory_repository_factory.h"
 #include "config.h"
 #include "strategy.h"
 #include "memory_pruner.h"
 #include "memory_pruning_config.h"
 #include "plan_reuse_config.h"
+#include "consolidation_policy.h"
+#include "clock.h"
 
-namespace Thoth { class SQLiteMemoryRepository; }
+class LLMInterface;
+class EmbeddingEngine;
+
+namespace Thoth { class SQLiteMemoryRepository; class Clock; }
 
 using json = nlohmann::json;
 
@@ -57,8 +63,21 @@ public:
     std::string getActiveSessionId() const;
 
     // Conversation
+    struct TimedMessage {
+        std::string role;
+        std::string content;
+        int64_t timestamp_ms = 0;
+    };
+
     void addMessage(const std::string& role, const std::string& content);
+    void addMessageWithTimestamp(const std::string& role,
+                                 const std::string& content,
+                                 int64_t timestamp_ms,
+                                 bool triggerConsolidation = true);
     void addMessages(const std::vector<std::pair<std::string, std::string>>& messages);
+    /** Replace hot tier; preserves timestamps; consolidates once at end. */
+    void loadConversation(const std::vector<TimedMessage>& messages,
+                          const std::string& summary = "");
     std::vector<json> getConversation() const;
     void clear();
 
@@ -153,8 +172,18 @@ public:
     static std::string calculateContentHash(const std::string& text);
 
 
-    // Pruning (Phase 4, Step 4.2)
+    // Pruning / consolidation (Phase 4, Step 4.2 / M2)
+    void configureConsolidation(LLMInterface* llm,
+                                EmbeddingEngine* embeddingEngine,
+                                std::shared_ptr<Thoth::Clock> clock = nullptr);
+    /** Discovery only — no LLM for inactive sessions; consolidates active if stale. */
+    void runStartupConsolidationDiscovery();
+    Thoth::ConsolidationDecision evaluateConsolidationPolicy(const std::string& sessionId) const;
+    bool isSessionMarkedStale(const std::string& sessionId) const;
     std::vector<Thoth::MemoryRepository::ArchivedTurnRecord> getArchivedTurns() const;
+    std::vector<Thoth::MemoryRepository::WarmMemoryRecord> getRecentWarmMemory(int limit = 5) const;
+    std::vector<Thoth::MemoryRepository::WarmMemoryRecord> searchWarmMemory(
+        const std::vector<float>& queryEmbedding, int limit = 5) const;
 
     // Fact Store Access (Phase 4, Step 4.3)
     Thoth::SQLiteMemoryRepository* getSQLiteRepo() const;
@@ -164,10 +193,15 @@ public:
 
 private:
     void migrateEmbeddings(); // Step 2 migration path
-    void maybePruneAfterWrite(const std::string& sessionId);
+    void consolidateIfNeeded(const std::string& sessionId);
+    void onSessionActivated(const std::string& sessionId);
+    int64_t currentTimeMs() const;
 
     std::unique_ptr<Thoth::MemoryRepository> repo;
     std::unique_ptr<Thoth::MemoryPruner> pruner;
+    const Config* config_ = nullptr;
+    std::shared_ptr<Thoth::Clock> clock_;
+    std::unordered_set<std::string> stale_session_ids_;
     std::string activeSessionId = "default_session";
     std::string configPath;
     

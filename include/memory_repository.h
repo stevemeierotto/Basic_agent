@@ -3,6 +3,7 @@
 #include <vector>
 #include <optional>
 #include <cstdint>
+#include "memory_scope.h"
 
 namespace Thoth {
 
@@ -56,6 +57,48 @@ public:
     virtual bool archiveMessages(const std::string& sessionId, int count, int summaryVersion) = 0;
     virtual std::vector<ArchivedTurnRecord> getArchivedMessages(const std::string& sessionId) = 0;
     virtual int getHotMessageCount(const std::string& sessionId) = 0;
+    virtual std::vector<MessageRecord> getOldestMessages(const std::string& sessionId, int count) = 0;
+    virtual std::optional<int64_t> getOldestHotMessageTimestamp(const std::string& sessionId) = 0;
+
+    struct WarmMemoryRecord {
+        std::string id;
+        std::string session_id;
+        MemoryScope scope = MemoryScope::SESSION;
+        std::string episodic_payload;
+        std::string rendered_summary;
+        float importance = 0.5f;
+        float novelty = 0.5f;
+        float confidence = 1.0f;
+        int covered_turn_start = 0;
+        int covered_turn_end = 0;
+        int64_t covered_ts_start = 0;
+        int64_t covered_ts_end = 0;
+        std::string parent_archive_ids_json;
+        std::string derived_from_hash;
+        int summary_version = 1;
+        std::string prompt_version;
+        std::string llm_model;
+        bool summary_missing = false;
+        int64_t created_at_ms = 0;
+        std::vector<float> embedding;
+        int embedding_version = 1;
+    };
+
+    struct MemoryConsolidationRequest {
+        std::string session_id;
+        std::vector<MessageRecord> messages_to_archive;
+        std::optional<WarmMemoryRecord> warm;
+    };
+
+    /** Atomic: warm + embedding + archive + delete hot. Caller must embed before invoke. */
+    virtual bool consolidateSessionBatch(const MemoryConsolidationRequest& request) = 0;
+    virtual std::vector<WarmMemoryRecord> getRecentWarmMemory(const std::string& sessionId, int limit) = 0;
+    virtual std::vector<WarmMemoryRecord> searchWarmMemoryByEmbedding(
+        const std::string& sessionId,
+        MemoryScope scope,
+        const std::vector<float>& queryEmbedding,
+        int limit,
+        int embeddingVersion) = 0;
 
     // Structured Fact Store (Phase 4, Step 4.3)
     struct FactRecord {

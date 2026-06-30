@@ -269,6 +269,7 @@ ExecutiveController::~ExecutiveController() {
 
 void ExecutiveController::set_llm_interface(LLMInterface* llm) {
     std::lock_guard<std::mutex> lock(mutex_);
+    llm_interface_ = llm;
     if (workflow_engine_) {
         workflow_engine_->setLLMInterface(llm);
     }
@@ -340,6 +341,7 @@ std::string ExecutiveController::execute_goal(const std::string& goal) {
         const auto planStart = nowMs();
         current_plan_ = planner_->create_plan(enhanced_goal);
         planning_time_ms_ += nowMs() - planStart;
+        sync_planning_tokens_unlocked();
         current_plan_.created_at_ms = nowMs();
         current_plan_.updated_at_ms = current_plan_.created_at_ms;
         
@@ -657,6 +659,7 @@ void ExecutiveController::decide_transition() {
                 const auto planStart = nowMs();
                 auto new_plan = planner_->create_plan(reflection_goal);
                 planning_time_ms_ += nowMs() - planStart;
+                sync_planning_tokens_unlocked();
                 lock.lock();
                 
                 current_plan_ = new_plan;
@@ -1427,6 +1430,10 @@ void ExecutiveController::reset_goal_metrics_unlocked() {
     retrieved_chunk_count_ = 0;
     synthesis_prompt_chars_ = 0;
     synthesis_context_truncated_ = false;
+    planning_tokens_ = 0;
+    if (llm_interface_) {
+        llm_interface_->resetSessionTokenUsage();
+    }
     last_grag_alpha_ = 0.0f;
     last_grag_routing_mode_.clear();
     final_trajectory_score_ = 0.0f;
@@ -1465,6 +1472,13 @@ void ExecutiveController::record_step_metrics_unlocked(const PlanStep& step, con
     }
 }
 
+void ExecutiveController::sync_planning_tokens_unlocked() {
+    if (!llm_interface_) {
+        return;
+    }
+    planning_tokens_ = llm_interface_->sessionTokenUsage().total_tokens;
+}
+
 void ExecutiveController::emit_goal_cognitive_metrics_unlocked(const std::string& outcome,
                                                                float trajectory_score) {
     if (current_plan_.plan_id.empty()) {
@@ -1498,6 +1512,14 @@ void ExecutiveController::emit_goal_cognitive_metrics_unlocked(const std::string
     record.reflection_skip_reason = reflection_skip_reason_;
     record.synthesis_prompt_chars = synthesis_prompt_chars_;
     record.synthesis_context_truncated = synthesis_context_truncated_;
+    if (llm_interface_) {
+        const LlmTokenUsage usage = llm_interface_->sessionTokenUsage();
+        record.prompt_tokens = usage.prompt_tokens;
+        record.completion_tokens = usage.completion_tokens;
+        record.total_tokens = usage.total_tokens;
+        record.planning_tokens = planning_tokens_;
+        record.synthesis_tokens = std::max<std::int64_t>(0, usage.total_tokens - planning_tokens_);
+    }
 
     CognitiveMetricsLogger::instance().logGoalMetrics(record);
     StructuredLogger::instance().log(LogLevel::Info,

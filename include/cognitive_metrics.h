@@ -40,7 +40,11 @@ struct GoalCognitiveMetricsRecord {
     int max_reflections = 0;
     bool plan_reused = false;
 
-    std::int64_t total_tokens = 0; // reserved; 0 until LLMInterface exposes counts
+    std::int64_t total_tokens = 0;
+    std::int64_t prompt_tokens = 0;
+    std::int64_t completion_tokens = 0;
+    std::int64_t planning_tokens = 0;
+    std::int64_t synthesis_tokens = 0;
     std::string reflection_skip_reason;
 
     /** C7: last LLM synthesis prompt size and whether retrieved context was capped. */

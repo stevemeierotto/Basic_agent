@@ -88,6 +88,8 @@ BasicAgentPlugin::BasicAgentPlugin()
     ToolRegistry::instance().setConfig(&config);
     syncPlannerPromptConfig();
     cmdProcessor.syncPromptConfig();
+    memory.configureConsolidation(&llm, embeddingEngine.get());
+    memory.runStartupConsolidationDiscovery();
 
     // --- Initialize RAG index ---
     const char* testIndexPath = std::getenv("THOTH_TEST_SUITE_INDEX");
@@ -135,13 +137,17 @@ std::string BasicAgentPlugin::processInput(const std::string& input) {
 
 void BasicAgentPlugin::setConversationMemory(const std::vector<std::pair<std::string, std::string>>& messages,
                                              const std::string& summary) {
-    memory.clear();
+    std::vector<Memory::TimedMessage> timed;
+    timed.reserve(messages.size());
     for (const auto& msg : messages) {
-        memory.addMessage(msg.first, msg.second);
+        timed.push_back({msg.first, msg.second, 0});
     }
-    if (!summary.empty()) {
-        memory.updateSummary("Imported context", summary);
-    }
+    setConversationMemory(timed, summary);
+}
+
+void BasicAgentPlugin::setConversationMemory(const std::vector<Memory::TimedMessage>& messages,
+                                             const std::string& summary) {
+    memory.loadConversation(messages, summary);
 }
 
 bool BasicAgentPlugin::ragPathsNeedIndexing(const std::vector<std::string>& filePaths) const {

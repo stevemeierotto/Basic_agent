@@ -18,6 +18,9 @@ constexpr std::size_t kMaxHotMessages = 50;
 /** Turns moved to cold tier (`archived_turns`) when hot tier exceeds capacity. */
 constexpr std::size_t kPruneBatchSize = 10;
 
+/** Max consolidation batches per single invocation (M2). */
+constexpr std::size_t kMaxBatchesPerInvocation = 5;
+
 } // namespace Thoth::MemoryPruning
 
 #endif // THOTH_MEMORY_PRUNING_CONFIG_H

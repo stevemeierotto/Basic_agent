@@ -33,6 +33,16 @@ public:
     bool archiveMessages(const std::string& sessionId, int count, int summaryVersion) override;
     std::vector<ArchivedTurnRecord> getArchivedMessages(const std::string& sessionId) override;
     int getHotMessageCount(const std::string& sessionId) override;
+    std::vector<MessageRecord> getOldestMessages(const std::string& sessionId, int count) override;
+    std::optional<int64_t> getOldestHotMessageTimestamp(const std::string& sessionId) override;
+    bool consolidateSessionBatch(const MemoryConsolidationRequest& request) override;
+    std::vector<WarmMemoryRecord> getRecentWarmMemory(const std::string& sessionId, int limit) override;
+    std::vector<WarmMemoryRecord> searchWarmMemoryByEmbedding(
+        const std::string& sessionId,
+        MemoryScope scope,
+        const std::vector<float>& queryEmbedding,
+        int limit,
+        int embeddingVersion) override;
 
     // Structured Fact Store
     bool upsertFact(const FactRecord& fact) override;

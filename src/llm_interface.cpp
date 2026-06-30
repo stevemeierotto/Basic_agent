@@ -8,8 +8,88 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <regex>
+#include <cstdint>
 
 using json = nlohmann::json;
+
+namespace {
+
+std::int64_t estimateTokensFromText(const std::string& text) {
+    return static_cast<std::int64_t>((text.size() + 3) / 4);
+}
+
+} // namespace
+
+void LLMInterface::resetSessionTokenUsage() {
+    std::lock_guard<std::recursive_mutex> lock(llmMutex);
+    last_call_usage_ = {};
+    session_usage_ = {};
+}
+
+LlmTokenUsage LLMInterface::lastCallTokenUsage() const {
+    std::lock_guard<std::recursive_mutex> lock(llmMutex);
+    return last_call_usage_;
+}
+
+LlmTokenUsage LLMInterface::sessionTokenUsage() const {
+    std::lock_guard<std::recursive_mutex> lock(llmMutex);
+    return session_usage_;
+}
+
+void LLMInterface::recordTokenUsage(const LlmTokenUsage& usage) {
+    std::lock_guard<std::recursive_mutex> lock(llmMutex);
+    last_call_usage_ = usage;
+    session_usage_.prompt_tokens += usage.prompt_tokens;
+    session_usage_.completion_tokens += usage.completion_tokens;
+    session_usage_.total_tokens += usage.total_tokens;
+}
+
+LlmTokenUsage LLMInterface::estimateTokenUsage(const std::string& prompt, const std::string& response) {
+    LlmTokenUsage usage;
+    usage.prompt_tokens = estimateTokensFromText(prompt);
+    usage.completion_tokens = estimateTokensFromText(response);
+    usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+    return usage;
+}
+
+LlmTokenUsage LLMInterface::parseOllamaTokenUsage(const std::string& rawJson) {
+    LlmTokenUsage usage;
+    try {
+        auto j = json::parse(rawJson);
+        if (j.contains("prompt_eval_count") && j["prompt_eval_count"].is_number_integer()) {
+            usage.prompt_tokens = j["prompt_eval_count"].get<std::int64_t>();
+        }
+        if (j.contains("eval_count") && j["eval_count"].is_number_integer()) {
+            usage.completion_tokens = j["eval_count"].get<std::int64_t>();
+        }
+        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+    } catch (...) {
+    }
+    return usage;
+}
+
+LlmTokenUsage LLMInterface::parseOpenAiTokenUsage(const std::string& rawJson) {
+    LlmTokenUsage usage;
+    try {
+        auto j = json::parse(rawJson);
+        if (j.contains("usage") && j["usage"].is_object()) {
+            const auto& u = j["usage"];
+            if (u.contains("prompt_tokens") && u["prompt_tokens"].is_number_integer()) {
+                usage.prompt_tokens = u["prompt_tokens"].get<std::int64_t>();
+            }
+            if (u.contains("completion_tokens") && u["completion_tokens"].is_number_integer()) {
+                usage.completion_tokens = u["completion_tokens"].get<std::int64_t>();
+            }
+            if (u.contains("total_tokens") && u["total_tokens"].is_number_integer()) {
+                usage.total_tokens = u["total_tokens"].get<std::int64_t>();
+            } else {
+                usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+            }
+        }
+    } catch (...) {
+    }
+    return usage;
+}
 
 static std::string redactSensitiveText(const std::string& input) {
     std::string output = input;
@@ -155,13 +235,19 @@ static bool envTruthy(const char* name) {
 std::string LLMInterface::query(const std::string& prompt, int num_predict_override) {
     try {
         if (auto scripted = Thoth::RobustnessMockResponses::pop()) {
-            return *scripted;
+            const std::string response = *scripted;
+            recordTokenUsage(estimateTokenUsage(prompt, response));
+            return response;
         }
         if (envTruthy("THOTH_MOCK_LLM_UNAVAILABLE")) {
-            return "Assistant: [Error] LLM service unavailable (mock).";
+            const std::string response = "Assistant: [Error] LLM service unavailable (mock).";
+            recordTokenUsage(estimateTokenUsage(prompt, response));
+            return response;
         }
         if (Thoth::testSuiteDevTierEnabled()) {
-            return Thoth::mockTestSuiteLlmResponse(prompt);
+            const std::string response = Thoth::mockTestSuiteLlmResponse(prompt);
+            recordTokenUsage(estimateTokenUsage(prompt, response));
+            return response;
         }
         if (backend == LLMBackend::Ollama) {
             return askOllama(prompt, num_predict_override);
@@ -271,6 +357,11 @@ std::string LLMInterface::askOllama(const std::string& prompt, int num_predict_o
             return std::string("Assistant: [Error] Ollama failed: ") + redactSensitiveText(err);
         }
 
+        LlmTokenUsage usage = parseOllamaTokenUsage(raw);
+        if (usage.total_tokens <= 0) {
+            usage = estimateTokenUsage(prompt, response);
+        }
+        recordTokenUsage(usage);
         return response;
 
     } catch (const std::exception& e) {
@@ -328,6 +419,12 @@ std::string LLMInterface::askOpenAI(const std::string& prompt) {
 
         auto message = json_response["choices"][0]["message"];
         std::string content = message["content"].get<std::string>();
+
+        LlmTokenUsage usage = parseOpenAiTokenUsage(readBuffer);
+        if (usage.total_tokens <= 0) {
+            usage = estimateTokenUsage(prompt, content);
+        }
+        recordTokenUsage(usage);
         
         curl_easy_cleanup(curl_local);
         curl_slist_free_all(headers_local);

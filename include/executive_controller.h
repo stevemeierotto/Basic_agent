@@ -28,6 +28,8 @@
 #include "constraint_checker.h"
 #include "trajectory_builder.h"
 #include "reflection_utils.h"
+
+class LLMInterface;
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -173,6 +175,7 @@ protected:
 
     void reset_goal_metrics_unlocked();
     void record_step_metrics_unlocked(const PlanStep& step, const StepResult& result);
+    void sync_planning_tokens_unlocked();
     void emit_goal_cognitive_metrics_unlocked(const std::string& outcome, float trajectory_score);
 
     int countActiveRetrievals_unlocked() const;
@@ -198,6 +201,7 @@ protected:
     std::unique_ptr<IExecutionMode> execution_mode_;
     ConstraintChecker constraint_checker_;
     EventCallback event_callback_;
+    LLMInterface* llm_interface_ = nullptr;
 
     Plan current_plan_;
     Trajectory current_trajectory_;
@@ -223,6 +227,7 @@ protected:
     int retrieved_chunk_count_ = 0;
     int synthesis_prompt_chars_ = 0;
     bool synthesis_context_truncated_ = false;
+    std::int64_t planning_tokens_ = 0;
     float last_grag_alpha_ = 0.0f;
     std::string last_grag_routing_mode_;
     float final_trajectory_score_ = 0.0f;

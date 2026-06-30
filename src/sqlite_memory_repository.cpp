@@ -1,17 +1,26 @@
 #include "../include/sqlite_memory_repository.h"
 #include "../include/decision_trace.h"
+#include "../include/grag_scorer.h"
+#include "../include/memory_consolidation_config.h"
 #include <sqlite3.h>
+#include <json.hpp>
 #include <iostream>
 #include <vector>
 #include <chrono>
 #include <cstring>
 #include <algorithm>
+#include <cstdlib>
 
 namespace Thoth {
 
 static std::string safe_col_text(sqlite3_stmt* stmt, int col) {
     const unsigned char* text = sqlite3_column_text(stmt, col);
     return text ? std::string(reinterpret_cast<const char*>(text)) : "";
+}
+
+static bool injectConsolidationFail(const char* stage) {
+    const char* env = std::getenv("THOTH_INJECT_CONSOLIDATION_FAIL");
+    return env && stage && std::string(env) == stage;
 }
 
 struct SQLiteMemoryRepository::DBHandle {
@@ -127,6 +136,35 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             "  archived_at_ms INTEGER NOT NULL,"
             "  summary_version INTEGER,"
             "  FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE"
+            ");"
+            "CREATE TABLE IF NOT EXISTS warm_memory ("
+            "  id TEXT PRIMARY KEY,"
+            "  session_id TEXT NOT NULL,"
+            "  scope INTEGER NOT NULL DEFAULT 0,"
+            "  episodic_payload TEXT NOT NULL,"
+            "  rendered_summary TEXT NOT NULL,"
+            "  importance REAL NOT NULL,"
+            "  novelty REAL NOT NULL,"
+            "  confidence REAL NOT NULL,"
+            "  covered_turn_start INTEGER,"
+            "  covered_turn_end INTEGER,"
+            "  covered_ts_start INTEGER,"
+            "  covered_ts_end INTEGER,"
+            "  parent_archive_ids TEXT,"
+            "  derived_from_hash TEXT NOT NULL,"
+            "  summary_version INTEGER NOT NULL,"
+            "  prompt_version TEXT,"
+            "  llm_model TEXT,"
+            "  summary_missing INTEGER DEFAULT 0,"
+            "  created_at_ms INTEGER NOT NULL,"
+            "  FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE"
+            ");"
+            "CREATE TABLE IF NOT EXISTS warm_memory_embeddings ("
+            "  memory_id TEXT NOT NULL,"
+            "  embedding BLOB NOT NULL,"
+            "  embedding_version INTEGER NOT NULL,"
+            "  PRIMARY KEY (memory_id, embedding_version),"
+            "  FOREIGN KEY (memory_id) REFERENCES warm_memory(id) ON DELETE CASCADE"
             ");"
             "CREATE TABLE IF NOT EXISTS facts ("
             "  key TEXT PRIMARY KEY,"
@@ -354,7 +392,8 @@ bool SQLiteMemoryRepository::storeSummary(const std::string& sessionId, const st
         sqlite3_bind_text(stmt, 1, sessionId.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 2, type.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 3, content.c_str(), -1, SQLITE_STATIC);
-        sqlite3_bind_int64(stmt, 4, std::chrono::system_clock::now().time_since_epoch().count());
+        sqlite3_bind_int64(stmt, 4, std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
         bool success = (sqlite3_step(stmt) == SQLITE_DONE);
         sqlite3_finalize(stmt);
         return success;
@@ -1047,7 +1086,8 @@ bool SQLiteMemoryRepository::archiveMessages(const std::string& sessionId, int c
             return false;
         }
 
-        int64_t now = std::chrono::system_clock::now().time_since_epoch().count();
+        int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
         int idx = 0;
         for (const auto& rec : to_archive) {
             std::string archive_id = sessionId + "-arc-" + std::to_string(rec.ts) + "-" + std::to_string(idx++);
@@ -1140,6 +1180,331 @@ int SQLiteMemoryRepository::getHotMessageCount(const std::string& sessionId) {
         sqlite3_finalize(stmt);
     } catch (...) {}
     return count;
+}
+
+std::vector<MessageRecord> SQLiteMemoryRepository::getOldestMessages(const std::string& sessionId, int count) {
+    std::vector<MessageRecord> messages;
+    if (count <= 0) {
+        return messages;
+    }
+    try {
+        const char* sql = "SELECT role, content, timestamp_ms FROM messages WHERE session_id = ? "
+                          "ORDER BY timestamp_ms ASC LIMIT ?;";
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return messages;
+        }
+        sqlite3_bind_text(stmt, 1, sessionId.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, count);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            messages.push_back({
+                safe_col_text(stmt, 0),
+                safe_col_text(stmt, 1),
+                sqlite3_column_int64(stmt, 2)
+            });
+        }
+        sqlite3_finalize(stmt);
+    } catch (...) {}
+    return messages;
+}
+
+std::optional<int64_t> SQLiteMemoryRepository::getOldestHotMessageTimestamp(const std::string& sessionId) {
+    try {
+        const char* sql = "SELECT MIN(timestamp_ms) FROM messages WHERE session_id = ?;";
+        sqlite3_stmt* stmt;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return std::nullopt;
+        }
+        sqlite3_bind_text(stmt, 1, sessionId.c_str(), -1, SQLITE_STATIC);
+        std::optional<int64_t> ts;
+        if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) != SQLITE_NULL) {
+            ts = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+        return ts;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+bool SQLiteMemoryRepository::consolidateSessionBatch(const MemoryConsolidationRequest& request) {
+    if (request.messages_to_archive.empty()) {
+        return true;
+    }
+
+    const bool wantsWarm = request.warm.has_value();
+    if (wantsWarm) {
+        if (request.warm->embedding.empty()) {
+            return false;
+        }
+    }
+
+    try {
+        if (!beginTransaction()) {
+            return false;
+        }
+
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+        std::vector<std::string> archiveIds;
+        archiveIds.reserve(request.messages_to_archive.size());
+
+        const char* insert_archive_sql =
+            "INSERT INTO archived_turns (archive_id, session_id, original_timestamp_ms, role, content, "
+            "metadata_json, archived_at_ms, summary_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* insert_archive = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, insert_archive_sql, -1, &insert_archive, nullptr) != SQLITE_OK) {
+            rollback();
+            return false;
+        }
+
+        const std::string warmId = wantsWarm ? request.warm->id : "";
+        const std::string digest = wantsWarm ? request.warm->derived_from_hash : "";
+
+        int idx = 0;
+        for (const auto& rec : request.messages_to_archive) {
+            if (injectConsolidationFail("archive")) {
+                sqlite3_finalize(insert_archive);
+                rollback();
+                return false;
+            }
+
+            const std::string archive_id =
+                request.session_id + "-arc-" + std::to_string(rec.timestamp_ms) + "-" + std::to_string(idx++);
+            archiveIds.push_back(archive_id);
+
+            nlohmann::json metadata;
+            metadata["warm_memory_id"] = warmId;
+            metadata["derived_from_hash"] = digest;
+            metadata["turn_index"] = idx - 1;
+
+            sqlite3_bind_text(insert_archive, 1, archive_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_archive, 2, request.session_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int64(insert_archive, 3, rec.timestamp_ms);
+            sqlite3_bind_text(insert_archive, 4, rec.role.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_archive, 5, rec.content.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_archive, 6, metadata.dump().c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int64(insert_archive, 7, now);
+            sqlite3_bind_int(insert_archive, 8, wantsWarm ? request.warm->summary_version : 0);
+
+            if (sqlite3_step(insert_archive) != SQLITE_DONE) {
+                sqlite3_finalize(insert_archive);
+                rollback();
+                return false;
+            }
+            sqlite3_reset(insert_archive);
+        }
+        sqlite3_finalize(insert_archive);
+
+        if (wantsWarm) {
+            const auto& warm = *request.warm;
+            nlohmann::json parentIds = nlohmann::json::array();
+            for (const auto& id : archiveIds) {
+                parentIds.push_back(id);
+            }
+
+            if (injectConsolidationFail("warm")) {
+                rollback();
+                return false;
+            }
+
+            const char* insert_warm_sql =
+                "INSERT INTO warm_memory (id, session_id, scope, episodic_payload, rendered_summary, "
+                "importance, novelty, confidence, covered_turn_start, covered_turn_end, covered_ts_start, "
+                "covered_ts_end, parent_archive_ids, derived_from_hash, summary_version, prompt_version, "
+                "llm_model, summary_missing, created_at_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+            sqlite3_stmt* insert_warm = nullptr;
+            if (sqlite3_prepare_v2(db_->handle, insert_warm_sql, -1, &insert_warm, nullptr) != SQLITE_OK) {
+                rollback();
+                return false;
+            }
+
+            const std::string parentJson = parentIds.dump();
+            sqlite3_bind_text(insert_warm, 1, warm.id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_warm, 2, warm.session_id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int(insert_warm, 3, static_cast<int>(warm.scope));
+            sqlite3_bind_text(insert_warm, 4, warm.episodic_payload.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_warm, 5, warm.rendered_summary.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_double(insert_warm, 6, warm.importance);
+            sqlite3_bind_double(insert_warm, 7, warm.novelty);
+            sqlite3_bind_double(insert_warm, 8, warm.confidence);
+            sqlite3_bind_int(insert_warm, 9, warm.covered_turn_start);
+            sqlite3_bind_int(insert_warm, 10, warm.covered_turn_end);
+            sqlite3_bind_int64(insert_warm, 11, warm.covered_ts_start);
+            sqlite3_bind_int64(insert_warm, 12, warm.covered_ts_end);
+            sqlite3_bind_text(insert_warm, 13, parentJson.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_warm, 14, warm.derived_from_hash.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int(insert_warm, 15, warm.summary_version);
+            sqlite3_bind_text(insert_warm, 16, warm.prompt_version.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_warm, 17, warm.llm_model.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int(insert_warm, 18, warm.summary_missing ? 1 : 0);
+            sqlite3_bind_int64(insert_warm, 19, warm.created_at_ms > 0 ? warm.created_at_ms : now);
+
+            if (sqlite3_step(insert_warm) != SQLITE_DONE) {
+                sqlite3_finalize(insert_warm);
+                rollback();
+                return false;
+            }
+            sqlite3_finalize(insert_warm);
+
+            const char* insert_embed_sql =
+                "INSERT INTO warm_memory_embeddings (memory_id, embedding, embedding_version) VALUES (?, ?, ?);";
+            sqlite3_stmt* insert_embed = nullptr;
+            if (sqlite3_prepare_v2(db_->handle, insert_embed_sql, -1, &insert_embed, nullptr) != SQLITE_OK) {
+                rollback();
+                return false;
+            }
+            sqlite3_bind_text(insert_embed, 1, warm.id.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_blob(insert_embed, 2, warm.embedding.data(),
+                              static_cast<int>(warm.embedding.size() * sizeof(float)), SQLITE_STATIC);
+            sqlite3_bind_int(insert_embed, 3, warm.embedding_version);
+            if (sqlite3_step(insert_embed) != SQLITE_DONE) {
+                sqlite3_finalize(insert_embed);
+                rollback();
+                return false;
+            }
+            sqlite3_finalize(insert_embed);
+        }
+
+        std::string delete_sql = "DELETE FROM messages WHERE session_id = ? AND timestamp_ms IN (";
+        for (size_t i = 0; i < request.messages_to_archive.size(); ++i) {
+            delete_sql += (i == 0 ? "?" : ", ?");
+        }
+        delete_sql += ");";
+
+        sqlite3_stmt* delete_stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, delete_sql.c_str(), -1, &delete_stmt, nullptr) != SQLITE_OK) {
+            rollback();
+            return false;
+        }
+        sqlite3_bind_text(delete_stmt, 1, request.session_id.c_str(), -1, SQLITE_STATIC);
+        for (size_t i = 0; i < request.messages_to_archive.size(); ++i) {
+            sqlite3_bind_int64(delete_stmt, static_cast<int>(i + 2), request.messages_to_archive[i].timestamp_ms);
+        }
+        if (sqlite3_step(delete_stmt) != SQLITE_DONE) {
+            sqlite3_finalize(delete_stmt);
+            rollback();
+            return false;
+        }
+        sqlite3_finalize(delete_stmt);
+
+        if (injectConsolidationFail("commit")) {
+            rollback();
+            return false;
+        }
+
+        return commit();
+    } catch (...) {
+        rollback();
+        return false;
+    }
+}
+
+namespace {
+
+static MemoryRepository::WarmMemoryRecord loadWarmRow(sqlite3_stmt* stmt, sqlite3* db, int embeddingVersion) {
+    MemoryRepository::WarmMemoryRecord rec;
+    rec.id = safe_col_text(stmt, 0);
+    rec.session_id = safe_col_text(stmt, 1);
+    rec.scope = static_cast<MemoryScope>(sqlite3_column_int(stmt, 2));
+    rec.episodic_payload = safe_col_text(stmt, 3);
+    rec.rendered_summary = safe_col_text(stmt, 4);
+    rec.importance = static_cast<float>(sqlite3_column_double(stmt, 5));
+    rec.novelty = static_cast<float>(sqlite3_column_double(stmt, 6));
+    rec.confidence = static_cast<float>(sqlite3_column_double(stmt, 7));
+    rec.covered_turn_start = sqlite3_column_int(stmt, 8);
+    rec.covered_turn_end = sqlite3_column_int(stmt, 9);
+    rec.covered_ts_start = sqlite3_column_int64(stmt, 10);
+    rec.covered_ts_end = sqlite3_column_int64(stmt, 11);
+    rec.parent_archive_ids_json = safe_col_text(stmt, 12);
+    rec.derived_from_hash = safe_col_text(stmt, 13);
+    rec.summary_version = sqlite3_column_int(stmt, 14);
+    rec.prompt_version = safe_col_text(stmt, 15);
+    rec.llm_model = safe_col_text(stmt, 16);
+    rec.summary_missing = sqlite3_column_int(stmt, 17) != 0;
+    rec.created_at_ms = sqlite3_column_int64(stmt, 18);
+    rec.embedding_version = embeddingVersion;
+
+    const char* embed_sql =
+        "SELECT embedding FROM warm_memory_embeddings WHERE memory_id = ? AND embedding_version = ?;";
+    sqlite3_stmt* embed_stmt = nullptr;
+    if (sqlite3_prepare_v2(db, embed_sql, -1, &embed_stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(embed_stmt, 1, rec.id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(embed_stmt, 2, embeddingVersion);
+        if (sqlite3_step(embed_stmt) == SQLITE_ROW) {
+            const void* blob = sqlite3_column_blob(embed_stmt, 0);
+            const int bytes = sqlite3_column_bytes(embed_stmt, 0);
+            const int count = bytes / static_cast<int>(sizeof(float));
+            rec.embedding.resize(static_cast<size_t>(count));
+            if (blob && bytes > 0) {
+                std::memcpy(rec.embedding.data(), blob, static_cast<size_t>(bytes));
+            }
+        }
+        sqlite3_finalize(embed_stmt);
+    }
+    return rec;
+}
+
+} // namespace
+
+std::vector<SQLiteMemoryRepository::WarmMemoryRecord> SQLiteMemoryRepository::getRecentWarmMemory(const std::string& sessionId, int limit) {
+    std::vector<WarmMemoryRecord> results;
+    if (limit <= 0) {
+        return results;
+    }
+    try {
+        const char* sql =
+            "SELECT id, session_id, scope, episodic_payload, rendered_summary, importance, novelty, confidence, "
+            "covered_turn_start, covered_turn_end, covered_ts_start, covered_ts_end, parent_archive_ids, "
+            "derived_from_hash, summary_version, prompt_version, llm_model, summary_missing, created_at_ms "
+            "FROM warm_memory WHERE session_id = ? ORDER BY created_at_ms DESC LIMIT ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return results;
+        }
+        sqlite3_bind_text(stmt, 1, sessionId.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, limit);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            results.push_back(loadWarmRow(stmt, db_->handle, Thoth::MemoryConsolidation::kWarmMemoryEmbeddingVersion));
+        }
+        sqlite3_finalize(stmt);
+    } catch (...) {}
+    return results;
+}
+
+std::vector<SQLiteMemoryRepository::WarmMemoryRecord> SQLiteMemoryRepository::searchWarmMemoryByEmbedding(
+    const std::string& sessionId,
+    MemoryScope scope,
+    const std::vector<float>& queryEmbedding,
+    int limit,
+    int embeddingVersion) {
+    if (queryEmbedding.empty() || limit <= 0) {
+        return {};
+    }
+
+    auto rows = getRecentWarmMemory(sessionId, 100);
+    std::vector<std::pair<WarmMemoryRecord, float>> ranked;
+    ranked.reserve(rows.size());
+    for (auto& row : rows) {
+        if (row.scope != scope || row.embedding.empty()) {
+            continue;
+        }
+        const float score = GragScorer::cosine_similarity(queryEmbedding, row.embedding);
+        ranked.push_back({std::move(row), score * (0.5f + 0.5f * row.importance)});
+    }
+
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::vector<WarmMemoryRecord> results;
+    const int count = std::min(limit, static_cast<int>(ranked.size()));
+    results.reserve(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        results.push_back(std::move(ranked[static_cast<size_t>(i)].first));
+    }
+    return results;
 }
 
 bool SQLiteMemoryRepository::upsertFact(const FactRecord& fact) {

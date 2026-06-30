@@ -465,12 +465,21 @@ std::string PromptFactory::getToolList() {
 }
 
 std::string PromptFactory::getMemoryContext(bool useExtendedSummary) {
-    std::string memSummary = memory.getSummary(useExtendedSummary);
-    const size_t maxMemLen = config.maxContextLength / 2;
-    if (memSummary.length() > maxMemLen) {
-        memSummary = memSummary.substr(memSummary.length() - maxMemLen);
+    std::ostringstream memSummary;
+    const auto warmRows = memory.getRecentWarmMemory(3);
+    for (auto it = warmRows.rbegin(); it != warmRows.rend(); ++it) {
+        if (!it->rendered_summary.empty()) {
+            memSummary << "[Episodic Memory]\n" << it->rendered_summary << "\n\n";
+        }
     }
-    return memSummary;
+
+    memSummary << memory.getSummary(useExtendedSummary);
+    std::string combined = memSummary.str();
+    const size_t maxMemLen = config.maxContextLength / 2;
+    if (combined.length() > maxMemLen) {
+        combined = combined.substr(combined.length() - maxMemLen);
+    }
+    return combined;
 }
 
 std::string PromptFactory::getConversationHistory() {

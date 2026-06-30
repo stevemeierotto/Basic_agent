@@ -3,6 +3,11 @@
 #include "../include/plan_reuse_config.h"
 #include "../include/planner_injection_config.h"
 #include "../include/sqlite_memory_repository.h"
+#include "../include/memory_consolidation_config.h"
+#include "../include/embedding_engine.h"
+#include "../include/llm_interface.h"
+#include "../include/clock.h"
+#include "../include/decision_trace.h"
 #include <iostream>
 #include <algorithm>
 #include <ctime>
@@ -10,14 +15,16 @@
 
 using json = nlohmann::json;
 
-Memory::Memory(const Config& config) {
+Memory::Memory(const Config& config)
+    : config_(&config),
+      clock_(Thoth::makeSystemClock()) {
     repo = Thoth::MemoryRepositoryFactory::createRepository(config, "agent_workspace/memory.db");
     
     if (!repo) {
         std::cerr << "[Memory] CRITICAL: Failed to initialize repository backend.\n";
-    } else {
-        Thoth::PruningPolicy policy;
-        pruner = std::make_unique<Thoth::MemoryPruner>(*repo, policy);
+    } else if (config_) {
+        const auto policy = Thoth::PruningPolicy::fromConfig(*config_);
+        pruner = std::make_unique<Thoth::MemoryPruner>(*repo, policy, nullptr, nullptr, clock_);
     }
 
     // Phase 4: Embedding Migration
@@ -33,8 +40,35 @@ void Memory::setActiveSessionId(const std::string& sessionId) {
     if (sessionId.empty()) {
         return;
     }
-    std::unique_lock lock(mtx);
-    activeSessionId = sessionId;
+    {
+        std::unique_lock lock(mtx);
+        activeSessionId = sessionId;
+    }
+    onSessionActivated(sessionId);
+}
+
+void Memory::onSessionActivated(const std::string& sessionId) {
+    if (!pruner) {
+        return;
+    }
+
+    bool markedStale = false;
+    {
+        std::shared_lock lock(mtx);
+        markedStale = stale_session_ids_.count(sessionId) > 0;
+    }
+
+    const auto decision = pruner->evaluatePolicy(sessionId);
+    if (!markedStale && !decision.shouldConsolidate()) {
+        return;
+    }
+
+    consolidateIfNeeded(sessionId);
+
+    {
+        std::unique_lock lock(mtx);
+        stale_session_ids_.erase(sessionId);
+    }
 }
 
 std::string Memory::getActiveSessionId() const {
@@ -58,39 +92,57 @@ void Memory::migrateEmbeddings() {
     }
 }
 
+int64_t Memory::currentTimeMs() const {
+    return clock_ ? clock_->nowMs() : Thoth::makeSystemClock()->nowMs();
+}
+
 void Memory::addMessage(const std::string& role, const std::string& content) {
-    std::string sessionForPrune;
+    addMessageWithTimestamp(role, content, 0, true);
+}
+
+void Memory::addMessageWithTimestamp(const std::string& role,
+                                     const std::string& content,
+                                     int64_t timestamp_ms,
+                                     bool triggerConsolidation) {
+    std::string sessionForConsolidate;
     {
         std::unique_lock lock(mtx);
         if (!repo) return;
 
-        // Ensure session exists
-        repo->createSession(activeSessionId, std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
+        repo->createSession(activeSessionId, currentTimeMs());
 
         Thoth::MessageRecord msg;
         msg.role = role;
         msg.content = content;
-        msg.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()).count();
+        msg.timestamp_ms = timestamp_ms > 0 ? timestamp_ms : currentTimeMs();
 
         repo->appendMessage(activeSessionId, msg);
-        sessionForPrune = activeSessionId;
+        if (triggerConsolidation) {
+            sessionForConsolidate = activeSessionId;
+        }
     }
 
-    maybePruneAfterWrite(sessionForPrune);
+    if (!sessionForConsolidate.empty()) {
+        consolidateIfNeeded(sessionForConsolidate);
+    }
 }
 
-void Memory::maybePruneAfterWrite(const std::string& sessionId) {
-    if (!pruner || sessionId.empty()) {
-        return;
+void Memory::loadConversation(const std::vector<TimedMessage>& messages,
+                              const std::string& summary) {
+    clear();
+    for (const auto& message : messages) {
+        addMessageWithTimestamp(message.role, message.content, message.timestamp_ms, false);
     }
-
-    const int archived = pruner->prune(sessionId);
-    if (archived > 0) {
-        std::cerr << "[Memory] Pruned " << archived << " turn(s) for session "
-                  << sessionId << " (hot cap "
-                  << Thoth::MemoryPruning::kMaxHotMessages << ")\n";
+    if (!summary.empty()) {
+        updateSummary("Imported context", summary);
+    }
+    std::string sessionId;
+    {
+        std::shared_lock lock(mtx);
+        sessionId = activeSessionId;
+    }
+    if (!sessionId.empty()) {
+        consolidateIfNeeded(sessionId);
     }
 }
 
@@ -310,6 +362,127 @@ std::vector<Thoth::MemoryRepository::ArchivedTurnRecord> Memory::getArchivedTurn
     std::shared_lock lock(mtx);
     if (!pruner) return {};
     return pruner->restore(activeSessionId);
+}
+
+void Memory::configureConsolidation(LLMInterface* llm,
+                                    EmbeddingEngine* embeddingEngine,
+                                    std::shared_ptr<Thoth::Clock> clock) {
+    std::unique_lock lock(mtx);
+    if (!repo || !config_) return;
+    if (clock) {
+        clock_ = std::move(clock);
+    } else if (!clock_) {
+        clock_ = Thoth::makeSystemClock();
+    }
+    const auto policy = Thoth::PruningPolicy::fromConfig(*config_);
+    pruner = std::make_unique<Thoth::MemoryPruner>(*repo, policy, llm, embeddingEngine, clock_);
+}
+
+Thoth::ConsolidationDecision Memory::evaluateConsolidationPolicy(const std::string& sessionId) const {
+    std::shared_lock lock(mtx);
+    if (!pruner) {
+        return {};
+    }
+    return pruner->evaluatePolicy(sessionId);
+}
+
+bool Memory::isSessionMarkedStale(const std::string& sessionId) const {
+    std::shared_lock lock(mtx);
+    return stale_session_ids_.count(sessionId) > 0;
+}
+
+void Memory::runStartupConsolidationDiscovery() {
+    if (!pruner || !repo) {
+        return;
+    }
+
+    std::vector<std::string> sessionIds;
+    std::string activeSession;
+    {
+        std::shared_lock lock(mtx);
+        sessionIds = repo->getAllSessionIds();
+        activeSession = activeSessionId;
+    }
+
+    std::vector<std::string> markedStale;
+    for (const auto& sessionId : sessionIds) {
+        const auto decision = pruner->evaluatePolicy(sessionId);
+        if (!decision.shouldConsolidate()) {
+            continue;
+        }
+        if (sessionId == activeSession) {
+            continue;
+        }
+        {
+            std::unique_lock lock(mtx);
+            stale_session_ids_.insert(sessionId);
+        }
+        markedStale.push_back(sessionId);
+    }
+
+    if (!markedStale.empty()) {
+        DecisionTraceLogger logger;
+        DecisionTrace trace = logger.startTrace("memory_consolidation", static_cast<int>(markedStale.size()));
+        logger.addStage(trace, "stale_sessions_discovered", true,
+                        "Discovered stale sessions (no LLM work during discovery)", {
+            {"stale_session_count", static_cast<int>(markedStale.size())},
+            {"stale_session_ids", markedStale},
+            {"active_session_id", activeSession}
+        });
+        logger.finishTrace(trace, true, "Stale session discovery complete");
+        logger.writeTrace(trace);
+    }
+
+    if (!activeSession.empty()) {
+        const auto decision = pruner->evaluatePolicy(activeSession);
+        if (decision.shouldConsolidate()) {
+            consolidateIfNeeded(activeSession);
+        }
+    }
+}
+
+void Memory::consolidateIfNeeded(const std::string& sessionId) {
+    if (!pruner || sessionId.empty()) {
+        return;
+    }
+
+    const auto result = pruner->consolidateIfNeeded(sessionId);
+    if (result.total_archived > 0 || result.deferred) {
+        const auto labels = Thoth::consolidationReasonsToStrings(result.final_decision.reasons);
+        std::cerr << "[Memory] Consolidated " << result.total_archived << " turn(s) for session "
+                  << sessionId;
+        if (!labels.empty() && labels[0] != "NONE") {
+            std::cerr << " (reasons:";
+            for (const auto& label : labels) {
+                if (label != "NONE") {
+                    std::cerr << ' ' << label;
+                }
+            }
+            std::cerr << ')';
+        }
+        if (result.deferred) {
+            std::cerr << " [deferred: batch cap reached]";
+        }
+        std::cerr << '\n';
+    }
+}
+
+std::vector<Thoth::MemoryRepository::WarmMemoryRecord> Memory::getRecentWarmMemory(int limit) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return {};
+    return repo->getRecentWarmMemory(activeSessionId, limit);
+}
+
+std::vector<Thoth::MemoryRepository::WarmMemoryRecord> Memory::searchWarmMemory(
+    const std::vector<float>& queryEmbedding, int limit) const {
+    std::shared_lock lock(mtx);
+    if (!repo || queryEmbedding.empty()) return {};
+    return repo->searchWarmMemoryByEmbedding(
+        activeSessionId,
+        Thoth::MemoryScope::SESSION,
+        queryEmbedding,
+        limit,
+        Thoth::MemoryConsolidation::kWarmMemoryEmbeddingVersion);
 }
 
 void Memory::markDirty() const {}

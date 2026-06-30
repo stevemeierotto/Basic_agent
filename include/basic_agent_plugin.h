@@ -31,6 +31,9 @@ public:
     void setConversationMemory(
         const std::vector<std::pair<std::string, std::string>>& messages,
         const std::string& summary = "");
+    void setConversationMemory(
+        const std::vector<Memory::TimedMessage>& messages,
+        const std::string& summary = "");
     void setRagFiles(const std::vector<std::string>& filePaths);
     void setSessionId(const std::string& sessionId);
 

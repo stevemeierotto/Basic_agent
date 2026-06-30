@@ -64,6 +64,11 @@ public:
     /** C7 Phase 3: start RETRIEVAL when only one RUNNING dependency remains. */
     bool enable_retrieval_prefetch = true;
 
+    /** M2: memory consolidation policy (`config.json` → `memory` section). */
+    std::size_t memory_max_hot_messages = 50;
+    int memory_max_hot_age_days = 30;
+    std::size_t memory_prune_batch_size = 10;
+
     // Load/Save from JSON or ENV
     bool loadFromJson(const std::string& path);
     bool saveToJson(const std::string& path) const;

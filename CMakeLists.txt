@@ -47,6 +47,11 @@ set(BASIC_AGENT_SOURCES
     src/logger.cpp
     src/memory.cpp
     src/memory_pruner.cpp
+    src/memory_consolidation_metrics.cpp
+    src/consolidation_policy.cpp
+    src/clock.cpp
+    src/episodic_memory.cpp
+    src/summary_generator.cpp
     src/plan.cpp
     src/plan_parser.cpp
     src/plan_validator.cpp

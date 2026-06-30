@@ -1,4 +1,5 @@
 #include "../include/config.h"
+#include "../include/memory_pruning_config.h"
 #include "../include/plan_reuse_config.h"
 #include "../include/runtime_latency_config.h"
 #include <iostream>
@@ -40,7 +41,10 @@ Config::Config()
           static_cast<int>(Thoth::RuntimeLatency::kDefaultSynthesisMaxContextChars)),
       synthesis_num_predict(Thoth::RuntimeLatency::kDefaultSynthesisNumPredict),
       max_parallel_retrieval(Thoth::RuntimeLatency::kDefaultMaxParallelRetrieval),
-      enable_retrieval_prefetch(Thoth::RuntimeLatency::kDefaultEnableRetrievalPrefetch)
+      enable_retrieval_prefetch(Thoth::RuntimeLatency::kDefaultEnableRetrievalPrefetch),
+      memory_max_hot_messages(Thoth::MemoryPruning::kMaxHotMessages),
+      memory_max_hot_age_days(30),
+      memory_prune_batch_size(Thoth::MemoryPruning::kPruneBatchSize)
 {
     if (const char* maxReflections = std::getenv("THOTH_MAX_REFLECTIONS")) {
         try {
@@ -96,6 +100,19 @@ bool Config::loadFromJson(const std::string& path) {
     if (j.contains("max_parallel_retrieval")) max_parallel_retrieval = j["max_parallel_retrieval"];
     if (j.contains("enable_retrieval_prefetch")) enable_retrieval_prefetch = j["enable_retrieval_prefetch"];
 
+    if (j.contains("memory") && j["memory"].is_object()) {
+        const auto& mem = j["memory"];
+        if (mem.contains("max_hot_messages")) {
+            memory_max_hot_messages = mem["max_hot_messages"].get<std::size_t>();
+        }
+        if (mem.contains("max_hot_age_days")) {
+            memory_max_hot_age_days = mem["max_hot_age_days"].get<int>();
+        }
+        if (mem.contains("prune_batch_size")) {
+            memory_prune_batch_size = mem["prune_batch_size"].get<std::size_t>();
+        }
+    }
+
     return true;
 }
 
@@ -131,6 +148,11 @@ bool Config::saveToJson(const std::string& path) const {
     j["synthesis_num_predict"] = synthesis_num_predict;
     j["max_parallel_retrieval"] = max_parallel_retrieval;
     j["enable_retrieval_prefetch"] = enable_retrieval_prefetch;
+    j["memory"] = {
+        {"max_hot_messages", memory_max_hot_messages},
+        {"max_hot_age_days", memory_max_hot_age_days},
+        {"prune_batch_size", memory_prune_batch_size}
+    };
 
     std::ofstream file(path);
     if (!file.is_open()) return false;

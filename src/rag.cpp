@@ -75,17 +75,34 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
     // but we need the chunks themselves to stay valid while we rescore.
     auto rawResults = indexManager->retrieveChunks(query, recallK);
 
-    if (rawResults.empty()) {
-        if (outDiagnostics) {
-            *outDiagnostics = diagnostics;
-        }
-        return finalMatches;
-    }
-
     std::vector<std::pair<CodeChunk, float>> rag_results;
     for (const auto& [chunkCode, score] : rawResults) {
         const auto* chunk = indexManager->getChunkByCode(chunkCode);
         if (chunk) rag_results.push_back({*chunk, score});
+    }
+
+    if (memory && engine) {
+        const std::vector<float> q_emb = engine->embed(query);
+        const auto warmRows = memory->searchWarmMemory(q_emb, std::max(topK, 3));
+        for (const auto& row : warmRows) {
+            if (row.rendered_summary.empty() || row.embedding.empty()) {
+                continue;
+            }
+            CodeChunk chunk;
+            chunk.fileName = "warm_memory:" + row.id;
+            chunk.symbolName = row.session_id;
+            chunk.code = row.rendered_summary;
+            chunk.embedding = row.embedding;
+            const float score = GragScorer::cosine_similarity(q_emb, row.embedding);
+            rag_results.push_back({chunk, score * (0.5f + 0.5f * row.importance)});
+        }
+    }
+
+    if (rag_results.empty()) {
+        if (outDiagnostics) {
+            *outDiagnostics = diagnostics;
+        }
+        return finalMatches;
     }
 
     if (activeGoal.empty() && !query.empty()) {
