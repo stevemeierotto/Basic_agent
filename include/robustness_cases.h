@@ -8,6 +8,7 @@
 #ifndef THOTH_ROBUSTNESS_CASES_H
 #define THOTH_ROBUSTNESS_CASES_H
 
+#include "benchmark_environment.h"
 #include "json.hpp"
 #include <cstdint>
 #include <string>
@@ -50,7 +51,8 @@ struct RobustnessCaseSpec {
 };
 
 std::vector<RobustnessCaseSpec> getRobustnessCases();
-RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec);
+RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec,
+                                        const BenchmarkAttribution& attribution = {});
 
 const char* categoryName(RobustnessCategory category);
 

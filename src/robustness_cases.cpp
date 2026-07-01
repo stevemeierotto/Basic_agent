@@ -122,8 +122,10 @@ struct ExecHarnessResult {
 ExecHarnessResult runExecutiveCase(
     const std::function<std::shared_ptr<IPlanner>()>& makePlanner,
     const std::function<void(std::shared_ptr<RAGPipeline>&, Config&)>& setupRag,
+    const BenchmarkAttribution& attribution,
     int maxReflections = 0,
-    int waitSeconds = 15) {
+    int waitSeconds = 15,
+    const std::string& goal = "robustness harness goal") {
     ExecHarnessResult out;
     Config cfg;
     cfg.max_reflections = maxReflections;
@@ -155,7 +157,7 @@ ExecHarnessResult runExecutiveCase(
         }
     });
 
-    controller.execute_goal("robustness harness goal");
+    controller.execute_goal(goal, attribution);
 
     int ticks = waitSeconds * 10;
     while (!terminal.load() && ticks-- > 0) {
@@ -450,7 +452,8 @@ std::vector<RobustnessCaseSpec> getRobustnessCases() {
     };
 }
 
-RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec) {
+RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec,
+                                        const BenchmarkAttribution& attribution) {
     clearRobustnessEnv();
     setenv("THOTH_MOCK_LLM", "true", 1);
 
@@ -482,6 +485,7 @@ RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec) {
         auto exec = runExecutiveCase(
             [&]() { return std::make_shared<HarnessMockPlanner>(planSpec); },
             [](std::shared_ptr<RAGPipeline>&, Config&) {},
+            attribution,
             0,
             15);
 
@@ -578,6 +582,7 @@ RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec) {
                 return planner;
             },
             [](std::shared_ptr<RAGPipeline>&, Config&) {},
+            attribution,
             1,
             20);
 
@@ -614,6 +619,7 @@ RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec) {
         auto exec = runExecutiveCase(
             [&]() { return std::make_shared<HarnessMockPlanner>(planSpec); },
             [](std::shared_ptr<RAGPipeline>&, Config&) {},
+            attribution,
             2,
             15);
 
@@ -655,6 +661,7 @@ RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec) {
                 chunk.embedding = rag->engine->embed(chunk.code);
                 rag->indexManager->addChunkToIndex(std::move(chunk));
             },
+            attribution,
             0,
             15);
 
@@ -700,9 +707,9 @@ RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec) {
             }
         });
 
-        controller.execute_goal("slow concurrent goal");
+        controller.execute_goal("slow concurrent goal", attribution);
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        controller.execute_goal("fast concurrent goal");
+        controller.execute_goal("fast concurrent goal", attribution);
 
         int ticks = 150;
         while (!terminal.load() && ticks-- > 0) {
@@ -752,7 +759,7 @@ RobustnessCaseOutcome runRobustnessCase(const RobustnessCaseSpec& spec) {
                         terminal.store(true);
                     }
                 });
-                controller.execute_goal("teardown goal");
+                controller.execute_goal("teardown goal", attribution);
                 int ticks = 150;
                 while (!terminal.load() && ticks-- > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
