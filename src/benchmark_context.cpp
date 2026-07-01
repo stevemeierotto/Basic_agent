@@ -122,15 +122,25 @@ void BenchmarkRun::emit(const std::string& event, const nlohmann::json& payload)
 }
 
 void BenchmarkRun::bindIndex(const IndexEnvironment& index) {
-    environment_.index = index;
-    index_hash_ = computeIndexHash(index);
+    const std::string newIndexHash = computeIndexHash(index);
+
+    IndexEnvironment boundIndex = index;
+    if (!index_hash_.empty() && !newIndexHash.empty() && newIndexHash != index_hash_) {
+        boundIndex.index_mismatch = nlohmann::json{
+            {"prior_hash", index_hash_},
+            {"new_hash", newIndexHash},
+        };
+    }
+
+    environment_.index = boundIndex;
+    index_hash_ = newIndexHash;
 
     nlohmann::json payload = {
         {"index_hash", index_hash_},
-        {"rag_index_header", index.rag_index_header},
+        {"rag_index_header", boundIndex.rag_index_header},
     };
-    if (index.index_mismatch.has_value()) {
-        payload["index_mismatch"] = *index.index_mismatch;
+    if (boundIndex.index_mismatch.has_value()) {
+        payload["index_mismatch"] = *boundIndex.index_mismatch;
     }
 
     std::lock_guard<std::mutex> lock(sidecarMutex());

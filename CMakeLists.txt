@@ -97,11 +97,23 @@ set(BASIC_AGENT_SOURCES
     src/ollama_snapshot.cpp
     src/benchmark_context.cpp
     src/cognitive_metrics_logger.cpp
+    src/trajectory_ablation.cpp
 )
+
+# E2 evaluation kernel — no rag.cpp / runtime heuristics (docs/E2_PROTOCOL.md § Link isolation)
+set(E2_EVAL_KERNEL_SOURCES
+    src/episodic_learning_eval.cpp
+    src/episodic_learning_cases.cpp
+    src/e2_strict_enforcement.cpp
+    src/e2_strict_retrieval.cpp
+)
+add_library(e2_eval_kernel STATIC ${E2_EVAL_KERNEL_SOURCES})
+target_include_directories(e2_eval_kernel PUBLIC include)
+target_compile_definitions(e2_eval_kernel PUBLIC THOTH_E2_STRICT_KERNEL=1)
 
 # Create the shared library
 add_library(basic_agent ${BASIC_AGENT_SOURCES})
-target_link_libraries(basic_agent PRIVATE CURL::libcurl SQLite::SQLite3)
+target_link_libraries(basic_agent PUBLIC e2_eval_kernel PRIVATE CURL::libcurl SQLite::SQLite3)
 
 # Benchmark Tool
 add_executable(run_grag_benchmark src/run_grag_benchmark.cpp)
@@ -118,6 +130,13 @@ target_link_libraries(run_reflection_ab_benchmark PRIVATE basic_agent)
 
 add_executable(run_robustness_suite src/run_robustness_suite.cpp)
 target_link_libraries(run_robustness_suite PRIVATE basic_agent)
+
+add_executable(run_trajectory_ablation_benchmark src/run_trajectory_ablation_benchmark.cpp)
+target_link_libraries(run_trajectory_ablation_benchmark PRIVATE basic_agent)
+
+add_executable(run_episodic_learning_benchmark src/run_episodic_learning_benchmark.cpp)
+target_compile_definitions(run_episodic_learning_benchmark PRIVATE THOTH_E2_OFFICIAL_HARNESS=1)
+target_link_libraries(run_episodic_learning_benchmark PRIVATE basic_agent e2_eval_kernel)
 
 # CLI executable for debugging or standalone use
 # Only build CLI tool if we're building standalone

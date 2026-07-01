@@ -539,6 +539,18 @@ std::vector<Thoth::MemoryRepository::WarmMemoryRecord> Memory::searchWarmMemory(
         Thoth::MemoryConsolidation::kWarmMemoryEmbeddingVersion);
 }
 
+std::vector<Thoth::MemoryRepository::WarmMemoryRecord> Memory::searchWarmMemoryAllSessions(
+    const std::vector<float>& queryEmbedding, int limit) const {
+    std::shared_lock lock(mtx);
+    if (!repo || queryEmbedding.empty()) return {};
+    return repo->searchWarmMemoryByEmbedding(
+        "",
+        Thoth::MemoryScope::SESSION,
+        queryEmbedding,
+        limit,
+        Thoth::MemoryConsolidation::kWarmMemoryEmbeddingVersion);
+}
+
 void Memory::markDirty() const {}
 void Memory::saveIfNeeded() const {}
 void Memory::flushInternal() const {}

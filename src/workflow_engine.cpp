@@ -88,6 +88,44 @@ bool mockStepTimeoutEnabled() {
     return mock && (std::string(mock) == "1" || std::string(mock) == "true");
 }
 
+bool mockEpisodicEnabled() {
+    const char* mock = std::getenv("THOTH_MOCK_EPISODIC");
+    return mock && (std::string(mock) == "1" || std::string(mock) == "true");
+}
+
+bool priorRetrievalContainsToken(const std::vector<PriorStepContext>& priorSteps,
+                                 const std::string& token) {
+    if (token.empty()) {
+        return true;
+    }
+    for (const auto& prior : priorSteps) {
+        if (static_cast<StepType>(prior.step_type) != StepType::RETRIEVAL) {
+            continue;
+        }
+        if (!prior.result.contains("data") || !prior.result["data"].is_object()) {
+            continue;
+        }
+        const auto& data = prior.result["data"];
+        if (!data.contains("chunks") || !data["chunks"].is_array()) {
+            continue;
+        }
+        for (const auto& chunk : data["chunks"]) {
+            if (!chunk.is_object()) {
+                continue;
+            }
+            const std::string file = chunk.value("file", "");
+            const std::string content = chunk.value("content", "");
+            if (content.find(token) != std::string::npos) {
+                return true;
+            }
+            if (!file.empty() && file.find(token) != std::string::npos) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorSteps,
                                   std::size_t maxChars,
                                   bool* truncatedOut) {
@@ -535,6 +573,21 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
             if (mockLLMDelayEnabled(delayMs)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
+
+            if (mockEpisodicEnabled() && step.payload.is_object() &&
+                step.payload.contains("required_token") &&
+                step.payload["required_token"].is_string()) {
+                const std::string required_token = step.payload["required_token"].get<std::string>();
+                if (!required_token.empty() &&
+                    !priorRetrievalContainsToken(context.prior_steps, required_token)) {
+                    result.success = false;
+                    result.error_message =
+                        "E2 mock: required token not found in prior RETRIEVAL context";
+                    result.data = {{"status", "error"}, {"error_message", result.error_message}};
+                    return result;
+                }
+            }
+
             result.success = true;
             result.data = {
                 {"status", "success"},

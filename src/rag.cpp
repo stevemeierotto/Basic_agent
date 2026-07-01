@@ -8,6 +8,7 @@
 #include "../include/memory.h"
 #include "../include/chat_retrieval_boost.h"
 #include "../include/chat_retrieval_config.h"
+#include <sstream>
 #include <iostream>
 #include <algorithm>
 #include <filesystem>
@@ -83,9 +84,40 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
 
     if (memory && engine) {
         const std::vector<float> q_emb = engine->embed(query);
-        const auto warmRows = memory->searchWarmMemory(q_emb, std::max(topK, 3));
+        const bool goalDirected = !activeGoal.empty() || !pId.empty();
+        const auto warmRows = goalDirected
+                                  ? memory->searchWarmMemoryAllSessions(q_emb, std::max(topK, 3))
+                                  : memory->searchWarmMemory(q_emb, std::max(topK, 3));
+        float best_index_score = 0.0f;
+        for (const auto& [chunk, score] : rag_results) {
+            if (chunk.fileName.rfind("warm_memory:", 0) != 0) {
+                best_index_score = std::max(best_index_score, score);
+            }
+        }
+        auto querySharesToken = [](const std::string& query, const std::string& text) {
+            std::istringstream iss(query);
+            std::string word;
+            while (iss >> word) {
+                if (word.size() < 4) {
+                    continue;
+                }
+                if (text.find(word) != std::string::npos) {
+                    return true;
+                }
+            }
+            return false;
+        };
         for (const auto& row : warmRows) {
             if (row.rendered_summary.empty() || row.embedding.empty()) {
+                continue;
+            }
+            if (goalDirected && !querySharesToken(query, row.rendered_summary)) {
+                continue;
+            }
+            const float warm_score =
+                GragScorer::cosine_similarity(q_emb, row.embedding) *
+                (0.5f + 0.5f * row.importance);
+            if (goalDirected && best_index_score > warm_score) {
                 continue;
             }
             CodeChunk chunk;
@@ -93,8 +125,7 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
             chunk.symbolName = row.session_id;
             chunk.code = row.rendered_summary;
             chunk.embedding = row.embedding;
-            const float score = GragScorer::cosine_similarity(q_emb, row.embedding);
-            rag_results.push_back({chunk, score * (0.5f + 0.5f * row.importance)});
+            rag_results.push_back({chunk, warm_score});
         }
     }
 
@@ -117,9 +148,10 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
     }
 
     try {
+        const bool goalDirected = !activeGoal.empty() || !pId.empty();
         bool use_grag = false;
         if (retrievalConfig.mode == RetrievalMode::AUTO) {
-            use_grag = !activeGoal.empty();
+            use_grag = goalDirected;
         } else if (retrievalConfig.mode == RetrievalMode::GRAG) {
             use_grag = true;
         }
@@ -135,25 +167,25 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
             rescored_results = GragScorer::rescore(rag_results, {}, {}, {}, {}, retrievalConfig, diagnostics, {}, tfidf, query, memory);
         }
 
-        if (activeGoal.empty()) {
-            Thoth::ChatRetrieval::applyConversationalBoosts(rescored_results, query, diagnostics);
-            const auto selected = Thoth::ChatRetrieval::selectTopKForInjection(
-                rescored_results, topK, Thoth::ChatRetrieval::kMinChunkChars, diagnostics);
-            for (const auto& [chunk, score] : selected) {
-                finalMatches.push_back(chunk);
-            }
-        } else {
+        if (goalDirected) {
             for (const auto& [chunk, score] : rescored_results) {
                 finalMatches.push_back(chunk);
             }
             if (finalMatches.size() > static_cast<size_t>(topK)) {
                 finalMatches.resize(topK);
             }
+        } else {
+            Thoth::ChatRetrieval::applyConversationalBoosts(rescored_results, query, diagnostics);
+            const auto selected = Thoth::ChatRetrieval::selectTopKForInjection(
+                rescored_results, topK, Thoth::ChatRetrieval::kMinChunkChars, diagnostics);
+            for (const auto& [chunk, score] : selected) {
+                finalMatches.push_back(chunk);
+            }
         }
 
         diagnostics.plan_id = pId.empty() ? planId : pId;
         diagnostics.step_id = sId.empty() ? stepId : sId;
-        diagnostics.goal_present = !activeGoal.empty();
+        diagnostics.goal_present = goalDirected;
 
         if (eventCallback) {
             ControllerEvent ev;

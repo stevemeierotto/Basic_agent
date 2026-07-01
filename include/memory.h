@@ -192,6 +192,9 @@ public:
     std::vector<Thoth::MemoryRepository::WarmMemoryRecord> getRecentWarmMemory(int limit = 5) const;
     std::vector<Thoth::MemoryRepository::WarmMemoryRecord> searchWarmMemory(
         const std::vector<float>& queryEmbedding, int limit = 5) const;
+    /** Goal execution: cosine search across all sessions (E2 / cross-session episodic recall). */
+    std::vector<Thoth::MemoryRepository::WarmMemoryRecord> searchWarmMemoryAllSessions(
+        const std::vector<float>& queryEmbedding, int limit = 5) const;
 
     // Fact Store Access (Phase 4, Step 4.3)
     Thoth::SQLiteMemoryRepository* getSQLiteRepo() const;

@@ -115,6 +115,7 @@ public:
 private:
     struct DBHandle;
     std::unique_ptr<DBHandle> db_;
+    std::vector<WarmMemoryRecord> getAllRecentWarmMemory(int limit);
 };
 
 } // namespace Thoth

@@ -78,7 +78,9 @@ BenchmarkResult BenchmarkRunner::run(const BenchmarkConfig& config, const std::v
                 rag_.setCurrentEmbedding({});
             }
 
-            if (!bc.trajectory.empty()) {
+            if (config.force_empty_trajectory) {
+                rag_.setTrajectoryEmbedding(std::vector<float>(rag_.engine->getDimension(), 0.0f));
+            } else if (!bc.trajectory.empty()) {
                 // Phase 5.5: Instead of direct embedding of raw string, 
                 // use the new TrajectoryBuilder logic to match live behavior.
                 // For benchmark cases, we'll wrap the 'trajectory' string in a mock EpisodeStep.

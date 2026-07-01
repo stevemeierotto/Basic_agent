@@ -1474,6 +1474,30 @@ std::vector<SQLiteMemoryRepository::WarmMemoryRecord> SQLiteMemoryRepository::ge
     return results;
 }
 
+std::vector<SQLiteMemoryRepository::WarmMemoryRecord> SQLiteMemoryRepository::getAllRecentWarmMemory(int limit) {
+    std::vector<WarmMemoryRecord> results;
+    if (limit <= 0) {
+        return results;
+    }
+    try {
+        const char* sql =
+            "SELECT id, session_id, scope, episodic_payload, rendered_summary, importance, novelty, confidence, "
+            "covered_turn_start, covered_turn_end, covered_ts_start, covered_ts_end, parent_archive_ids, "
+            "derived_from_hash, summary_version, prompt_version, llm_model, summary_missing, created_at_ms "
+            "FROM warm_memory ORDER BY created_at_ms DESC LIMIT ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return results;
+        }
+        sqlite3_bind_int(stmt, 1, limit);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            results.push_back(loadWarmRow(stmt, db_->handle, Thoth::MemoryConsolidation::kWarmMemoryEmbeddingVersion));
+        }
+        sqlite3_finalize(stmt);
+    } catch (...) {}
+    return results;
+}
+
 std::vector<SQLiteMemoryRepository::WarmMemoryRecord> SQLiteMemoryRepository::searchWarmMemoryByEmbedding(
     const std::string& sessionId,
     MemoryScope scope,
@@ -1484,7 +1508,7 @@ std::vector<SQLiteMemoryRepository::WarmMemoryRecord> SQLiteMemoryRepository::se
         return {};
     }
 
-    auto rows = getRecentWarmMemory(sessionId, 100);
+    auto rows = sessionId.empty() ? getAllRecentWarmMemory(100) : getRecentWarmMemory(sessionId, 100);
     std::vector<std::pair<WarmMemoryRecord, float>> ranked;
     ranked.reserve(rows.size());
     for (auto& row : rows) {

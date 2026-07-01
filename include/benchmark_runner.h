@@ -38,6 +38,8 @@ struct BenchmarkConfig {
     float wt = 0.0f;
     float keyword_weight = 0.0f;
     int top_k = 5;
+    /** G1d Arm C: force zero trajectory vector even when case has trajectory text. */
+    bool force_empty_trajectory = false;
 };
 
 /**
