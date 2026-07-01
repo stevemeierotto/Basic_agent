@@ -9,6 +9,7 @@
  * Licensed under the MIT License (see LICENSE in project root)
  */
 
+#include "../include/benchmark_context.h"
 #include "../include/config.h"
 #include "../include/embedding_engine.h"
 #include "../include/executive_controller.h"
@@ -25,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -63,6 +65,71 @@ std::string stateName(Thoth::ControllerState state) {
     }
 }
 
+Thoth::BenchmarkEnvironmentInputs makeReflectionAbBenchmarkInputs(EmbeddingEngine* engine,
+                                                                  IndexManager* idx) {
+    Thoth::BenchmarkEnvironmentInputs inputs;
+    inputs.harness = "reflection_ab_benchmark";
+    inputs.tier = Thoth::BenchmarkTier::MOCK;
+    inputs.model.llm_model = "mock";
+    inputs.model.embedding_model = "tfidf-local";
+    if (engine) {
+        inputs.model.embedding_method = "TfIdf";
+        inputs.model.embedding_dimension = engine->getDimension();
+        inputs.model.embedding_internal_version = engine->getInternalVersion();
+    }
+    inputs.corpus_mode = Thoth::CorpusFingerprintMode::FAST;
+    inputs.corpus_chunk_count = idx ? static_cast<int>(idx->getChunks().size()) : 0;
+    inputs.thoth_env_flags = Thoth::collectThothEnvFlags();
+    return inputs;
+}
+
+Thoth::IndexEnvironment indexEnvironmentFrom(EmbeddingEngine* engine, IndexManager* idx) {
+    Thoth::IndexEnvironment index;
+    if (!engine || !idx) {
+        return index;
+    }
+    index.rag_index_header = {
+        {"model_name", engine->getModelName()},
+        {"embedding_dimension", engine->getDimension()},
+        {"embedding_version", engine->getInternalVersion()},
+        {"chunk_count", static_cast<int>(idx->getChunks().size())},
+    };
+    return index;
+}
+
+/** RAII: emit REFLECTION_AB_COMPLETE on normal exit, REFLECTION_AB_ABORTED if scope exits early. */
+class ReflectionAbRunRecorder {
+public:
+    ReflectionAbRunRecorder(Thoth::BenchmarkRun& run) : run_(run) {}
+
+    ~ReflectionAbRunRecorder() {
+        if (!finished_) {
+            run_.emit("REFLECTION_AB_ABORTED", payload());
+        }
+    }
+
+    void complete(int casesPassed, std::size_t caseCount, float meanReflectionLift) {
+        cases_passed_ = casesPassed;
+        case_count_ = caseCount;
+        mean_reflection_lift_ = meanReflectionLift;
+        run_.emit("REFLECTION_AB_COMPLETE", payload());
+        finished_ = true;
+    }
+
+private:
+    nlohmann::json payload() const {
+        return {{"cases_passed", cases_passed_},
+                {"case_count", case_count_},
+                {"mean_reflection_lift", mean_reflection_lift_}};
+    }
+
+    Thoth::BenchmarkRun& run_;
+    int cases_passed_ = 0;
+    std::size_t case_count_ = 0;
+    float mean_reflection_lift_ = 0.0f;
+    bool finished_ = false;
+};
+
 struct ArmResult {
     int max_reflections = 0;
     std::string terminal_state;
@@ -73,7 +140,9 @@ struct ArmResult {
     std::int64_t wall_clock_ms = 0;
 };
 
-ArmResult runCaseArm(const Thoth::ReflectionAbCase& spec, int maxReflections) {
+ArmResult runCaseArm(const Thoth::ReflectionAbCase& spec,
+                     int maxReflections,
+                     const Thoth::BenchmarkAttribution& attribution) {
     unsetenv("THOTH_MOCK_STEP_TIMEOUT");
     if (spec.fixture == Thoth::ReflectionAbFixture::TimeoutStepFailure) {
         setenv("THOTH_MOCK_STEP_TIMEOUT", "1", 1);
@@ -113,7 +182,7 @@ ArmResult runCaseArm(const Thoth::ReflectionAbCase& spec, int maxReflections) {
     });
 
     const auto start = nowMs();
-    controller.execute_goal(spec.goal);
+    controller.execute_goal(spec.goal, attribution);
 
     int timeout = 150;
     while (!terminal.load() && timeout > 0) {
@@ -146,6 +215,28 @@ bool armMatchesExpectation(const ArmResult& result, const std::string& expectedS
 int main() {
     std::cout << "C3 — Reflection A/B Benchmark (mock, no Ollama)\n";
 
+    setenv("THOTH_MOCK_LLM", "true", 1);
+
+    auto probeEngine = std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf);
+    IndexManager probeIdx(probeEngine.get());
+
+    Thoth::BenchmarkRun benchmarkRun = Thoth::BenchmarkRun::create(
+        makeReflectionAbBenchmarkInputs(probeEngine.get(), &probeIdx));
+    benchmarkRun.bindIndex(indexEnvironmentFrom(probeEngine.get(), &probeIdx));
+    const Thoth::BenchmarkAttribution suiteAttribution = benchmarkRun.attribution();
+
+    std::cout << "BENCHMARK_ENV run_id=" << benchmarkRun.run_id()
+              << " env_hash=" << benchmarkRun.environment_hash()
+              << " index_hash=" << benchmarkRun.index_hash() << " tier=mock\n";
+
+    ReflectionAbRunRecorder suiteRecorder(benchmarkRun);
+
+    if (const char* abortSmoke = std::getenv("THOTH_REFLECTION_AB_BENCHMARK_ABORT_SMOKE");
+        abortSmoke && (std::string(abortSmoke) == "1" || std::string(abortSmoke) == "true")) {
+        std::cerr << "REFLECTION_AB: benchmark abort smoke — exiting before complete()\n";
+        return 2;
+    }
+
     const auto cases = Thoth::getReflectionAbCases();
     const std::string logPath = benchmarkLogPath();
     const std::int64_t ts = nowMs();
@@ -156,8 +247,8 @@ int main() {
     for (const auto& spec : cases) {
         std::cout << "\n" << spec.id << " — " << spec.description << '\n';
 
-        const ArmResult offArm = runCaseArm(spec, 0);
-        const ArmResult onArm = runCaseArm(spec, 2);
+        const ArmResult offArm = runCaseArm(spec, 0, suiteAttribution);
+        const ArmResult onArm = runCaseArm(spec, 2, suiteAttribution);
 
         const bool offOk = armMatchesExpectation(offArm, spec.expected_outcome_off, spec.expected_planner_calls_off);
         const bool onOk = armMatchesExpectation(onArm, spec.expected_outcome_on, spec.expected_planner_calls_on);
@@ -185,6 +276,8 @@ int main() {
         appendJsonLine(logPath, {
             {"event", "REFLECTION_AB_CASE"},
             {"timestamp_ms", ts},
+            {"run_id", suiteAttribution.run_id},
+            {"env_hash", suiteAttribution.env_hash},
             {"case_id", spec.id},
             {"description", spec.description},
             {"arm_off", {
@@ -217,6 +310,8 @@ int main() {
     appendJsonLine(logPath, {
         {"event", "REFLECTION_AB_SUMMARY"},
         {"timestamp_ms", ts},
+        {"run_id", suiteAttribution.run_id},
+        {"env_hash", suiteAttribution.env_hash},
         {"case_count", cases.size()},
         {"cases_passed", passedCases},
         {"mean_reflection_lift", reflectionLift},
@@ -227,5 +322,6 @@ int main() {
     std::cout << "  mean reflection lift: " << reflectionLift << '\n';
     std::cout << "  log: " << logPath << '\n';
 
+    suiteRecorder.complete(passedCases, cases.size(), reflectionLift);
     return passedCases == static_cast<int>(cases.size()) ? 0 : 2;
 }
