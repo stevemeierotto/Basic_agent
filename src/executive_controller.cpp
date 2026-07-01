@@ -298,7 +298,8 @@ int ExecutiveController::get_reflection_count() const {
     return reflection_count_;
 }
 
-std::string ExecutiveController::execute_goal(const std::string& goal) {
+std::string ExecutiveController::execute_goal(const std::string& goal,
+                                              const BenchmarkAttribution& benchmark) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (loop_thread_) {
@@ -312,6 +313,7 @@ std::string ExecutiveController::execute_goal(const std::string& goal) {
         revisions_count_ = 0;
         reflection_count_ = 0;
         plan_reused_ = false;
+        benchmark_attribution_ = benchmark;
         reset_goal_metrics_unlocked();
         transition_to_unlocked(ControllerState::PLANNING);
         
@@ -419,6 +421,7 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
 
         current_plan_ = plan;
         current_plan_.updated_at_ms = nowMs();
+        benchmark_attribution_ = {};
         
         // Restore session ID if it's not set but exists in the plan's context
         // (Note: active_plans table now has session_id, but the Plan struct doesn't yet have it as a direct member)
@@ -1512,6 +1515,10 @@ void ExecutiveController::emit_goal_cognitive_metrics_unlocked(const std::string
     record.reflection_skip_reason = reflection_skip_reason_;
     record.synthesis_prompt_chars = synthesis_prompt_chars_;
     record.synthesis_context_truncated = synthesis_context_truncated_;
+    if (!benchmark_attribution_.empty()) {
+        record.run_id = benchmark_attribution_.run_id;
+        record.env_hash = benchmark_attribution_.env_hash;
+    }
     if (llm_interface_) {
         const LlmTokenUsage usage = llm_interface_->sessionTokenUsage();
         record.prompt_tokens = usage.prompt_tokens;

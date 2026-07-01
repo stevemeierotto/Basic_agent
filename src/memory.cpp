@@ -391,6 +391,60 @@ bool Memory::isSessionMarkedStale(const std::string& sessionId) const {
     return stale_session_ids_.count(sessionId) > 0;
 }
 
+void Memory::setGoalActiveChecker(std::function<bool()> checker) {
+    std::unique_lock lock(mtx);
+    goal_active_checker_ = std::move(checker);
+}
+
+Thoth::ConsolidationStatus Memory::getConsolidationStatus(const std::string& sessionId) const {
+    std::shared_lock lock(mtx);
+    const std::string resolved = sessionId.empty() ? activeSessionId : sessionId;
+    if (!pruner) {
+        Thoth::ConsolidationStatus status;
+        status.session_id = resolved;
+        return status;
+    }
+    const bool goal_active = goal_active_checker_ ? goal_active_checker_() : false;
+    const bool marked_stale = stale_session_ids_.count(resolved) > 0;
+    return pruner->buildStatus(resolved, marked_stale, goal_active);
+}
+
+Thoth::ConsolidationResult Memory::runConsolidation(const std::string& sessionId,
+                                                    const Thoth::ConsolidationRequest& request) {
+    std::unique_lock lock(mtx);
+    if (!pruner) {
+        Thoth::ConsolidationResult result;
+        result.blocked = true;
+        result.block_reason = "Consolidation not configured.";
+        return result;
+    }
+
+    const std::string resolved = sessionId.empty() ? activeSessionId : sessionId;
+    const bool goal_active = goal_active_checker_ ? goal_active_checker_() : false;
+
+    if (request.source == Thoth::ConsolidationSource::MANUAL
+        && goal_active
+        && !request.allow_during_goal) {
+        Thoth::ConsolidationResult result;
+        result.source = request.source;
+        result.blocked = true;
+        result.block_reason =
+            "Goal in progress. Consolidation blocked until goal completes. Use --unsafe to override.";
+        result.decision = pruner->evaluatePolicy(resolved);
+        result.remaining_hot = result.decision.hot_count;
+        result.total_archived = 0;
+        result.batches_completed = 0;
+        result.final_decision = result.decision;
+        return result;
+    }
+
+    auto result = pruner->runConsolidation(resolved, request);
+    if (result.archived > 0 || result.deferred) {
+        stale_session_ids_.erase(resolved);
+    }
+    return result;
+}
+
 void Memory::runStartupConsolidationDiscovery() {
     if (!pruner || !repo) {
         return;
@@ -447,9 +501,9 @@ void Memory::consolidateIfNeeded(const std::string& sessionId) {
     }
 
     const auto result = pruner->consolidateIfNeeded(sessionId);
-    if (result.total_archived > 0 || result.deferred) {
-        const auto labels = Thoth::consolidationReasonsToStrings(result.final_decision.reasons);
-        std::cerr << "[Memory] Consolidated " << result.total_archived << " turn(s) for session "
+    if (result.archived > 0 || result.deferred) {
+        const auto labels = Thoth::consolidationReasonsToStrings(result.decision.reasons);
+        std::cerr << "[Memory] Consolidated " << result.archived << " turn(s) for session "
                   << sessionId;
         if (!labels.empty() && labels[0] != "NONE") {
             std::cerr << " (reasons:";

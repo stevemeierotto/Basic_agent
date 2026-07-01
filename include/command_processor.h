@@ -22,6 +22,7 @@
 #include "decision_trace.h"
 #include "executive_controller.h"
 #include "constraint_checker.h"
+#include "consolidation_api.h"
 
 class CommandProcessor {
 public:
@@ -73,6 +74,11 @@ private:
     std::pair<std::string, std::string> parseCommand(const std::string& input);
     void showHelp();
     std::string clearMemory();
+    std::string handleMemorySubcommand(const std::string& sub, const std::string& args);
+    std::string handlePrune(const std::string& args);
+    std::string formatConsolidationStatusLine(const Thoth::ConsolidationStatus& status) const;
+    std::string formatConsolidationResultLine(const Thoth::ConsolidationResult& result,
+                                              const std::string& sessionId) const;
 
     using CommandHandler = std::function<std::string(const std::string&)>;
     std::unordered_map<std::string, CommandHandler> commandHandlers;

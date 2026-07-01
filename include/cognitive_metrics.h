@@ -20,6 +20,10 @@ struct GoalCognitiveMetricsRecord {
     std::string goal;
     std::string outcome; // completed | failed | aborted
 
+    /** E1: optional benchmark run attribution (run_id + env_hash). */
+    std::string run_id;
+    std::string env_hash;
+
     std::int64_t goal_started_at_ms = 0;
     std::int64_t goal_finished_at_ms = 0;
     std::int64_t total_wall_clock_ms = 0;

@@ -16,6 +16,7 @@
 #include "default_planner.h"
 #include "iplanner.h"
 #include "prompt_factory.h"
+#include "benchmark_environment.h"
 
 //#include "Plugin.h"  // Plugin interface
 
@@ -43,7 +44,12 @@ public:
     void pause() { if (controller) controller->pause(); }
     void resume() { if (controller) controller->resume(); }
     void abort() { if (controller) controller->abort(); }
-    void executeGoal(const std::string& goal) { if (controller) controller->execute_goal(goal); }
+    void executeGoal(const std::string& goal,
+                     const Thoth::BenchmarkAttribution& benchmark = {}) {
+        if (controller) {
+            controller->execute_goal(goal, benchmark);
+        }
+    }
 
     /** Headless TEST_SUITE: index sandbox rag/ only if empty, then skip full re-init. */
     void bootstrapSandboxIfEmpty();

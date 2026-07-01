@@ -10,6 +10,7 @@
 #include "file_handler.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -26,6 +27,11 @@ CognitiveMetricsLogger& CognitiveMetricsLogger::instance() {
 CognitiveMetricsLogger::CognitiveMetricsLogger() = default;
 
 std::string CognitiveMetricsLogger::logFilePath() const {
+    if (const char* overridePath = std::getenv("THOTH_COGNITIVE_METRICS_LOG")) {
+        if (*overridePath) {
+            return overridePath;
+        }
+    }
     FileHandler fh;
     fs::path logsDir = fs::path(fh.getProjectRoot()) / "logs";
     fs::create_directories(logsDir);
@@ -48,7 +54,7 @@ void CognitiveMetricsLogger::appendJsonLine(const nlohmann::json& event) const {
 }
 
 nlohmann::json CognitiveMetricsLogger::toJson(const GoalCognitiveMetricsRecord& record) {
-    return {
+    nlohmann::json json = {
         {"event", "GOAL_COGNITIVE_METRICS"},
         {"plan_id", record.plan_id},
         {"session_id", record.session_id},
@@ -79,6 +85,13 @@ nlohmann::json CognitiveMetricsLogger::toJson(const GoalCognitiveMetricsRecord& 
         {"synthesis_prompt_chars", record.synthesis_prompt_chars},
         {"synthesis_context_truncated", record.synthesis_context_truncated},
     };
+    if (!record.run_id.empty()) {
+        json["run_id"] = record.run_id;
+    }
+    if (!record.env_hash.empty()) {
+        json["env_hash"] = record.env_hash;
+    }
+    return json;
 }
 
 void CognitiveMetricsLogger::logGoalMetrics(const GoalCognitiveMetricsRecord& record) const {

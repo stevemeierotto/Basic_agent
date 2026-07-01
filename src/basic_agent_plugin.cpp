@@ -3,6 +3,7 @@
 #include "logger.h"
 #include "../include/similarity.h"
 #include "../include/standard_execution_mode.h"
+#include "../include/executive_controller.h"
 #include "../include/llm_planner.h"
 #include "../include/fact_store.h"
 #include "../include/planner_injection_config.h"
@@ -88,7 +89,11 @@ BasicAgentPlugin::BasicAgentPlugin()
     ToolRegistry::instance().setConfig(&config);
     syncPlannerPromptConfig();
     cmdProcessor.syncPromptConfig();
-    memory.configureConsolidation(&llm, embeddingEngine.get());
+    memory.configureConsolidation(&llm, rag.engine.get());
+    memory.setGoalActiveChecker([this]() {
+        return controller
+            && controller->get_state() != Thoth::ControllerState::IDLE;
+    });
     memory.runStartupConsolidationDiscovery();
 
     // --- Initialize RAG index ---
@@ -126,13 +131,18 @@ void BasicAgentPlugin::bootstrapSandboxIfEmpty() {
 }
 
 std::string BasicAgentPlugin::processInput(const std::string& input) {
-    if (input.empty()) return "";
+    std::string trimmed = input;
+    auto b = trimmed.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    auto e = trimmed.find_last_not_of(" \t\r\n");
+    trimmed = trimmed.substr(b, e - b + 1);
+    if (trimmed.empty()) return "";
 
-    if (input[0] == '/') {
-        return cmdProcessor.handleCommand(input);
+    if (trimmed[0] == '/') {
+        return cmdProcessor.handleCommand(trimmed);
     }
 
-    return cmdProcessor.processQuery(input);
+    return cmdProcessor.processQuery(trimmed);
 }
 
 void BasicAgentPlugin::setConversationMemory(const std::vector<std::pair<std::string, std::string>>& messages,

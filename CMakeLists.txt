@@ -49,6 +49,7 @@ set(BASIC_AGENT_SOURCES
     src/memory_pruner.cpp
     src/memory_consolidation_metrics.cpp
     src/consolidation_policy.cpp
+    src/consolidation_api.cpp
     src/clock.cpp
     src/episodic_memory.cpp
     src/summary_generator.cpp
@@ -91,6 +92,10 @@ set(BASIC_AGENT_SOURCES
     src/robustness_mock_responses.cpp
     src/robustness_cases.cpp
     src/test_suite_dev.cpp
+    src/benchmark_environment.cpp
+    src/git_metadata.cpp
+    src/ollama_snapshot.cpp
+    src/benchmark_context.cpp
     src/cognitive_metrics_logger.cpp
 )
 

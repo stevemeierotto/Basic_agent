@@ -23,7 +23,9 @@
 #include "memory_pruning_config.h"
 #include "plan_reuse_config.h"
 #include "consolidation_policy.h"
+#include "consolidation_api.h"
 #include "clock.h"
+#include <functional>
 
 class LLMInterface;
 class EmbeddingEngine;
@@ -179,6 +181,12 @@ public:
     /** Discovery only — no LLM for inactive sessions; consolidates active if stale. */
     void runStartupConsolidationDiscovery();
     Thoth::ConsolidationDecision evaluateConsolidationPolicy(const std::string& sessionId) const;
+    /** Immutable consolidation snapshot (M3). */
+    Thoth::ConsolidationStatus getConsolidationStatus(const std::string& sessionId) const;
+    /** Manual or automatic consolidation entry (M3). */
+    Thoth::ConsolidationResult runConsolidation(const std::string& sessionId,
+                                                const Thoth::ConsolidationRequest& request);
+    void setGoalActiveChecker(std::function<bool()> checker);
     bool isSessionMarkedStale(const std::string& sessionId) const;
     std::vector<Thoth::MemoryRepository::ArchivedTurnRecord> getArchivedTurns() const;
     std::vector<Thoth::MemoryRepository::WarmMemoryRecord> getRecentWarmMemory(int limit = 5) const;
@@ -202,6 +210,7 @@ private:
     const Config* config_ = nullptr;
     std::shared_ptr<Thoth::Clock> clock_;
     std::unordered_set<std::string> stale_session_ids_;
+    std::function<bool()> goal_active_checker_;
     std::string activeSessionId = "default_session";
     std::string configPath;
     

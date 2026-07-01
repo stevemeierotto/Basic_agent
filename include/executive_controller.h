@@ -28,6 +28,7 @@
 #include "constraint_checker.h"
 #include "trajectory_builder.h"
 #include "reflection_utils.h"
+#include "benchmark_environment.h"
 
 class LLMInterface;
 #include <thread>
@@ -66,7 +67,8 @@ public:
     ~ExecutiveController();
 
     // Primary entry point — drives the full goal to completion
-    std::string execute_goal(const std::string& goal);
+    std::string execute_goal(const std::string& goal,
+                             const BenchmarkAttribution& benchmark = {});
 
     // Pause/resume/abort support
     void pause();
@@ -219,6 +221,7 @@ protected:
     std::string reflection_skip_reason_;
     std::string session_id_;
     bool plan_reused_ = false;
+    BenchmarkAttribution benchmark_attribution_;
 
     std::int64_t goal_started_at_ms_ = 0;
     std::int64_t planning_time_ms_ = 0;

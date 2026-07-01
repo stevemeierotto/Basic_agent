@@ -775,7 +775,8 @@ bool CommandProcessor::isQueryAllowed(std::string& reason) const {
 
 bool CommandProcessor::isCommandAllowed(const std::string& cmd, const std::string& args, std::string& reason) const {
     if (!config) return true;
-    if ((cmd == "rag" || cmd == "clear" || cmd == "reset" || cmd == "benchmark") && !config->allow_file_io) {
+    if ((cmd == "rag" || cmd == "clear" || cmd == "reset" || cmd == "benchmark" || cmd == "prune")
+        && !config->allow_file_io) {
         reason = "file I/O disabled by policy (allow_file_io=false).";
         return false;
     }
@@ -804,7 +805,7 @@ std::pair<std::string, std::string> CommandProcessor::parseCommand(const std::st
     std::getline(iss, cmd, ' ');
     std::string args;
     std::getline(iss, args);
-    return { toLower(cmd), trim(args) };
+    return { toLower(trim(cmd)), trim(args) };
 }
 
 void CommandProcessor::showHelp() {
@@ -856,6 +857,137 @@ void CommandProcessor::ensureInitialized() {
     }
 }
 
+std::string CommandProcessor::formatConsolidationStatusLine(
+    const Thoth::ConsolidationStatus& status) const {
+    std::ostringstream oss;
+    oss << "[Prune status] session=" << status.session_id
+        << " hot=" << status.decision.hot_count << '/' << status.max_hot_messages
+        << " should_consolidate=" << (status.decision.shouldConsolidate() ? "yes" : "no")
+        << " stale=" << (status.marked_stale ? "yes" : "no")
+        << " goal_active=" << (status.goal_active ? "yes" : "no");
+    const auto reasons = Thoth::consolidationReasonsToStrings(status.decision.reasons);
+    if (!reasons.empty() && reasons[0] != "NONE") {
+        oss << " reasons=[";
+        for (size_t i = 0; i < reasons.size(); ++i) {
+            if (reasons[i] == "NONE") continue;
+            if (i > 0) oss << ',';
+            oss << reasons[i];
+        }
+        oss << ']';
+    }
+    return oss.str();
+}
+
+std::string CommandProcessor::formatConsolidationResultLine(
+    const Thoth::ConsolidationResult& result,
+    const std::string& sessionId) const {
+    if (result.blocked) {
+        return std::string("[Prune blocked] ") + result.block_reason;
+    }
+    std::ostringstream oss;
+    oss << "[Prune] session=" << sessionId
+        << " archived=" << result.archived
+        << " warm_created=" << result.warm_created
+        << " batches=" << result.batches
+        << " remaining_hot=" << result.remaining_hot
+        << " deferred=" << (result.deferred ? "yes" : "no");
+    if (result.archived == 0 && !result.deferred
+        && result.decision.hot_count > 0 && !result.decision.shouldConsolidate()) {
+        oss << "\nNothing consolidated — policy clear (use --ignore-thresholds to consolidate anyway).";
+    }
+    return oss.str();
+}
+
+std::string CommandProcessor::handlePrune(const std::string& args) {
+    std::string subcommand = "status";
+    bool ignore_thresholds = false;
+    bool allow_during_goal = false;
+    std::string session_id;
+
+    std::istringstream iss(args);
+    std::string token;
+    while (iss >> token) {
+        token = toLower(trim(token));
+        if (token == "--ignore-thresholds") {
+            ignore_thresholds = true;
+        } else if (token == "--unsafe") {
+            allow_during_goal = true;
+        } else if (token == "status" || token == "explain" || token == "batch" || token == "run") {
+            subcommand = token;
+        } else if (!token.empty() && token[0] != '-') {
+            session_id = token;
+        }
+    }
+
+    if (session_id.empty()) {
+        session_id = memory.getActiveSessionId();
+    }
+
+    auto trace = traceLogger.startTrace("admin_command", args.size());
+    traceLogger.addStage(trace, "prune_requested", true, "Manual prune command", {
+        {"subcommand", subcommand},
+        {"session_id", session_id},
+        {"ignore_thresholds", ignore_thresholds},
+        {"allow_during_goal", allow_during_goal},
+        {"requested_by", "CLI"}
+    });
+
+    std::string response;
+    if (subcommand == "status") {
+        const auto status = memory.getConsolidationStatus(session_id);
+        response = formatConsolidationStatusLine(status);
+    } else if (subcommand == "explain") {
+        const auto status = memory.getConsolidationStatus(session_id);
+        response = Thoth::explainConsolidationStatus(status);
+    } else if (subcommand == "batch" || subcommand == "run") {
+        Thoth::ConsolidationRequest request;
+        request.source = Thoth::ConsolidationSource::MANUAL;
+        request.ignore_thresholds = ignore_thresholds;
+        request.single_batch = (subcommand == "batch");
+        request.allow_during_goal = allow_during_goal;
+        request.requested_by = "CLI";
+
+        const auto result = memory.runConsolidation(session_id, request);
+        response = formatConsolidationResultLine(result, session_id);
+
+        traceLogger.addStage(trace, "prune_completed", !result.blocked, response, {
+            {"session_id", session_id},
+            {"archived", result.archived},
+            {"warm_created", result.warm_created},
+            {"batches", result.batches},
+            {"remaining_hot", result.remaining_hot},
+            {"deferred", result.deferred},
+            {"blocked", result.blocked},
+            {"source", Thoth::consolidationSourceToString(result.source)},
+            {"decision", Thoth::consolidationDecisionToJson(result.decision)}
+        });
+    } else {
+        response = "Unknown prune subcommand. Use: status, explain, batch, run";
+        traceLogger.finishTrace(trace, false, response);
+        traceLogger.writeTrace(trace);
+        return response;
+    }
+
+    if (subcommand == "status" || subcommand == "explain") {
+        traceLogger.addStage(trace, "prune_completed", true, response, {
+            {"session_id", session_id},
+            {"subcommand", subcommand}
+        });
+    }
+
+    traceLogger.finishTrace(trace, true, "prune command completed");
+    traceLogger.writeTrace(trace);
+    return response;
+}
+
+std::string CommandProcessor::handleMemorySubcommand(const std::string& sub,
+                                                     const std::string& args) {
+    if (sub == "prune") {
+        return handlePrune(args);
+    }
+    return "Unknown memory subcommand '/" + sub + "'.";
+}
+
 void CommandProcessor::initializeCommands() {
     commandHandlers["help"] = [this](const std::string&) { 
         return "Built-ins:\n"
@@ -869,6 +1001,8 @@ void CommandProcessor::initializeCommands() {
                "  /benchmark ...      Run retrieval/index benchmarks\n"
                "  /config             Show config values\n"
                "  /set key value      Update config\n"
+               "  /prune [status|explain|batch|run] [--ignore-thresholds] [--unsafe] [session]\n"
+               "                      Memory consolidation (default: status)\n"
                "Also: type 'exit' or 'quit' to leave.\n";
     };
     commandHandlers["h"] = commandHandlers["help"];
@@ -936,6 +1070,9 @@ void CommandProcessor::initializeCommands() {
             return "Config updated: " + k + "=" + v;
         }
         return std::string("Usage: /set <key> <value>");
+    };
+    commandHandlers["prune"] = [this](const std::string& args) {
+        return handleMemorySubcommand("prune", args);
     };
 }
 

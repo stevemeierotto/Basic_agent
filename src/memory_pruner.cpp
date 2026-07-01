@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Steve Meierotto
  *
- * Thoth — MemoryPruner / memory consolidation (M2 policy-driven)
+ * Thoth — MemoryPruner / memory consolidation (M2 policy + M3 operational API)
  *
  * Licensed under the MIT License (see LICENSE in project root)
  */
@@ -105,22 +105,51 @@ ConsolidationDecision MemoryPruner::evaluatePolicy(const std::string& sessionId)
     return decision;
 }
 
-int MemoryPruner::consolidateOneBatch(const std::string& sessionId) {
-    const auto decision = evaluatePolicy(sessionId);
-    if (!decision.shouldConsolidate()) {
-        return 0;
-    }
-    return consolidateOneBatchInternal(sessionId, decision);
+ConsolidationStatus MemoryPruner::buildStatus(const std::string& sessionId,
+                                              bool marked_stale,
+                                              bool goal_active) const {
+    ConsolidationStatus status;
+    status.session_id = sessionId;
+    status.decision = evaluatePolicy(sessionId);
+    status.max_hot_messages = static_cast<int>(policy_.max_hot_messages);
+    status.max_hot_age_days = policy_.max_hot_age_days;
+    status.prune_batch_size = static_cast<int>(policy_.prune_batch_size);
+    status.max_batches_per_invocation = static_cast<int>(policy_.max_batches_per_invocation);
+    status.marked_stale = marked_stale;
+    status.goal_active = goal_active;
+    status.embed_ready = isEmbedReady();
+    return status;
 }
 
-int MemoryPruner::consolidateOneBatchInternal(const std::string& sessionId,
-                                              const ConsolidationDecision& decision) {
+bool MemoryPruner::shouldEnterConsolidation(const ConsolidationDecision& decision,
+                                            const ConsolidationRequest& request) const {
+    if (decision.hot_count <= 0) {
+        return false;
+    }
+    if (decision.shouldConsolidate()) {
+        return true;
+    }
+    return request.ignore_thresholds;
+}
+
+void MemoryPruner::finalizeResultCompat(ConsolidationResult& result) const {
+    result.total_archived = result.archived;
+    result.batches_completed = result.batches;
+    result.final_decision = result.decision;
+}
+
+BatchConsolidationOutcome MemoryPruner::consolidateOneBatchInternal(
+    const std::string& sessionId,
+    const ConsolidationDecision& decision,
+    ConsolidationSource source,
+    const std::string& requested_by) {
+    BatchConsolidationOutcome outcome;
     const int64_t consolidationStart = clock_->nowMs();
     ConsolidationTiming timing;
 
     const int hot_count = repo_.getHotMessageCount(sessionId);
     if (hot_count <= 0) {
-        return 0;
+        return outcome;
     }
 
     int to_archive = static_cast<int>(policy_.prune_batch_size);
@@ -130,11 +159,18 @@ int MemoryPruner::consolidateOneBatchInternal(const std::string& sessionId,
 
     auto batch = repo_.getOldestMessages(sessionId, to_archive);
     if (batch.empty()) {
-        return 0;
+        return outcome;
     }
 
     DecisionTraceLogger logger;
     DecisionTrace trace = logger.startTrace("memory_consolidation", hot_count);
+
+    logger.addStage(trace, "consolidation_source", true, "Consolidation initiated", {
+        {"session_id", sessionId},
+        {"source", consolidationSourceToString(source)},
+        {"requested_by", requested_by.empty() ? "SYSTEM" : requested_by},
+        {"decision", consolidationDecisionToJson(decision)}
+    });
 
     logger.addStage(trace, "policy_evaluated", true, "Consolidation policy evaluated", {
         {"session_id", sessionId},
@@ -148,6 +184,7 @@ int MemoryPruner::consolidateOneBatchInternal(const std::string& sessionId,
     const std::string digest = batchDigest(batch);
     const int64_t ts_start = batch.front().timestamp_ms;
     const int64_t ts_end = batch.back().timestamp_ms;
+    bool warm_will_commit = false;
 
     if (policy_.summarize_before_pruning) {
         const int64_t summaryStart = clock_->nowMs();
@@ -190,7 +227,7 @@ int MemoryPruner::consolidateOneBatchInternal(const std::string& sessionId,
             });
             logger.finishTrace(trace, false, "Consolidation aborted — hot tier unchanged");
             logger.writeTrace(trace);
-            return 0;
+            return outcome;
         }
 
         const EpisodicMemory episodic = extraction.memory;
@@ -217,10 +254,11 @@ int MemoryPruner::consolidateOneBatchInternal(const std::string& sessionId,
             });
             logger.finishTrace(trace, false, "Consolidation aborted — hot tier unchanged");
             logger.writeTrace(trace);
-            return 0;
+            return outcome;
         }
 
         request.warm = warm;
+        warm_will_commit = true;
 
         logger.addStage(trace, "episodic_extracted", true, "Episodic memory extracted", {
             {"session_id", sessionId},
@@ -239,6 +277,8 @@ int MemoryPruner::consolidateOneBatchInternal(const std::string& sessionId,
     recordConsolidationTiming(timing);
 
     if (success) {
+        outcome.archived = static_cast<int>(batch.size());
+        outcome.warm_created = warm_will_commit ? 1 : 0;
         logger.addStage(trace, "consolidation_committed", true,
                         "Consolidated " + std::to_string(batch.size()) + " turns", {
             {"session_id", sessionId},
@@ -246,6 +286,8 @@ int MemoryPruner::consolidateOneBatchInternal(const std::string& sessionId,
             {"remaining_hot", hot_count - static_cast<int>(batch.size())},
             {"derived_from_hash", digest},
             {"decision", consolidationDecisionToJson(decision)},
+            {"source", consolidationSourceToString(source)},
+            {"requested_by", requested_by.empty() ? "SYSTEM" : requested_by},
             {"summary_ms", timing.summary_ms},
             {"embed_ms", timing.embed_ms},
             {"transaction_ms", timing.transaction_ms},
@@ -264,54 +306,96 @@ int MemoryPruner::consolidateOneBatchInternal(const std::string& sessionId,
     }
 
     logger.writeTrace(trace);
-    return success ? static_cast<int>(batch.size()) : 0;
+    return outcome;
 }
 
-ConsolidationRunResult MemoryPruner::consolidateIfNeeded(const std::string& sessionId) {
-    ConsolidationRunResult result;
-    result.final_decision = evaluatePolicy(sessionId);
+ConsolidationResult MemoryPruner::runConsolidation(const std::string& sessionId,
+                                                   const ConsolidationRequest& request) {
+    ConsolidationResult result;
+    result.source = request.source;
+    result.decision = evaluatePolicy(sessionId);
 
-    if (!result.final_decision.shouldConsolidate()) {
+    if (!shouldEnterConsolidation(result.decision, request)) {
+        result.remaining_hot = result.decision.hot_count;
+        finalizeResultCompat(result);
         return result;
     }
 
-    for (size_t batch = 0; batch < policy_.max_batches_per_invocation; ++batch) {
-        const int archived = consolidateOneBatch(sessionId);
-        if (archived <= 0) {
-            break;
-        }
+    const std::string requested_by = request.requested_by.empty() ? "SYSTEM" : request.requested_by;
 
-        result.total_archived += archived;
-        result.batches_completed++;
-
-        result.final_decision = evaluatePolicy(sessionId);
-        if (!result.final_decision.shouldConsolidate()) {
-            break;
-        }
+    if (request.single_batch) {
+        const auto batch = consolidateOneBatchInternal(
+            sessionId, result.decision, request.source, requested_by);
+        result.archived = batch.archived;
+        result.warm_created = batch.warm_created;
+        result.batches = batch.archived > 0 ? 1 : 0;
+        result.decision = evaluatePolicy(sessionId);
+        result.remaining_hot = result.decision.hot_count;
+        finalizeResultCompat(result);
+        return result;
     }
 
-    if (result.final_decision.shouldConsolidate()) {
+    for (size_t batch_idx = 0; batch_idx < policy_.max_batches_per_invocation; ++batch_idx) {
+        result.decision = evaluatePolicy(sessionId);
+        if (!shouldEnterConsolidation(result.decision, request)) {
+            break;
+        }
+
+        const auto batch = consolidateOneBatchInternal(
+            sessionId, result.decision, request.source, requested_by);
+        if (batch.archived <= 0) {
+            break;
+        }
+
+        result.archived += batch.archived;
+        result.warm_created += batch.warm_created;
+        result.batches++;
+    }
+
+    result.decision = evaluatePolicy(sessionId);
+    result.remaining_hot = result.decision.hot_count;
+
+    if (shouldEnterConsolidation(result.decision, request)) {
         result.deferred = true;
         DecisionTraceLogger logger;
-        DecisionTrace trace = logger.startTrace("memory_consolidation", result.final_decision.hot_count);
+        DecisionTrace trace = logger.startTrace("memory_consolidation", result.decision.hot_count);
         logger.addStage(trace, "consolidation_deferred", true,
                         "Consolidation paused — batch cap reached. "
                         "Remaining stale messages will be consolidated on next access.", {
             {"session_id", sessionId},
-            {"batches_completed", result.batches_completed},
-            {"total_archived", result.total_archived},
-            {"remaining_hot", result.final_decision.hot_count},
-            {"decision", consolidationDecisionToJson(result.final_decision)}
+            {"batches_completed", result.batches},
+            {"total_archived", result.archived},
+            {"remaining_hot", result.remaining_hot},
+            {"decision", consolidationDecisionToJson(result.decision)},
+            {"source", consolidationSourceToString(request.source)},
+            {"requested_by", requested_by}
         });
         logger.finishTrace(trace, true, "Consolidation deferred");
         logger.writeTrace(trace);
     }
 
+    finalizeResultCompat(result);
     return result;
 }
 
+int MemoryPruner::consolidateOneBatch(const std::string& sessionId) {
+    const auto decision = evaluatePolicy(sessionId);
+    if (!decision.shouldConsolidate()) {
+        return 0;
+    }
+    return consolidateOneBatchInternal(
+        sessionId, decision, ConsolidationSource::AUTOMATIC, "SYSTEM").archived;
+}
+
+ConsolidationResult MemoryPruner::consolidateIfNeeded(const std::string& sessionId) {
+    ConsolidationRequest request;
+    request.source = ConsolidationSource::AUTOMATIC;
+    request.requested_by = "SYSTEM";
+    return runConsolidation(sessionId, request);
+}
+
 int MemoryPruner::prune(const std::string& sessionId) {
-    return consolidateIfNeeded(sessionId).total_archived;
+    return consolidateIfNeeded(sessionId).archived;
 }
 
 std::vector<MemoryRepository::ArchivedTurnRecord> MemoryPruner::restore(const std::string& sessionId) {
