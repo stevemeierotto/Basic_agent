@@ -7,6 +7,8 @@
 #include "../include/llm_planner.h"
 #include "../include/fact_store.h"
 #include "../include/planner_injection_config.h"
+#include "../include/benchmark_context.h"
+#include "../include/ollama_snapshot.h"
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -286,4 +288,60 @@ void BasicAgentPlugin::syncPlannerPromptConfig() {
     const size_t fromTokens = static_cast<size_t>(config.max_tokens) * 4;
     pCfg.maxContextLength = std::max(fromTokens, Thoth::PlannerInjection::kMinPlanPromptBudget);
     planner_prompt_factory_->setConfig(pCfg);
+}
+
+Thoth::BenchmarkEnvironmentInputs BasicAgentPlugin::buildTestSuiteBenchmarkInputs(
+    bool fullTier, const std::string& corpusPath) const {
+    Thoth::BenchmarkEnvironmentInputs inputs;
+    inputs.harness = "test_suite";
+    inputs.tier = fullTier ? Thoth::BenchmarkTier::FULL : Thoth::BenchmarkTier::DEV;
+    inputs.model.llm_model = fullTier ? config.llm_model : "mock";
+    inputs.model.embedding_model = config.embedding_model;
+    if (rag.engine) {
+        switch (rag.engine->getMethod()) {
+            case EmbeddingEngine::Method::TfIdf:
+                inputs.model.embedding_method = "TfIdf";
+                break;
+            case EmbeddingEngine::Method::External:
+                inputs.model.embedding_method = "External";
+                break;
+            case EmbeddingEngine::Method::Simple:
+                inputs.model.embedding_method = "Simple";
+                break;
+            case EmbeddingEngine::Method::WordHash:
+                inputs.model.embedding_method = "WordHash";
+                break;
+        }
+        inputs.model.embedding_dimension = rag.engine->getDimension();
+        inputs.model.embedding_internal_version = rag.engine->getInternalVersion();
+    }
+    inputs.corpus_paths = {corpusPath};
+    inputs.corpus_mode = Thoth::CorpusFingerprintMode::FAST;
+    if (indexManager) {
+        inputs.corpus_chunk_count = static_cast<int>(indexManager->getChunks().size());
+    }
+    inputs.thoth_env_flags = Thoth::collectThothEnvFlags();
+    if (fullTier) {
+        inputs.ollama_reachable = Thoth::isOllamaReachable();
+        if (inputs.ollama_reachable) {
+            if (auto snap = Thoth::fetchOllamaSnapshot()) {
+                inputs.ollama = *snap;
+            }
+        }
+    }
+    return inputs;
+}
+
+Thoth::IndexEnvironment BasicAgentPlugin::benchmarkIndexEnvironment() const {
+    Thoth::IndexEnvironment index;
+    if (!indexManager || !rag.engine) {
+        return index;
+    }
+    index.rag_index_header = {
+        {"model_name", rag.engine->getModelName()},
+        {"embedding_dimension", rag.engine->getDimension()},
+        {"embedding_version", rag.engine->getInternalVersion()},
+        {"chunk_count", static_cast<int>(indexManager->getChunks().size())},
+    };
+    return index;
 }

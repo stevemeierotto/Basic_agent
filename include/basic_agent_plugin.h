@@ -54,6 +54,11 @@ public:
     /** Headless TEST_SUITE: index sandbox rag/ only if empty, then skip full re-init. */
     void bootstrapSandboxIfEmpty();
 
+    /** E1 D1: build benchmark inputs after setRagFiles (index + corpus ready). */
+    Thoth::BenchmarkEnvironmentInputs buildTestSuiteBenchmarkInputs(bool fullTier,
+                                                                    const std::string& corpusPath) const;
+    Thoth::IndexEnvironment benchmarkIndexEnvironment() const;
+
     // --- Cognate UI Integration ---
     std::vector<Memory::CognateStrategyRecord> getAllStrategies() const;
     std::vector<Memory::CognateTrajectoryRecord> getAllTrajectories() const;
