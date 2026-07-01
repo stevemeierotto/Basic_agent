@@ -13,6 +13,14 @@
 
 namespace Thoth {
 
+/** Minimal E1 identity for grag_benchmark.jsonl rows (avoids coupling to BenchmarkAttribution). */
+struct BenchmarkRunIdentity {
+    std::string run_id;
+    std::string env_hash;
+
+    bool empty() const { return run_id.empty() && env_hash.empty(); }
+};
+
 /**
  * @class BenchmarkReporter
  * @brief Handles reporting of benchmark results to file and stdout.
@@ -21,8 +29,11 @@ class BenchmarkReporter {
 public:
     /**
      * @brief Writes the comparison result to grag_benchmark.jsonl.
+     * When identity is empty, uses legacy benchmark-{timestamp} run_id (permanent fallback).
      */
-    static bool reportToFile(const ComparisonResult& result, int corpus_chunk_count);
+    static bool reportToFile(const ComparisonResult& result,
+                             int corpus_chunk_count,
+                             const BenchmarkRunIdentity& identity = {});
 
     /**
      * @brief Prints a human-readable summary of the comparison to stdout.

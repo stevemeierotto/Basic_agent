@@ -16,7 +16,9 @@
 
 namespace Thoth {
 
-bool BenchmarkReporter::reportToFile(const ComparisonResult& result, int corpus_chunk_count) {
+bool BenchmarkReporter::reportToFile(const ComparisonResult& result,
+                                     int corpus_chunk_count,
+                                     const BenchmarkRunIdentity& identity) {
     FileHandler fh;
     std::string path = fh.getAgentWorkspacePath("grag_benchmark.jsonl");
 
@@ -24,7 +26,12 @@ bool BenchmarkReporter::reportToFile(const ComparisonResult& result, int corpus_
     auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
     nlohmann::json entry;
-    entry["run_id"] = "benchmark-" + std::to_string(now_ms);
+    if (!identity.empty()) {
+        entry["run_id"] = identity.run_id;
+        entry["env_hash"] = identity.env_hash;
+    } else {
+        entry["run_id"] = "benchmark-" + std::to_string(now_ms);
+    }
     entry["run_at_ms"] = now_ms;
     entry["corpus_chunk_count"] = corpus_chunk_count;
 
