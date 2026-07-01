@@ -8,11 +8,13 @@
  * Licensed under the MIT License (see LICENSE in project root)
  */
 
+#include "../include/benchmark_context.h"
 #include "../include/chat_rag_golden_cases.h"
 #include "../include/config.h"
 #include "../include/embedding_engine.h"
 #include "../include/index_manager.h"
 #include "../include/memory.h"
+#include "../include/ollama_snapshot.h"
 #include "../include/rag.h"
 #include "file_handler.h"
 
@@ -42,10 +44,6 @@ std::string fileBasename(const std::string& path) {
     }
 }
 
-bool ollamaReachable() {
-    return std::system("curl -sf http://localhost:11434/api/tags >/dev/null 2>&1") == 0;
-}
-
 std::int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -58,6 +56,84 @@ std::string benchmarkLogPath() {
     fs::create_directories(logsDir);
     return (logsDir / "chat_rag_benchmark.jsonl").string();
 }
+
+Thoth::BenchmarkEnvironmentInputs makeChatRagBenchmarkInputs(
+    EmbeddingEngine* engine,
+    IndexManager* idx,
+    const std::vector<std::string>& corpusPaths,
+    const Config& config) {
+    Thoth::BenchmarkEnvironmentInputs inputs;
+    inputs.harness = "chat_rag_benchmark";
+    inputs.tier = Thoth::BenchmarkTier::OLLAMA;
+    inputs.model.llm_model = config.llm_model;
+    inputs.model.embedding_model = config.embedding_model;
+    if (engine) {
+        inputs.model.embedding_method = "External";
+        inputs.model.embedding_dimension = engine->getDimension();
+        inputs.model.embedding_internal_version = engine->getInternalVersion();
+    }
+    inputs.corpus_paths = corpusPaths;
+    inputs.corpus_mode = Thoth::CorpusFingerprintMode::FAST;
+    inputs.corpus_chunk_count = idx ? static_cast<int>(idx->getChunks().size()) : 0;
+    inputs.thoth_env_flags = Thoth::collectThothEnvFlags();
+    inputs.ollama_reachable = Thoth::isOllamaReachable();
+    if (inputs.ollama_reachable) {
+        if (auto snap = Thoth::fetchOllamaSnapshot()) {
+            inputs.ollama = *snap;
+        }
+    }
+    return inputs;
+}
+
+Thoth::IndexEnvironment indexEnvironmentFrom(EmbeddingEngine* engine, IndexManager* idx) {
+    Thoth::IndexEnvironment index;
+    if (!engine || !idx) {
+        return index;
+    }
+    index.rag_index_header = {
+        {"model_name", engine->getModelName()},
+        {"embedding_dimension", engine->getDimension()},
+        {"embedding_version", engine->getInternalVersion()},
+        {"chunk_count", static_cast<int>(idx->getChunks().size())},
+    };
+    return index;
+}
+
+/** RAII: emit CHAT_RAG_BENCHMARK_COMPLETE on normal exit, CHAT_RAG_BENCHMARK_ABORTED if scope exits early. */
+class ChatRagRunRecorder {
+public:
+    explicit ChatRagRunRecorder(Thoth::BenchmarkRun& run) : run_(run) {}
+
+    ~ChatRagRunRecorder() {
+        if (!finished_) {
+            run_.emit("CHAT_RAG_BENCHMARK_ABORTED", payload());
+        }
+    }
+
+    void complete(int hitsAt1, std::size_t caseCount, float meanNdcg1, float meanMrr) {
+        hits_at_1_ = hitsAt1;
+        case_count_ = caseCount;
+        mean_ndcg_at_1_ = meanNdcg1;
+        mean_mrr_ = meanMrr;
+        run_.emit("CHAT_RAG_BENCHMARK_COMPLETE", payload());
+        finished_ = true;
+    }
+
+private:
+    nlohmann::json payload() const {
+        return {{"hits_at_1", hits_at_1_},
+                {"case_count", case_count_},
+                {"mean_ndcg_at_1", mean_ndcg_at_1_},
+                {"mean_mrr", mean_mrr_}};
+    }
+
+    Thoth::BenchmarkRun& run_;
+    int hits_at_1_ = 0;
+    std::size_t case_count_ = 0;
+    float mean_ndcg_at_1_ = 0.0f;
+    float mean_mrr_ = 0.0f;
+    bool finished_ = false;
+};
 
 struct CaseResult {
     Thoth::ChatRagGoldenCase spec;
@@ -128,7 +204,7 @@ void appendJsonLine(const std::string& path, const nlohmann::json& event) {
 int main() {
     std::cout << "C2 Phase 1 — Chat RAG Golden Corpus Benchmark\n";
 
-    if (!ollamaReachable()) {
+    if (!Thoth::isOllamaReachable()) {
         std::cerr << "[FAIL] Ollama not reachable at localhost:11434 (embeddings required).\n";
         return 1;
     }
@@ -156,6 +232,23 @@ int main() {
     }
     indexManager.setActiveCorpusFiles(corpusPaths);
     std::cout << "Total chunks: " << indexManager.getChunks().size() << '\n';
+
+    Thoth::BenchmarkRun benchmarkRun = Thoth::BenchmarkRun::create(
+        makeChatRagBenchmarkInputs(engine.get(), &indexManager, corpusPaths, config));
+    benchmarkRun.bindIndex(indexEnvironmentFrom(engine.get(), &indexManager));
+    const Thoth::BenchmarkAttribution suiteAttribution = benchmarkRun.attribution();
+
+    std::cout << "BENCHMARK_ENV run_id=" << benchmarkRun.run_id()
+              << " env_hash=" << benchmarkRun.environment_hash()
+              << " index_hash=" << benchmarkRun.index_hash() << " tier=ollama\n";
+
+    ChatRagRunRecorder suiteRecorder(benchmarkRun);
+
+    if (const char* abortSmoke = std::getenv("THOTH_CHAT_RAG_BENCHMARK_ABORT_SMOKE");
+        abortSmoke && (std::string(abortSmoke) == "1" || std::string(abortSmoke) == "true")) {
+        std::cerr << "CHAT_RAG: benchmark abort smoke — exiting before complete()\n";
+        return 2;
+    }
 
     RAGPipeline rag(std::move(engine), &indexManager, &config, &memory);
 
@@ -211,6 +304,8 @@ int main() {
         appendJsonLine(logPath, {
             {"event", "CHAT_RAG_BENCHMARK_CASE"},
             {"timestamp_ms", ts},
+            {"run_id", suiteAttribution.run_id},
+            {"env_hash", suiteAttribution.env_hash},
             {"case_id", result.spec.id},
             {"query", result.spec.query},
             {"expected_top_file", result.spec.expected_top_file},
@@ -227,6 +322,8 @@ int main() {
     appendJsonLine(logPath, {
         {"event", "CHAT_RAG_BENCHMARK_SUMMARY"},
         {"timestamp_ms", ts},
+        {"run_id", suiteAttribution.run_id},
+        {"env_hash", suiteAttribution.env_hash},
         {"case_count", cases.size()},
         {"hit_at_1", hitsAt1},
         {"mean_ndcg_at_1", meanNdcg1},
@@ -236,5 +333,6 @@ int main() {
 
     std::cout << "\nWrote " << (cases.size() + 1) << " lines to " << logPath << '\n';
 
+    suiteRecorder.complete(hitsAt1, cases.size(), meanNdcg1, meanMrr);
     return hitsAt1 == static_cast<int>(cases.size()) ? 0 : 2;
 }
