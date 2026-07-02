@@ -865,6 +865,7 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
     PlanStep& step = *it;
     step.result = result.data;
     step.status = result.success ? StepStatus::SUCCESS : StepStatus::FAILED;
+    step.outcome.run_block_reason = result.run_block_reason;
     step.completed_at_ms = nowMs();
     current_plan_.updated_at_ms = step.completed_at_ms;
 

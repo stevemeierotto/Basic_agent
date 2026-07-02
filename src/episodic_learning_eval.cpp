@@ -146,6 +146,55 @@ std::string e2ArmScoringStatusToString(E2ArmScoringStatus status) {
     return "OK";
 }
 
+std::string e2RunBlockReasonToString(E2RunBlockReason reason) {
+    switch (reason) {
+        case E2RunBlockReason::NONE:
+            return "NONE";
+        case E2RunBlockReason::RUNTIME_HEURISTIC_GUARD:
+            return "RUNTIME_HEURISTIC_GUARD";
+        case E2RunBlockReason::WIRING_GATE:
+            return "WIRING_GATE";
+        case E2RunBlockReason::STRICT_BOUNDARY_VIOLATION:
+            return "STRICT_BOUNDARY_VIOLATION";
+        case E2RunBlockReason::PROVENANCE_VIOLATION:
+            return "PROVENANCE_VIOLATION";
+    }
+    return "NONE";
+}
+
+std::string e2RunBlockReasonToProtocolString(E2RunBlockReason reason) {
+    switch (reason) {
+        case E2RunBlockReason::NONE:
+            return "";
+        case E2RunBlockReason::RUNTIME_HEURISTIC_GUARD:
+            return "LINK:RUNTIME_HEURISTIC";
+        case E2RunBlockReason::WIRING_GATE:
+            return "WIRING:GATE";
+        case E2RunBlockReason::STRICT_BOUNDARY_VIOLATION:
+            return "STRICT_BOUNDARY:VIOLATION";
+        case E2RunBlockReason::PROVENANCE_VIOLATION:
+            return "PROVENANCE:VIOLATION";
+    }
+    return "";
+}
+
+std::string e2EvaluationResolutionToString(E2EvaluationResolution resolution) {
+    switch (resolution) {
+        case E2EvaluationResolution::SCORED_SUCCESS:
+            return "SCORED_SUCCESS";
+        case E2EvaluationResolution::SCORED_FAILURE:
+            return "SCORED_FAILURE";
+        case E2EvaluationResolution::NOT_SCORABLE:
+            return "NOT_SCORABLE";
+    }
+    return "SCORED_FAILURE";
+}
+
+E2RunBlockReason e2RunBlockReasonFromException(const std::exception& e) {
+    (void)e;
+    return E2RunBlockReason::NONE;
+}
+
 bool E2VersionPin::satisfiesStrictRequirements(bool uses_embeddings) const {
     if (corpus_snapshot_id.empty() || model_version_or_weights_hash.empty()) {
         return false;
@@ -665,6 +714,60 @@ EpisodicLearningCaseEvaluation evaluateEpisodicLearningCase(
     return eval;
 }
 
+E2ArmScoringStatus caseArmStatusForResolution(const EpisodicLearningArmObservation& cold,
+                                              const EpisodicLearningArmObservation& warm) {
+    if (armFailClosed(cold)) {
+        if (cold.arm_scoring_status != E2ArmScoringStatus::OK) {
+            return cold.arm_scoring_status;
+        }
+        return cold.retrieval.arm_scoring_status;
+    }
+    if (armFailClosed(warm)) {
+        if (warm.arm_scoring_status != E2ArmScoringStatus::OK) {
+            return warm.arm_scoring_status;
+        }
+        return warm.retrieval.arm_scoring_status;
+    }
+    return E2ArmScoringStatus::OK;
+}
+
+E2EvaluationResolution resolveEvaluation(E2RunBlockReason run_block_reason,
+                                       E2ArmScoringStatus arm_status) {
+    if (run_block_reason != E2RunBlockReason::NONE) {
+        return E2EvaluationResolution::NOT_SCORABLE;
+    }
+    if (arm_status != E2ArmScoringStatus::OK) {
+        return E2EvaluationResolution::SCORED_FAILURE;
+    }
+    return E2EvaluationResolution::SCORED_SUCCESS;
+}
+
+void applyCaseEvaluationResolution(EpisodicLearningCaseEvaluation& eval) {
+    const E2ArmScoringStatus arm_status = caseArmStatusForResolution(eval.cold, eval.warm);
+    eval.evaluation_resolution = resolveEvaluation(eval.run_block_reason, arm_status);
+}
+
+E2Outcome deriveE2OutcomeFromResolution(E2EvaluationResolution resolution, bool table_passes) {
+    if (resolution == E2EvaluationResolution::NOT_SCORABLE) {
+        return E2Outcome::FAILURE;
+    }
+    if (resolution == E2EvaluationResolution::SCORED_FAILURE) {
+        return E2Outcome::FAILURE;
+    }
+    return table_passes ? E2Outcome::SUCCESS : E2Outcome::FAILURE;
+}
+
+E2RunBlockReason runBlockReasonFromPlan(const Plan& plan) {
+    E2RunBlockReason found = E2RunBlockReason::NONE;
+    for (const auto& step : plan.steps) {
+        if (step.type == StepType::RETRIEVAL && step.status != StepStatus::PENDING &&
+            step.status != StepStatus::RUNNING) {
+            found = step.outcome.run_block_reason;
+        }
+    }
+    return found;
+}
+
 EpisodicLearningSummary summarizeEpisodicLearning(
     const std::vector<EpisodicLearningCaseEvaluation>& case_results,
     const std::vector<EpisodicLearningExpectations>& case_expectations,
@@ -706,6 +809,66 @@ EpisodicLearningSummary summarizeEpisodicLearning(
         return summary;
     }
 
+    bool uses_resolution = false;
+    for (const auto& c : case_results) {
+        if (c.evaluation_resolution.has_value()) {
+            uses_resolution = true;
+            break;
+        }
+    }
+
+    if (uses_resolution) {
+        bool all_scorable_ok = !case_results.empty();
+        for (const auto& c : case_results) {
+            if (!c.evaluation_resolution.has_value()) {
+                continue;
+            }
+            switch (*c.evaluation_resolution) {
+                case E2EvaluationResolution::NOT_SCORABLE:
+                    ++summary.not_scorable_cases;
+                    break;
+                case E2EvaluationResolution::SCORED_FAILURE:
+                    ++summary.scorable_cases;
+                    all_scorable_ok = false;
+                    break;
+                case E2EvaluationResolution::SCORED_SUCCESS:
+                    ++summary.scorable_cases;
+                    if (!c.passes) {
+                        all_scorable_ok = false;
+                    }
+                    break;
+            }
+        }
+
+        if (summary.scorable_cases == 0 && summary.not_scorable_cases > 0) {
+            summary.evaluation_resolution = E2EvaluationResolution::NOT_SCORABLE;
+            summary.outcome = deriveE2OutcomeFromResolution(E2EvaluationResolution::NOT_SCORABLE, false);
+            summary.outcome_rationale = "no scorable cases (all NOT_SCORABLE)";
+            return summary;
+        }
+
+        const bool table_ok = all_scorable_ok && summary.mean_episodic_lift > 0.0f;
+        if (table_ok) {
+            summary.evaluation_resolution = E2EvaluationResolution::SCORED_SUCCESS;
+            summary.outcome =
+                deriveE2OutcomeFromResolution(E2EvaluationResolution::SCORED_SUCCESS, true);
+            summary.outcome_rationale =
+                "all scorable cases pass table expectations and mean_episodic_lift > 0";
+        } else {
+            summary.evaluation_resolution = E2EvaluationResolution::SCORED_FAILURE;
+            summary.outcome =
+                deriveE2OutcomeFromResolution(E2EvaluationResolution::SCORED_FAILURE, table_ok);
+            std::ostringstream oss;
+            if (!all_scorable_ok) {
+                oss << "one or more scorable cases failed expectations or arm resolution";
+            } else {
+                oss << "mean_episodic_lift <= 0";
+            }
+            summary.outcome_rationale = oss.str();
+        }
+        return summary;
+    }
+
     bool all_pass = !case_results.empty();
     for (const auto& c : case_results) {
         if (!c.passes) {
@@ -730,6 +893,88 @@ EpisodicLearningSummary summarizeEpisodicLearning(
 
     return summary;
 }
+
+std::optional<E2Outcome> e2OutcomeForExport(E2EvaluationResolution resolution, bool table_passes) {
+    if (resolution == E2EvaluationResolution::NOT_SCORABLE) {
+        return std::nullopt;
+    }
+    return deriveE2OutcomeFromResolution(resolution, table_passes);
+}
+
+std::optional<E2Outcome> e2OutcomeForExport(const EpisodicLearningCaseEvaluation& eval) {
+    if (!eval.evaluation_resolution.has_value()) {
+        return std::nullopt;
+    }
+    return e2OutcomeForExport(*eval.evaluation_resolution, eval.passes);
+}
+
+std::optional<E2Outcome> e2OutcomeForExport(const EpisodicLearningSummary& summary) {
+    if (!summary.evaluation_resolution.has_value()) {
+        return summary.outcome;
+    }
+    if (*summary.evaluation_resolution == E2EvaluationResolution::NOT_SCORABLE) {
+        return std::nullopt;
+    }
+    const bool table_ok = *summary.evaluation_resolution == E2EvaluationResolution::SCORED_SUCCESS;
+    return deriveE2OutcomeFromResolution(*summary.evaluation_resolution, table_ok);
+}
+
+nlohmann::json notScorableByReasonMap(
+    const std::vector<EpisodicLearningCaseEvaluation>& case_results) {
+    nlohmann::json breakdown = nlohmann::json::object();
+    for (const auto& eval : case_results) {
+        if (!eval.evaluation_resolution.has_value() ||
+            *eval.evaluation_resolution != E2EvaluationResolution::NOT_SCORABLE) {
+            continue;
+        }
+        const std::string key = e2RunBlockReasonToString(eval.run_block_reason);
+        breakdown[key] = breakdown.value(key, 0) + 1;
+    }
+    return breakdown;
+}
+
+float successRateForExport(const std::vector<EpisodicLearningCaseEvaluation>& case_results) {
+    int scorable_cases = 0;
+    int scorable_passes = 0;
+    for (const auto& eval : case_results) {
+        if (!eval.evaluation_resolution.has_value()) {
+            continue;
+        }
+        switch (*eval.evaluation_resolution) {
+            case E2EvaluationResolution::NOT_SCORABLE:
+                break;
+            case E2EvaluationResolution::SCORED_FAILURE:
+                ++scorable_cases;
+                break;
+            case E2EvaluationResolution::SCORED_SUCCESS:
+                ++scorable_cases;
+                if (eval.passes) {
+                    ++scorable_passes;
+                }
+                break;
+        }
+    }
+    if (scorable_cases == 0) {
+        return 0.0f;
+    }
+    return static_cast<float>(scorable_passes) / static_cast<float>(scorable_cases);
+}
+
+namespace {
+
+std::string e2OutcomeDetailForExport(const EpisodicLearningCaseEvaluation& eval) {
+    if (!eval.evaluation_resolution.has_value()) {
+        return {};
+    }
+    const E2ArmScoringStatus arm_status = caseArmStatusForResolution(eval.cold, eval.warm);
+    std::ostringstream oss;
+    oss << "resolution=" << e2EvaluationResolutionToString(*eval.evaluation_resolution)
+        << ";block=" << e2RunBlockReasonToString(eval.run_block_reason)
+        << ";arm=" << e2ArmScoringStatusToString(arm_status);
+    return oss.str();
+}
+
+} // namespace
 
 nlohmann::json retrievedChunkToJson(const RetrievedChunkRecord& chunk) {
     return {{"chunk_id", chunk.chunk_id},
@@ -764,12 +1009,98 @@ nlohmann::json armObservationToJson(const EpisodicLearningArmObservation& arm) {
 }
 
 nlohmann::json caseEvaluationToJson(const EpisodicLearningCaseEvaluation& eval) {
-    return {{"case_id", eval.case_id},
-            {"lift", eval.lift},
-            {"passes", eval.passes},
-            {"failure_reason", eval.failure_reason},
-            {"cold", armObservationToJson(eval.cold)},
-            {"warm", armObservationToJson(eval.warm)}};
+    nlohmann::json j = {{"case_id", eval.case_id},
+                        {"lift", eval.lift},
+                        {"passes", eval.passes},
+                        {"failure_reason", eval.failure_reason},
+                        {"run_block_reason", e2RunBlockReasonToString(eval.run_block_reason)},
+                        {"cold", armObservationToJson(eval.cold)},
+                        {"warm", armObservationToJson(eval.warm)}};
+    if (eval.evaluation_resolution.has_value()) {
+        j["evaluation_resolution"] =
+            e2EvaluationResolutionToString(*eval.evaluation_resolution);
+        if (*eval.evaluation_resolution == E2EvaluationResolution::NOT_SCORABLE) {
+            const std::string protocol = e2RunBlockReasonToProtocolString(eval.run_block_reason);
+            if (!protocol.empty()) {
+                j["scoring_block_reason"] = protocol;
+            }
+        } else if (const auto outcome = e2OutcomeForExport(eval)) {
+            j["e2_outcome"] = e2OutcomeToString(*outcome);
+        }
+        const std::string detail = e2OutcomeDetailForExport(eval);
+        if (!detail.empty()) {
+            j["e2_outcome_detail"] = detail;
+        }
+    }
+    return j;
+}
+
+nlohmann::json episodicLearningSummaryToJson(const EpisodicLearningSummary& summary) {
+    nlohmann::json caseResults = nlohmann::json::array();
+    for (const auto& eval : summary.case_results) {
+        caseResults.push_back(caseEvaluationToJson(eval));
+    }
+    nlohmann::json j = {{"scoring_tier", e2EvalTierToString(summary.scoring_tier)},
+                        {"official_scoring", summary.official_scoring},
+                        {"case_results", caseResults},
+                        {"mean_episodic_lift", summary.mean_episodic_lift},
+                        {"outcome_rationale", summary.outcome_rationale},
+                        {"scorable_cases", summary.scorable_cases},
+                        {"not_scorable_cases", summary.not_scorable_cases}};
+    const bool hasResolutionRollup =
+        summary.evaluation_resolution.has_value() || summary.scorable_cases > 0 ||
+        summary.not_scorable_cases > 0;
+    if (hasResolutionRollup) {
+        j["not_scorable_by_reason"] = notScorableByReasonMap(summary.case_results);
+        j["success_rate"] = successRateForExport(summary.case_results);
+    }
+    if (summary.evaluation_resolution.has_value()) {
+        j["evaluation_resolution"] =
+            e2EvaluationResolutionToString(*summary.evaluation_resolution);
+        if (*summary.evaluation_resolution == E2EvaluationResolution::NOT_SCORABLE) {
+            const std::string protocol =
+                e2RunBlockReasonToProtocolString(summary.case_results.empty()
+                                                     ? E2RunBlockReason::NONE
+                                                     : summary.case_results.front().run_block_reason);
+            if (!protocol.empty() && summary.not_scorable_cases == 1) {
+                j["scoring_block_reason"] = protocol;
+            }
+        } else if (const auto outcome = e2OutcomeForExport(summary)) {
+            j["e2_outcome"] = e2OutcomeToString(*outcome);
+        }
+    } else {
+        j["outcome"] = e2OutcomeToString(summary.outcome);
+    }
+    return j;
+}
+
+nlohmann::json episodicLearningCaseLogRow(const EpisodicLearningLogContext& ctx,
+                                          const EpisodicLearningCaseEvaluation& eval) {
+    return {{"event", "EPISODIC_LEARNING_CASE"},
+            {"timestamp_ms", ctx.timestamp_ms},
+            {"run_id", ctx.run_id},
+            {"env_hash", ctx.env_hash},
+            {"scoring_function", kEpisodicLearningScoringFunction},
+            {"evaluation_fingerprint", ctx.evaluation_fingerprint},
+            {"e2_eval_config", ctx.e2_eval_config},
+            {"case", caseEvaluationToJson(eval)}};
+}
+
+nlohmann::json episodicLearningSummaryLogRow(const EpisodicLearningLogContext& ctx,
+                                             const EpisodicLearningSummary& summary,
+                                             int cases_passed,
+                                             std::size_t case_count) {
+    nlohmann::json row = {{"event", "EPISODIC_LEARNING_SUMMARY"},
+                          {"timestamp_ms", ctx.timestamp_ms},
+                          {"run_id", ctx.run_id},
+                          {"env_hash", ctx.env_hash},
+                          {"scoring_function", kEpisodicLearningScoringFunction},
+                          {"evaluation_fingerprint", ctx.evaluation_fingerprint},
+                          {"e2_eval_config", ctx.e2_eval_config},
+                          {"cases_passed", cases_passed},
+                          {"case_count", case_count}};
+    row.update(episodicLearningSummaryToJson(summary));
+    return row;
 }
 
 } // namespace Thoth

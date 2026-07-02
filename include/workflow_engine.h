@@ -13,6 +13,7 @@
 #include <memory>
 #include "plan.h"
 #include "json.hpp"
+#include "episodic_learning_eval.h"
 
 // Forward declarations
 class ToolRegistry;
@@ -39,6 +40,8 @@ struct StepResult {
     std::string error_message;      // Human-readable error if failed
     int final_retry_count = 0;      // How many retries were actually performed
     int64_t latency_ms = 0;         // Execution duration
+    /** B2 observation transport — semantically frozen after B2; default NONE = no event. */
+    E2RunBlockReason run_block_reason = E2RunBlockReason::NONE;
 };
 
 /**

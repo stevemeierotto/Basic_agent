@@ -12,6 +12,7 @@
 #include <vector>
 #include <cstdint>
 #include "json.hpp"
+#include "episodic_learning_eval.h"
 
 // StepType — what kind of work this step does
 enum class StepType {
@@ -46,6 +47,11 @@ struct StepFailurePolicy {
     int timeout_ms = 30000; // Default 30s
 };
 
+/** Execution envelope — mirrors non-payload StepResult fields (B3.1). */
+struct PlanStepOutcome {
+    Thoth::E2RunBlockReason run_block_reason = Thoth::E2RunBlockReason::NONE;
+};
+
 // PlanStep — a single unit of work inside a Plan
 struct PlanStep {
     std::string step_id;             // UUID string
@@ -57,6 +63,7 @@ struct PlanStep {
     int retry_count = 0;
     StepFailurePolicy failure_policy;
     nlohmann::json result;           // Structured output after execution
+    PlanStepOutcome outcome;         // Execution envelope — not domain payload
     std::string reasoning;           // Why this step exists (for trace logging)
     int64_t started_at_ms = 0;
     int64_t completed_at_ms = 0;

@@ -10,6 +10,7 @@
 #include "../include/tools.h"
 #include "../include/rag.h"
 #include "../include/e2_strict_retrieval.h"
+#include "../include/e2_strict_enforcement.h"
 #include "../include/episodic_learning_eval.h"
 #include "../include/decision_trace.h"
 #include "../include/config.h"
@@ -270,11 +271,12 @@ StepResult WorkflowEngine::executeStep(const PlanStep& step,
 
     int maxAttempts = 1 + step.failure_policy.max_retries;
     bool success = false;
+    StepResult currentAttempt;
+    currentAttempt.step_id = step.step_id;
 
     for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
         result.final_retry_count = attempt - 1;
 
-        StepResult currentAttempt;
         currentAttempt.step_id = step.step_id;
         try {
             switch (step.type) {
@@ -320,6 +322,9 @@ StepResult WorkflowEngine::executeStep(const PlanStep& step,
             }
         }
     }
+
+    // B2 — one structural field forward per invocation; no semantic mutation.
+    result.run_block_reason = currentAttempt.run_block_reason;
 
     result.latency_ms = nowMs() - startTime;
 
@@ -618,6 +623,11 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
                            {"grag_routing_mode", diagnostics.routing_mode},
                            {"retrieved_chunk_count", static_cast<int>(chunks.size())}};
         }
+    } catch (const E2RuntimeHeuristicGuardViolation& e) {
+        // B2 — sole semantic write site for run_block_reason (typed event → enum).
+        result.success = false;
+        result.run_block_reason = E2RunBlockReason::RUNTIME_HEURISTIC_GUARD;
+        result.error_message = e.what();
     } catch (const std::exception& e) {
         result.success = false;
         result.error_message = std::string("Retrieval exception: ") + e.what();

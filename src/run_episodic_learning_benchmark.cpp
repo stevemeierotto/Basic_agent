@@ -210,6 +210,7 @@ std::optional<nlohmann::json> readLatestMetricsForGoal(const std::string& logPat
 
 struct E2CaseArmPlumbingResult {
     Thoth::EpisodicLearningArmObservation observation;
+    Thoth::E2RunBlockReason run_block_reason = Thoth::E2RunBlockReason::NONE;
     Thoth::SealedEpisodeInjectionLog sealed_log;
     Thoth::E2StrictRetrievalResult strict_retrieval;
     Thoth::E2StrictRetrievalResult executive_strict_retrieval;
@@ -352,8 +353,12 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
         controller.clear_e2_strict_eval_context();
     }
 
+    const Thoth::E2RunBlockReason runBlockReason =
+        Thoth::runBlockReasonFromPlan(controller.get_current_plan());
+
     fs::remove(cfg.database_path);
     return {obs,
+            runBlockReason,
             sealedLog,
             strictRetrieval,
             executiveRetrieval,
@@ -649,6 +654,12 @@ int main() {
 
     int casesPassed = 0;
 
+    const Thoth::EpisodicLearningLogContext logCtx{ts,
+                                                   suiteAttribution.run_id,
+                                                   suiteAttribution.env_hash,
+                                                   evalFingerprint.toJson(),
+                                                   strictConfig.toJson()};
+
     for (const auto& spec : cases) {
         std::cout << "\n" << spec.id << " — " << spec.description << '\n';
 
@@ -663,10 +674,13 @@ int main() {
 
         const auto eval = Thoth::evaluateEpisodicLearningCase(
             spec.id, spec.expectations, coldArm.observation, warmArm.observation, strictConfig);
-        evaluations.push_back(eval);
+        Thoth::EpisodicLearningCaseEvaluation resolvedEval = eval;
+        resolvedEval.run_block_reason = warmArm.run_block_reason;
+        Thoth::applyCaseEvaluationResolution(resolvedEval);
+        evaluations.push_back(resolvedEval);
         expectations.push_back(spec.expectations);
 
-        if (eval.passes) {
+        if (resolvedEval.passes) {
             ++casesPassed;
         }
 
@@ -682,47 +696,32 @@ int main() {
             std::cout << " mem_id=" << warmArm.observation.retrieval.retrieved_memory_id;
         }
         std::cout << '\n';
-        std::cout << "  lift=" << eval.lift << " pass=" << (eval.passes ? "YES" : "NO");
-        if (!eval.failure_reason.empty()) {
-            std::cout << " (" << eval.failure_reason << ')';
+        std::cout << "  lift=" << resolvedEval.lift << " pass=" << (resolvedEval.passes ? "YES" : "NO");
+        if (!resolvedEval.failure_reason.empty()) {
+            std::cout << " (" << resolvedEval.failure_reason << ')';
+        }
+        if (resolvedEval.evaluation_resolution.has_value()) {
+            std::cout << " resolution="
+                      << Thoth::e2EvaluationResolutionToString(*resolvedEval.evaluation_resolution);
         }
         std::cout << '\n';
 
-        appendJsonLine(logPath, {{"event", "EPISODIC_LEARNING_CASE"},
-                                 {"timestamp_ms", ts},
-                                 {"run_id", suiteAttribution.run_id},
-                                 {"env_hash", suiteAttribution.env_hash},
-                                 {"scoring_function", Thoth::kEpisodicLearningScoringFunction},
-                                 {"evaluation_fingerprint", evalFingerprint.toJson()},
-                                 {"e2_eval_config", strictConfig.toJson()},
-                                 {"case", Thoth::caseEvaluationToJson(eval)}});
+        appendJsonLine(logPath, Thoth::episodicLearningCaseLogRow(logCtx, resolvedEval));
     }
 
     const Thoth::EpisodicLearningSummary summary =
         Thoth::summarizeEpisodicLearning(evaluations, expectations, strictConfig);
-    const std::string outcomeStr = Thoth::e2OutcomeToString(summary.outcome);
+    std::string outcomeStr;
+    if (const auto exported = Thoth::e2OutcomeForExport(summary)) {
+        outcomeStr = Thoth::e2OutcomeToString(*exported);
+    } else if (summary.evaluation_resolution.has_value()) {
+        outcomeStr = Thoth::e2EvaluationResolutionToString(*summary.evaluation_resolution);
+    } else {
+        outcomeStr = Thoth::e2OutcomeToString(summary.outcome);
+    }
 
-    appendJsonLine(logPath, {{"event", "EPISODIC_LEARNING_SUMMARY"},
-                             {"timestamp_ms", ts},
-                             {"run_id", suiteAttribution.run_id},
-                             {"env_hash", suiteAttribution.env_hash},
-                             {"scoring_function", Thoth::kEpisodicLearningScoringFunction},
-                             {"evaluation_fingerprint", evalFingerprint.toJson()},
-                             {"e2_eval_config", strictConfig.toJson()},
-                             {"scoring_tier", "STRICT"},
-                             {"official_scoring", true},
-                             {"mean_episodic_lift", summary.mean_episodic_lift},
-                             {"e2_outcome", outcomeStr},
-                             {"outcome_rationale", summary.outcome_rationale},
-                             {"cases_passed", casesPassed},
-                             {"case_count", cases.size()},
-                             {"case_results", [&]() {
-                                  nlohmann::json arr = nlohmann::json::array();
-                                  for (const auto& e : evaluations) {
-                                      arr.push_back(Thoth::caseEvaluationToJson(e));
-                                  }
-                                  return arr;
-                              }()}});
+    appendJsonLine(logPath,
+                   Thoth::episodicLearningSummaryLogRow(logCtx, summary, casesPassed, cases.size()));
 
     std::cout << "\nSummary\n";
     std::cout << "  E2 outcome: " << outcomeStr << '\n';

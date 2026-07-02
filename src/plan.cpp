@@ -8,6 +8,41 @@
 
 #include "../include/plan.h"
 
+namespace {
+
+Thoth::E2RunBlockReason runBlockReasonFromJsonString(const std::string& value) {
+    if (value == "RUNTIME_HEURISTIC_GUARD") {
+        return Thoth::E2RunBlockReason::RUNTIME_HEURISTIC_GUARD;
+    }
+    if (value == "WIRING_GATE") {
+        return Thoth::E2RunBlockReason::WIRING_GATE;
+    }
+    if (value == "STRICT_BOUNDARY_VIOLATION") {
+        return Thoth::E2RunBlockReason::STRICT_BOUNDARY_VIOLATION;
+    }
+    if (value == "PROVENANCE_VIOLATION") {
+        return Thoth::E2RunBlockReason::PROVENANCE_VIOLATION;
+    }
+    return Thoth::E2RunBlockReason::NONE;
+}
+
+void loadPlanStepOutcomeFromJson(const nlohmann::json& j, PlanStepOutcome* outcome) {
+    if (!outcome) {
+        return;
+    }
+    if (j.contains("outcome") && j["outcome"].is_object()) {
+        outcome->run_block_reason =
+            runBlockReasonFromJsonString(j["outcome"].value("run_block_reason", "NONE"));
+        return;
+    }
+    if (j.contains("run_block_reason") && j["run_block_reason"].is_string()) {
+        outcome->run_block_reason =
+            runBlockReasonFromJsonString(j["run_block_reason"].get<std::string>());
+    }
+}
+
+} // namespace
+
 nlohmann::json PlanStep::to_json() const {
     nlohmann::json j;
     j["step_id"] = step_id;
@@ -23,6 +58,8 @@ nlohmann::json PlanStep::to_json() const {
         {"revise_plan_on_failure", failure_policy.revise_plan_on_failure}
     };
     j["result"] = result;
+    j["outcome"] = {
+        {"run_block_reason", Thoth::e2RunBlockReasonToString(outcome.run_block_reason)}};
     j["reasoning"] = reasoning;
     j["started_at_ms"] = started_at_ms;
     j["completed_at_ms"] = completed_at_ms;
@@ -45,6 +82,7 @@ PlanStep PlanStep::from_json(const nlohmann::json& j) {
         step.failure_policy.revise_plan_on_failure = j["failure_policy"].value("revise_plan_on_failure", false);
     }
     step.result = j.value("result", nlohmann::json::object());
+    loadPlanStepOutcomeFromJson(j, &step.outcome);
     step.reasoning = j.value("reasoning", "");
     step.started_at_ms = j.value("started_at_ms", 0);
     step.completed_at_ms = j.value("completed_at_ms", 0);

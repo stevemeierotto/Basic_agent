@@ -63,10 +63,38 @@ enum class E2ArmScoringStatus {
     FAILED_STRICT_BOUNDARY,
 };
 
+/**
+ * Run-level block — why an evaluation arm/run was invalid for scoring (Phase B).
+ * Distinct from arm status and from derived e2_outcome.
+ */
+enum class E2RunBlockReason {
+    NONE,
+    RUNTIME_HEURISTIC_GUARD,
+    WIRING_GATE,
+    STRICT_BOUNDARY_VIOLATION,
+    PROVENANCE_VIOLATION,
+};
+
+/** Canonical evaluation resolution (Phase B) — computed in B3; unset in B1. */
+enum class E2EvaluationResolution {
+    SCORED_SUCCESS,
+    SCORED_FAILURE,
+    NOT_SCORABLE,
+};
+
 std::string e2EvalTierToString(E2EvalTier tier);
 std::string retrievedChunkSourceToString(RetrievedChunkSource source);
 std::string provenanceValidationStatusToString(ProvenanceValidationStatus status);
 std::string e2ArmScoringStatusToString(E2ArmScoringStatus status);
+std::string e2RunBlockReasonToString(E2RunBlockReason reason);
+std::string e2RunBlockReasonToProtocolString(E2RunBlockReason reason);
+std::string e2EvaluationResolutionToString(E2EvaluationResolution resolution);
+
+/**
+ * B1 stub — always returns NONE. B2 owns non-NONE mapping from guard/wiring throws.
+ * Any non-NONE run_block_reason in B1 is invalid unless explicitly set in B2 wiring.
+ */
+E2RunBlockReason e2RunBlockReasonFromException(const std::exception& e);
 
 /** Required version pins — see E2_PROTOCOL.md § Version pinning. */
 struct E2VersionPin {
@@ -211,6 +239,10 @@ struct EpisodicLearningCaseEvaluation {
     float lift = 0.0f;
     bool passes = false;
     std::string failure_reason;
+    /** B1: default NONE. Non-NONE only legal after B2 explicit assignment. */
+    E2RunBlockReason run_block_reason = E2RunBlockReason::NONE;
+    /** B3 computes; unset in B1. */
+    std::optional<E2EvaluationResolution> evaluation_resolution;
 };
 
 enum class E2Outcome {
@@ -225,6 +257,11 @@ struct EpisodicLearningSummary {
     float mean_episodic_lift = 0.0f;
     E2Outcome outcome = E2Outcome::FAILURE;
     std::string outcome_rationale;
+    /** B3 rollup placeholders — zero in B1. */
+    int scorable_cases = 0;
+    int not_scorable_cases = 0;
+    /** B3 computes; unset in B1. */
+    std::optional<E2EvaluationResolution> evaluation_resolution;
 };
 
 std::string e2OutcomeToString(E2Outcome outcome);
@@ -294,14 +331,56 @@ EpisodicLearningCaseEvaluation evaluateEpisodicLearningCase(
     const EpisodicLearningArmObservation& warm,
     const E2EvalConfig& config);
 
+E2ArmScoringStatus caseArmStatusForResolution(
+    const EpisodicLearningArmObservation& cold,
+    const EpisodicLearningArmObservation& warm);
+
+E2EvaluationResolution resolveEvaluation(E2RunBlockReason run_block_reason,
+                                         E2ArmScoringStatus arm_status);
+
+void applyCaseEvaluationResolution(EpisodicLearningCaseEvaluation& eval);
+
+E2Outcome deriveE2OutcomeFromResolution(E2EvaluationResolution resolution, bool table_passes);
+
+/** First completed RETRIEVAL step block reason (struct field read — not JSON inference). */
+E2RunBlockReason runBlockReasonFromPlan(const Plan& plan);
+
 EpisodicLearningSummary summarizeEpisodicLearning(
     const std::vector<EpisodicLearningCaseEvaluation>& case_results,
     const std::vector<EpisodicLearningExpectations>& case_expectations,
     const E2EvalConfig& config);
 
+/** B4 — JSONL envelope fields shared by case and summary log rows. */
+struct EpisodicLearningLogContext {
+    std::int64_t timestamp_ms = 0;
+    std::string run_id;
+    std::string env_hash;
+    nlohmann::json evaluation_fingerprint = nlohmann::json::object();
+    nlohmann::json e2_eval_config = nlohmann::json::object();
+};
+
+/**
+ * B4 export-only — derived at serialization time; never a persisted source-of-truth field.
+ * Empty when resolution is unset or NOT_SCORABLE.
+ */
+std::optional<E2Outcome> e2OutcomeForExport(const EpisodicLearningCaseEvaluation& eval);
+std::optional<E2Outcome> e2OutcomeForExport(E2EvaluationResolution resolution, bool table_passes);
+std::optional<E2Outcome> e2OutcomeForExport(const EpisodicLearningSummary& summary);
+
+nlohmann::json notScorableByReasonMap(
+    const std::vector<EpisodicLearningCaseEvaluation>& case_results);
+float successRateForExport(const std::vector<EpisodicLearningCaseEvaluation>& case_results);
+
 nlohmann::json provenanceToJson(const EpisodicRetrievalProvenance& prov);
 nlohmann::json armObservationToJson(const EpisodicLearningArmObservation& arm);
 nlohmann::json caseEvaluationToJson(const EpisodicLearningCaseEvaluation& eval);
+nlohmann::json episodicLearningSummaryToJson(const EpisodicLearningSummary& summary);
+nlohmann::json episodicLearningCaseLogRow(const EpisodicLearningLogContext& ctx,
+                                          const EpisodicLearningCaseEvaluation& eval);
+nlohmann::json episodicLearningSummaryLogRow(const EpisodicLearningLogContext& ctx,
+                                             const EpisodicLearningSummary& summary,
+                                             int cases_passed,
+                                             std::size_t case_count);
 nlohmann::json retrievedChunkToJson(const RetrievedChunkRecord& chunk);
 
 } // namespace Thoth
