@@ -29,6 +29,7 @@
 #include "trajectory_builder.h"
 #include "reflection_utils.h"
 #include "benchmark_environment.h"
+#include "episodic_learning_eval.h"
 
 class LLMInterface;
 #include <thread>
@@ -69,6 +70,11 @@ public:
     // Primary entry point — drives the full goal to completion
     std::string execute_goal(const std::string& goal,
                              const BenchmarkAttribution& benchmark = {});
+
+    /** E2 evaluation harness only — inject STRICT kernel context for RETRIEVAL dispatch (A4). */
+    void set_e2_strict_eval_context(const SealedEpisodeInjectionLog* episode_log,
+                                    const E2EvalConfig* eval_config);
+    void clear_e2_strict_eval_context();
 
     // Pause/resume/abort support
     void pause();
@@ -261,6 +267,10 @@ protected:
 
     // Phase 5.5: Trajectory embedding (T)
     std::vector<float> trajectory_embedding_;
+
+    /** E2 A4: arm-scoped STRICT eval context (null outside eval harness). */
+    const SealedEpisodeInjectionLog* e2_strict_episode_log_ = nullptr;
+    const E2EvalConfig* e2_eval_config_ = nullptr;
 };
 
 } // namespace Thoth

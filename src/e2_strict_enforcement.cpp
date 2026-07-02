@@ -93,4 +93,14 @@ void assertOfficialHarnessBuild() {
     // Link anchor for run_episodic_learning_benchmark (THOTH_E2_OFFICIAL_HARNESS).
 }
 
+E2RuntimeHeuristicGuardViolation::E2RuntimeHeuristicGuardViolation()
+    : std::runtime_error(
+          "LINK:RUNTIME_HEURISTIC: STRICT execution reached heuristic retrieval") {}
+
+void guardAgainstStrictHeuristicRetrieval(const E2EvalConfig* eval_config) {
+    if (eval_config && eval_config->tier == E2EvalTier::STRICT) {
+        throw E2RuntimeHeuristicGuardViolation();
+    }
+}
+
 } // namespace Thoth

@@ -12,7 +12,12 @@
 #include "../include/benchmark_environment.h"
 #include "../include/episodic_learning_cases.h"
 #include "../include/e2_strict_enforcement.h"
+#include "../include/e2_strict_retrieval.h"
+#include "../include/plan.h"
+#include "../include/index_manager.h"
+#include "../include/embedding_engine.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace Thoth {
@@ -230,10 +235,23 @@ bool shouldInjectStrictEpisodeForArm(const EpisodicLearningCase& spec,
 
 } // namespace
 
+int* g_strict_builder_call_counter = nullptr;
+
+void setStrictInjectionLogBuilderCallCounterForTests(int* counter) {
+    g_strict_builder_call_counter = counter;
+}
+
+void clearStrictInjectionLogBuilderCallCounterForTests() {
+    g_strict_builder_call_counter = nullptr;
+}
+
 SealedEpisodeInjectionLog buildStrictInjectionLogFromCaseTable(
     const EpisodicLearningCase& case_spec,
     const std::string& arm_label,
     std::int64_t builder_timestamp_ms) {
+    if (g_strict_builder_call_counter) {
+        ++(*g_strict_builder_call_counter);
+    }
     SealedEpisodeInjectionLog log;
     if (shouldInjectStrictEpisodeForArm(case_spec, arm_label)) {
         EpisodeInjectionEntry entry;
@@ -246,6 +264,212 @@ SealedEpisodeInjectionLog buildStrictInjectionLogFromCaseTable(
     }
     log.seal();
     return log;
+}
+
+bool strictEpisodicContentRequired(const EpisodicLearningCase& case_spec,
+                                   const std::string& arm_label) {
+    return shouldInjectStrictEpisodeForArm(case_spec, arm_label);
+}
+
+EpisodicRetrievalProvenance provenanceFromStrictRetrievalResult(
+    const E2StrictRetrievalResult& retrieval,
+    const EpisodicLearningExpectations& expectations,
+    bool episodic_content_required) {
+    EpisodicRetrievalProvenance prov;
+    prov.chunks = retrieval.chunks;
+    prov.arm_scoring_status = retrieval.status;
+
+    if (retrieval.status != E2ArmScoringStatus::OK) {
+        return prov;
+    }
+
+    if (episodic_content_required && retrieval.chunks.empty()) {
+        prov.arm_scoring_status = E2ArmScoringStatus::FAILED_RETRIEVAL;
+        return prov;
+    }
+
+    for (const auto& chunk : retrieval.chunks) {
+        for (const auto& forbidden : expectations.forbidden_retrieval_tokens) {
+            if (!forbidden.empty() && chunkContentContainsToken(chunk.content, forbidden)) {
+                if (std::find(prov.forbidden_tokens_found.begin(),
+                              prov.forbidden_tokens_found.end(),
+                              forbidden) == prov.forbidden_tokens_found.end()) {
+                    prov.forbidden_tokens_found.push_back(forbidden);
+                }
+            }
+        }
+
+        const bool is_episodic =
+            chunk.source == RetrievedChunkSource::EVALUATION ||
+            chunk.chunk_id.rfind("episode:", 0) == 0;
+        if (!is_episodic) {
+            continue;
+        }
+
+        const bool token_match =
+            expectations.retrieval_match_token.empty() ||
+            chunkContentContainsToken(chunk.content, expectations.retrieval_match_token);
+        if (!token_match) {
+            continue;
+        }
+
+        prov.warm_retrieval_hit = true;
+        if (prov.retrieved_chunk_id.empty()) {
+            prov.retrieved_chunk_id = chunk.chunk_id;
+            prov.retrieved_memory_id = chunk.source_id;
+            prov.matched_token =
+                expectations.retrieval_match_token.empty()
+                    ? chunk.content.substr(0, std::min<std::size_t>(32, chunk.content.size()))
+                    : expectations.retrieval_match_token;
+        }
+    }
+
+    if (!strictProvenanceValid(prov.chunks)) {
+        prov.arm_scoring_status = E2ArmScoringStatus::FAILED_PROVENANCE;
+    }
+
+    return prov;
+}
+
+namespace {
+
+E2ArmScoringStatus e2ArmScoringStatusFromString(const std::string& status) {
+    if (status == "FAILED_RETRIEVAL") {
+        return E2ArmScoringStatus::FAILED_RETRIEVAL;
+    }
+    if (status == "FAILED_PROVENANCE") {
+        return E2ArmScoringStatus::FAILED_PROVENANCE;
+    }
+    if (status == "FAILED_SEALED_LOG_MUTATION") {
+        return E2ArmScoringStatus::FAILED_SEALED_LOG_MUTATION;
+    }
+    if (status == "FAILED_STRICT_BOUNDARY") {
+        return E2ArmScoringStatus::FAILED_STRICT_BOUNDARY;
+    }
+    return E2ArmScoringStatus::OK;
+}
+
+RetrievedChunkSource retrievedChunkSourceFromString(const std::string& source) {
+    if (source == "corpus") {
+        return RetrievedChunkSource::CORPUS;
+    }
+    if (source == "synthetic") {
+        return RetrievedChunkSource::SYNTHETIC;
+    }
+    if (source == "user") {
+        return RetrievedChunkSource::USER;
+    }
+    if (source == "evaluation") {
+        return RetrievedChunkSource::EVALUATION;
+    }
+    return RetrievedChunkSource::SYSTEM;
+}
+
+ProvenanceValidationStatus provenanceValidationStatusFromString(const std::string& status) {
+    if (status == "valid") {
+        return ProvenanceValidationStatus::VALID;
+    }
+    if (status == "invalid") {
+        return ProvenanceValidationStatus::INVALID;
+    }
+    return ProvenanceValidationStatus::UNTRACED;
+}
+
+} // namespace
+
+E2StrictRetrievalResult e2StrictRetrievalResultFromRetrievalStep(
+    const nlohmann::json& step_result) {
+    E2StrictRetrievalResult result;
+    if (!step_result.is_object()) {
+        result.status = E2ArmScoringStatus::FAILED_RETRIEVAL;
+        result.error_message = "invalid step result";
+        return result;
+    }
+
+    if (!step_result.value("strict_e2_retrieval", false)) {
+        result.status = E2ArmScoringStatus::FAILED_STRICT_BOUNDARY;
+        result.error_message = "not a STRICT E2 retrieval step result";
+        return result;
+    }
+
+    result.status =
+        e2ArmScoringStatusFromString(step_result.value("strict_retrieval_status", "OK"));
+    result.error_message = step_result.value("error_message", "");
+
+    if (!step_result.contains("data") || !step_result["data"].is_object()) {
+        return result;
+    }
+    const auto& data = step_result["data"];
+    if (!data.contains("chunks") || !data["chunks"].is_array()) {
+        return result;
+    }
+
+    for (const auto& chunk : data["chunks"]) {
+        if (!chunk.is_object()) {
+            continue;
+        }
+        RetrievedChunkRecord record;
+        record.chunk_id = chunk.value("chunk_id", chunk.value("file", ""));
+        record.content = chunk.value("content", "");
+        record.source_id = chunk.value("source_id", "");
+        record.source = retrievedChunkSourceFromString(chunk.value("source", "system"));
+        record.validation_status =
+            provenanceValidationStatusFromString(chunk.value("validation_status", "untraced"));
+        result.chunks.push_back(std::move(record));
+    }
+    return result;
+}
+
+bool e2StrictRetrievalResultsEquivalent(const E2StrictRetrievalResult& harness,
+                                        const E2StrictRetrievalResult& executive) {
+    if (harness.status != executive.status) {
+        return false;
+    }
+    if (harness.error_message != executive.error_message) {
+        return false;
+    }
+    if (harness.chunks.size() != executive.chunks.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < harness.chunks.size(); ++i) {
+        const auto& a = harness.chunks[i];
+        const auto& b = executive.chunks[i];
+        if (a.chunk_id != b.chunk_id || a.source != b.source ||
+            a.source_id != b.source_id || a.content != b.content ||
+            a.validation_status != b.validation_status) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<E2StrictRetrievalResult> executiveStrictRetrievalFromPlan(const Plan& plan) {
+    for (const auto& step : plan.steps) {
+        if (step.type == StepType::RETRIEVAL && step.result.is_object() &&
+            step.result.value("strict_e2_retrieval", false)) {
+            return e2StrictRetrievalResultFromRetrievalStep(step.result);
+        }
+    }
+    return std::nullopt;
+}
+
+void addEpisodicEvalCorpusChunk(EmbeddingEngine* engine,
+                                IndexManager* idx,
+                                const std::string& text,
+                                const std::string& file_name) {
+    if (!engine || !idx || text.empty()) {
+        return;
+    }
+    CodeChunk chunk;
+    chunk.code = text;
+    chunk.fileName = file_name;
+    chunk.embedding = engine->embed(text);
+    if (chunk.embedding.empty() ||
+        std::all_of(chunk.embedding.begin(), chunk.embedding.end(),
+                    [](float v) { return v == 0.f; })) {
+        chunk.keyword_score = 1.0f;
+    }
+    idx->addChunkToIndex(std::move(chunk));
 }
 
 bool strictProvenanceValid(const std::vector<RetrievedChunkRecord>& chunks) {

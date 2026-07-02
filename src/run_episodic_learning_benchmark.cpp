@@ -11,6 +11,7 @@
 #include "../include/benchmark_context.h"
 #include "../include/config.h"
 #include "../include/e2_strict_enforcement.h"
+#include "../include/e2_strict_retrieval.h"
 #include "../include/embedding_engine.h"
 #include "../include/episodic_learning_cases.h"
 #include "../include/episodic_learning_eval.h"
@@ -121,9 +122,14 @@ public:
         finished_ = true;
     }
 
-    void completeWiringCheckpoint(const std::string& wiring_stage, std::size_t case_count) {
+    void completeWiringCheckpoint(const std::string& wiring_stage,
+                                  std::size_t case_count,
+                                  bool retrieval_enabled = false,
+                                  bool evaluation_boundary_verified = false) {
         wiring_stage_ = wiring_stage;
         case_count_ = case_count;
+        retrieval_enabled_ = retrieval_enabled;
+        evaluation_boundary_verified_ = evaluation_boundary_verified;
         run_.emit("E2_WIRING_CHECKPOINT", wiringPayload());
         finished_ = true;
     }
@@ -140,6 +146,8 @@ private:
     nlohmann::json wiringPayload() const {
         return {{"wiring_stage", wiring_stage_},
                 {"scoring_enabled", false},
+                {"retrieval_enabled", retrieval_enabled_},
+                {"evaluation_boundary_verified", evaluation_boundary_verified_},
                 {"official_scoring", false},
                 {"case_count", case_count_},
                 {"scoring_function", Thoth::kEpisodicLearningScoringFunction}};
@@ -151,13 +159,16 @@ private:
     float mean_lift_ = 0.0f;
     int cases_passed_ = 0;
     std::size_t case_count_ = 0;
+    bool retrieval_enabled_ = false;
+    bool evaluation_boundary_verified_ = false;
     bool finished_ = false;
 };
 
-bool plantAndConsolidate(Memory& memory,
+[[maybe_unused]] bool plantAndConsolidate(Memory& memory,
                          EmbeddingEngine* engine,
                          const std::string& sessionId,
                          const std::string& plantMessage) {
+    // Retained for E2-INTEGRATION tier (Phase C); uncalled on STRICT arm path (A2+).
     memory.configureConsolidation(nullptr, engine);
     memory.setActiveSessionId(sessionId);
     memory.addMessage("user", plantMessage);
@@ -168,14 +179,7 @@ bool plantAndConsolidate(Memory& memory,
 }
 
 void addDistractorChunk(EmbeddingEngine* engine, IndexManager* idx, const std::string& text) {
-    if (!engine || !idx || text.empty()) {
-        return;
-    }
-    CodeChunk chunk;
-    chunk.code = text;
-    chunk.fileName = "e2-distractor.md";
-    chunk.embedding = engine->embed(text);
-    idx->addChunkToIndex(std::move(chunk));
+    Thoth::addEpisodicEvalCorpusChunk(engine, idx, text);
 }
 
 std::optional<nlohmann::json> readLatestMetricsForGoal(const std::string& logPath,
@@ -204,12 +208,42 @@ std::optional<nlohmann::json> readLatestMetricsForGoal(const std::string& logPat
     return last;
 }
 
-Thoth::EpisodicLearningArmObservation runCaseArm(const Thoth::EpisodicLearningCase& spec,
-                                                 const std::string& armLabel,
-                                                 const Thoth::BenchmarkAttribution& attribution,
-                                                 const std::string& metricsLogPath) {
+struct E2CaseArmPlumbingResult {
+    Thoth::EpisodicLearningArmObservation observation;
+    Thoth::SealedEpisodeInjectionLog sealed_log;
+    Thoth::E2StrictRetrievalResult strict_retrieval;
+    Thoth::E2StrictRetrievalResult executive_strict_retrieval;
+    bool harness_executive_equivalent = false;
+};
+
+nlohmann::json strictRetrievalDiagFields(const Thoth::E2StrictRetrievalResult& retrieval) {
+    nlohmann::json chunkSummary = nlohmann::json::array();
+    for (const auto& chunk : retrieval.chunks) {
+        chunkSummary.push_back(
+            {{"chunk_id", chunk.chunk_id},
+             {"source", Thoth::retrievedChunkSourceToString(chunk.source)},
+             {"source_id", chunk.source_id}});
+    }
+    return {{"retrieval_enabled", true},
+            {"strict_retrieval_status",
+             Thoth::e2ArmScoringStatusToString(retrieval.status)},
+            {"strict_retrieval_chunk_count", retrieval.chunks.size()},
+            {"strict_retrieval_chunks", chunkSummary}};
+}
+
+E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
+                                   const std::string& armLabel,
+                                   const Thoth::BenchmarkAttribution& attribution,
+                                   const Thoth::E2EvalConfig& strictConfig,
+                                   const std::string& metricsLogPath,
+                                   std::int64_t builderTimestampMs,
+                                   bool strictBoundaryRetrieval,
+                                   bool executiveStrictDispatch) {
     setenv("THOTH_MOCK_EPISODIC", "1", 1);
     setenv("THOTH_MOCK_LLM", "true", 1);
+
+    const Thoth::SealedEpisodeInjectionLog sealedLog =
+        Thoth::buildStrictInjectionLogFromCaseTable(spec, armLabel, builderTimestampMs);
 
     Config cfg;
     cfg.max_reflections = 0;
@@ -223,29 +257,34 @@ Thoth::EpisodicLearningArmObservation runCaseArm(const Thoth::EpisodicLearningCa
     auto engine = std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf, &cfg);
     EmbeddingEngine* enginePtr = engine.get();
 
-    const bool needsPlant =
-        !spec.plant_message.empty() &&
-        (spec.cold_arm_pre_consolidated || armLabel == "warm");
-    if (needsPlant) {
-        if (!plantAndConsolidate(*memory, enginePtr, spec.plant_session_id, spec.plant_message)) {
-            std::cerr << "[E2] plant/consolidate failed for " << spec.id << " arm " << armLabel
-                      << '\n';
-        }
-    }
-
     auto idx = new IndexManager(enginePtr);
     addDistractorChunk(enginePtr, idx, spec.index_distractor_text);
-    auto rag = std::make_shared<RAGPipeline>(std::move(engine), idx, &cfg, memory.get());
 
-    Thoth::EpisodicRetrievalProvenance retrievalProv;
-    rag->setEventCallback([&](const ControllerEvent& ev) {
-        (void)ev;
-    });
+    const bool episodicRequired =
+        Thoth::strictEpisodicContentRequired(spec, armLabel);
+
+    Thoth::E2StrictRetrievalResult strictRetrieval;
+    if (strictBoundaryRetrieval) {
+        Thoth::E2StrictRetrievalInput retrievalInput;
+        retrievalInput.query = spec.goal;
+        retrievalInput.episode_log = &sealedLog;
+        retrievalInput.config = strictConfig;
+        retrievalInput.index = idx;
+        retrievalInput.engine = enginePtr;
+        retrievalInput.top_k = 5;
+        strictRetrieval = Thoth::e2StrictRetrieve(retrievalInput);
+    }
+
+    auto rag = std::make_shared<RAGPipeline>(std::move(engine), idx, &cfg, memory.get());
+    rag->setEventCallback([&](const ControllerEvent& ev) { (void)ev; });
 
     auto planner = std::make_shared<Thoth::EpisodicLearningMockPlanner>(spec.validation_token);
     auto registry = std::make_shared<ToolRegistry>();
     Thoth::ExecutiveController controller(planner, registry, rag, memory);
     controller.set_max_reflections(0);
+    if (executiveStrictDispatch) {
+        controller.set_e2_strict_eval_context(&sealedLog, &strictConfig);
+    }
 
     const std::string goalSession = spec.id + "-" + armLabel + "-goal";
     memory->setActiveSessionId(goalSession);
@@ -269,15 +308,27 @@ Thoth::EpisodicLearningArmObservation runCaseArm(const Thoth::EpisodicLearningCa
 
     Thoth::EpisodicLearningArmObservation obs;
     obs.arm_label = armLabel;
-    obs.terminal_state = stateName(controller.get_state());
-    for (const auto& step : controller.get_current_plan().steps) {
-        if (step.type == StepType::RETRIEVAL && !step.result.is_null()) {
-            retrievalProv =
-                Thoth::provenanceFromRetrievalStepResult(step.result, spec.expectations);
-            break;
+
+    Thoth::E2StrictRetrievalResult executiveRetrieval;
+    if (executiveStrictDispatch) {
+        if (const auto execResult =
+                Thoth::executiveStrictRetrievalFromPlan(controller.get_current_plan())) {
+            executiveRetrieval = *execResult;
+        } else {
+            executiveRetrieval.status = Thoth::E2ArmScoringStatus::FAILED_RETRIEVAL;
+            executiveRetrieval.error_message = "missing executive STRICT RETRIEVAL step result";
         }
     }
-    obs.retrieval = retrievalProv;
+
+    if (executiveStrictDispatch) {
+        obs.retrieval = Thoth::provenanceFromStrictRetrievalResult(
+            executiveRetrieval, spec.expectations, episodicRequired);
+        obs.arm_scoring_status = obs.retrieval.arm_scoring_status;
+    } else if (strictBoundaryRetrieval) {
+        obs.retrieval = Thoth::provenanceFromStrictRetrievalResult(
+            strictRetrieval, spec.expectations, episodicRequired);
+    }
+    obs.terminal_state = stateName(controller.get_state());
     obs.wall_clock_ms = nowMs() - start;
 
     if (const auto metrics = readLatestMetricsForGoal(metricsLogPath, spec.goal)) {
@@ -291,8 +342,22 @@ Thoth::EpisodicLearningArmObservation runCaseArm(const Thoth::EpisodicLearningCa
         obs.final_success_score = 1.0f;
     }
 
+    (void)sealedLog;
+
+    const bool harnessExecutiveEquivalent =
+        executiveStrictDispatch && strictBoundaryRetrieval &&
+        Thoth::e2StrictRetrievalResultsEquivalent(strictRetrieval, executiveRetrieval);
+
+    if (executiveStrictDispatch) {
+        controller.clear_e2_strict_eval_context();
+    }
+
     fs::remove(cfg.database_path);
-    return obs;
+    return {obs,
+            sealedLog,
+            strictRetrieval,
+            executiveRetrieval,
+            harnessExecutiveEquivalent};
 }
 
 } // namespace
@@ -350,7 +415,7 @@ int main() {
         return 2;
     }
 
-    std::string wiringStage = "A1";
+    std::string wiringStage = "A5";
     if (const char* stageEnv = std::getenv("THOTH_E2_WIRING_STAGE")) {
         wiringStage = stageEnv;
     }
@@ -359,9 +424,8 @@ int main() {
     const std::string logPath = benchmarkLogPath();
     const std::int64_t ts = nowMs();
 
-    if (wiringStage == "A1" || wiringStage == "A2") {
-        std::cout << "E2 wiring checkpoint " << wiringStage
-                  << " — evaluation disabled (no scoring)\n";
+    if (wiringStage == "A1") {
+        std::cout << "E2 wiring checkpoint A1 — evaluation disabled (builder diag only)\n";
 
         for (const auto& spec : cases) {
             for (const char* armLabel : {"cold", "warm"}) {
@@ -373,6 +437,7 @@ int main() {
                                          {"env_hash", suiteAttribution.env_hash},
                                          {"wiring_stage", wiringStage},
                                          {"scoring_enabled", false},
+                                         {"retrieval_enabled", false},
                                          {"official_scoring", false},
                                          {"case_id", spec.id},
                                          {"arm", armLabel},
@@ -386,6 +451,7 @@ int main() {
                                  {"env_hash", suiteAttribution.env_hash},
                                  {"wiring_stage", wiringStage},
                                  {"scoring_enabled", false},
+                                 {"retrieval_enabled", false},
                                  {"official_scoring", false},
                                  {"case_count", cases.size()},
                                  {"evaluation_fingerprint", evalFingerprint.toJson()},
@@ -395,6 +461,185 @@ int main() {
                   << '\n';
         suiteRecorder.completeWiringCheckpoint(wiringStage, cases.size());
         return 0;
+    }
+
+    if (wiringStage == "A2") {
+        std::cout << "E2 wiring checkpoint A2 — arm plumbing smoke (no scoring, no retrieval)\n";
+
+        for (const auto& spec : cases) {
+            for (const char* armLabel : {"cold", "warm"}) {
+                const E2CaseArmPlumbingResult armResult = runCaseArm(
+                    spec, armLabel, suiteAttribution, strictConfig, metricsLog.string(), ts,
+                    /*strictBoundaryRetrieval=*/false,
+                    /*executiveStrictDispatch=*/false);
+                appendJsonLine(logPath, {{"event", "E2_STRICT_INJECTION_LOG_DIAG"},
+                                         {"timestamp_ms", ts},
+                                         {"run_id", suiteAttribution.run_id},
+                                         {"env_hash", suiteAttribution.env_hash},
+                                         {"wiring_stage", wiringStage},
+                                         {"scoring_enabled", false},
+                                         {"retrieval_enabled", false},
+                                         {"official_scoring", false},
+                                         {"case_id", spec.id},
+                                         {"arm", armLabel},
+                                         {"strict_injection_log", armResult.sealed_log.toJson()},
+                                         {"terminal_state", armResult.observation.terminal_state},
+                                         {"wall_clock_ms", armResult.observation.wall_clock_ms}});
+            }
+        }
+
+        appendJsonLine(logPath, {{"event", "E2_WIRING_CHECKPOINT"},
+                                 {"timestamp_ms", ts},
+                                 {"run_id", suiteAttribution.run_id},
+                                 {"env_hash", suiteAttribution.env_hash},
+                                 {"wiring_stage", wiringStage},
+                                 {"scoring_enabled", false},
+                                 {"retrieval_enabled", false},
+                                 {"official_scoring", false},
+                                 {"case_count", cases.size()},
+                                 {"evaluation_fingerprint", evalFingerprint.toJson()},
+                                 {"e2_eval_config", strictConfig.toJson()}});
+
+        std::cout << "  wiring checkpoint complete — " << cases.size() << " case(s), log: " << logPath
+                  << '\n';
+        suiteRecorder.completeWiringCheckpoint(wiringStage, cases.size());
+        return 0;
+    }
+
+    if (wiringStage == "A3") {
+        std::cout << "E2 wiring checkpoint A3 — kernel retrieval @ boundary (no scoring)\n";
+
+        for (const auto& spec : cases) {
+            for (const char* armLabel : {"cold", "warm"}) {
+                const E2CaseArmPlumbingResult armResult = runCaseArm(
+                    spec, armLabel, suiteAttribution, strictConfig, metricsLog.string(), ts,
+                    /*strictBoundaryRetrieval=*/true,
+                    /*executiveStrictDispatch=*/false);
+                nlohmann::json row = {{"event", "E2_STRICT_INJECTION_LOG_DIAG"},
+                                      {"timestamp_ms", ts},
+                                      {"run_id", suiteAttribution.run_id},
+                                      {"env_hash", suiteAttribution.env_hash},
+                                      {"wiring_stage", wiringStage},
+                                      {"scoring_enabled", false},
+                                      {"official_scoring", false},
+                                      {"evaluation_boundary_verified", true},
+                                      {"case_id", spec.id},
+                                      {"arm", armLabel},
+                                      {"strict_injection_log", armResult.sealed_log.toJson()},
+                                      {"terminal_state", armResult.observation.terminal_state},
+                                      {"wall_clock_ms", armResult.observation.wall_clock_ms},
+                                      {"warm_retrieval_hit",
+                                       armResult.observation.retrieval.warm_retrieval_hit},
+                                      {"boundary_provenance_status",
+                                       Thoth::e2ArmScoringStatusToString(
+                                           armResult.observation.retrieval.arm_scoring_status)}};
+                row.update(strictRetrievalDiagFields(armResult.strict_retrieval));
+                appendJsonLine(logPath, row);
+            }
+        }
+
+        appendJsonLine(logPath, {{"event", "E2_WIRING_CHECKPOINT"},
+                                 {"timestamp_ms", ts},
+                                 {"run_id", suiteAttribution.run_id},
+                                 {"env_hash", suiteAttribution.env_hash},
+                                 {"wiring_stage", wiringStage},
+                                 {"scoring_enabled", false},
+                                 {"retrieval_enabled", true},
+                                 {"evaluation_boundary_verified", true},
+                                 {"official_scoring", false},
+                                 {"case_count", cases.size()},
+                                 {"evaluation_fingerprint", evalFingerprint.toJson()},
+                                 {"e2_eval_config", strictConfig.toJson()}});
+
+        std::cout << "  wiring checkpoint complete — " << cases.size() << " case(s), log: " << logPath
+                  << '\n';
+        suiteRecorder.completeWiringCheckpoint(
+            wiringStage, cases.size(), /*retrieval_enabled=*/true,
+            /*evaluation_boundary_verified=*/true);
+        return 0;
+    }
+
+    if (wiringStage == "A4" || wiringStage == "A5") {
+        const bool runtimeHeuristicGuard = (wiringStage == "A5");
+        std::cout << "E2 wiring checkpoint " << wiringStage;
+        if (runtimeHeuristicGuard) {
+            std::cout << " — executive strict kernel + runtime heuristic guard";
+        } else {
+            std::cout << " — executive RETRIEVAL → strict kernel";
+        }
+        std::cout << '\n';
+
+        bool allEquivalent = true;
+        for (const auto& spec : cases) {
+            for (const char* armLabel : {"cold", "warm"}) {
+                const E2CaseArmPlumbingResult armResult = runCaseArm(
+                    spec, armLabel, suiteAttribution, strictConfig, metricsLog.string(), ts,
+                    /*strictBoundaryRetrieval=*/true,
+                    /*executiveStrictDispatch=*/true);
+                if (!armResult.harness_executive_equivalent) {
+                    allEquivalent = false;
+                    std::cerr << "[E2 " << wiringStage
+                              << "] harness/executive retrieval mismatch: " << spec.id << " arm "
+                              << armLabel << '\n';
+                }
+                nlohmann::json row = {{"event", "E2_STRICT_INJECTION_LOG_DIAG"},
+                                      {"timestamp_ms", ts},
+                                      {"run_id", suiteAttribution.run_id},
+                                      {"env_hash", suiteAttribution.env_hash},
+                                      {"wiring_stage", wiringStage},
+                                      {"scoring_enabled", false},
+                                      {"official_scoring", false},
+                                      {"evaluation_boundary_verified", true},
+                                      {"executive_strict_retrieval", true},
+                                      {"harness_executive_retrieval_equivalent",
+                                       armResult.harness_executive_equivalent},
+                                      {"case_id", spec.id},
+                                      {"arm", armLabel},
+                                      {"strict_injection_log", armResult.sealed_log.toJson()},
+                                      {"terminal_state", armResult.observation.terminal_state},
+                                      {"wall_clock_ms", armResult.observation.wall_clock_ms},
+                                      {"warm_retrieval_hit",
+                                       armResult.observation.retrieval.warm_retrieval_hit},
+                                      {"executive_provenance_status",
+                                       Thoth::e2ArmScoringStatusToString(
+                                           armResult.observation.retrieval.arm_scoring_status)}};
+                if (runtimeHeuristicGuard) {
+                    row["runtime_heuristic_guard"] = true;
+                }
+                row.update(strictRetrievalDiagFields(armResult.strict_retrieval));
+                appendJsonLine(logPath, row);
+            }
+        }
+
+        nlohmann::json checkpointRow = {{"event", "E2_WIRING_CHECKPOINT"},
+                                        {"timestamp_ms", ts},
+                                        {"run_id", suiteAttribution.run_id},
+                                        {"env_hash", suiteAttribution.env_hash},
+                                        {"wiring_stage", wiringStage},
+                                        {"scoring_enabled", false},
+                                        {"retrieval_enabled", true},
+                                        {"evaluation_boundary_verified", true},
+                                        {"executive_strict_retrieval", true},
+                                        {"harness_executive_retrieval_equivalent", allEquivalent},
+                                        {"official_scoring", false},
+                                        {"case_count", cases.size()},
+                                        {"evaluation_fingerprint", evalFingerprint.toJson()},
+                                        {"e2_eval_config", strictConfig.toJson()}};
+        if (runtimeHeuristicGuard) {
+            checkpointRow["runtime_heuristic_guard"] = true;
+        }
+        appendJsonLine(logPath, checkpointRow);
+
+        std::cout << "  wiring checkpoint complete — " << cases.size() << " case(s), log: "
+                  << logPath << ", equivalence=" << (allEquivalent ? "yes" : "NO") << '\n';
+        suiteRecorder.completeWiringCheckpoint(
+            wiringStage, cases.size(), /*retrieval_enabled=*/true,
+            /*evaluation_boundary_verified=*/true);
+        return allEquivalent ? 0 : 3;
+    }
+
+    if (wiringStage == "SCORING") {
+        std::cout << "E2 wiring SCORING — legacy full loop (dev only, not authoritative)\n";
     }
 
     std::vector<Thoth::EpisodicLearningCaseEvaluation> evaluations;
@@ -407,13 +652,17 @@ int main() {
     for (const auto& spec : cases) {
         std::cout << "\n" << spec.id << " — " << spec.description << '\n';
 
-        const Thoth::EpisodicLearningArmObservation coldArm =
-            runCaseArm(spec, "cold", suiteAttribution, metricsLog.string());
-        const Thoth::EpisodicLearningArmObservation warmArm =
-            runCaseArm(spec, "warm", suiteAttribution, metricsLog.string());
+        const E2CaseArmPlumbingResult coldArm = runCaseArm(
+            spec, "cold", suiteAttribution, strictConfig, metricsLog.string(), ts,
+            /*strictBoundaryRetrieval=*/true,
+            /*executiveStrictDispatch=*/true);
+        const E2CaseArmPlumbingResult warmArm = runCaseArm(
+            spec, "warm", suiteAttribution, strictConfig, metricsLog.string(), ts,
+            /*strictBoundaryRetrieval=*/true,
+            /*executiveStrictDispatch=*/true);
 
         const auto eval = Thoth::evaluateEpisodicLearningCase(
-            spec.id, spec.expectations, coldArm, warmArm, strictConfig);
+            spec.id, spec.expectations, coldArm.observation, warmArm.observation, strictConfig);
         evaluations.push_back(eval);
         expectations.push_back(spec.expectations);
 
@@ -421,14 +670,16 @@ int main() {
             ++casesPassed;
         }
 
-        std::cout << "  cold: state=" << coldArm.terminal_state
-                  << " score=" << coldArm.final_success_score
-                  << " warm_hit=" << (coldArm.retrieval.warm_retrieval_hit ? "yes" : "no") << '\n';
-        std::cout << "  warm: state=" << warmArm.terminal_state
-                  << " score=" << warmArm.final_success_score
-                  << " warm_hit=" << (warmArm.retrieval.warm_retrieval_hit ? "yes" : "no");
-        if (!warmArm.retrieval.retrieved_memory_id.empty()) {
-            std::cout << " mem_id=" << warmArm.retrieval.retrieved_memory_id;
+        std::cout << "  cold: state=" << coldArm.observation.terminal_state
+                  << " score=" << coldArm.observation.final_success_score
+                  << " warm_hit="
+                  << (coldArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no") << '\n';
+        std::cout << "  warm: state=" << warmArm.observation.terminal_state
+                  << " score=" << warmArm.observation.final_success_score
+                  << " warm_hit="
+                  << (warmArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no");
+        if (!warmArm.observation.retrieval.retrieved_memory_id.empty()) {
+            std::cout << " mem_id=" << warmArm.observation.retrieval.retrieved_memory_id;
         }
         std::cout << '\n';
         std::cout << "  lift=" << eval.lift << " pass=" << (eval.passes ? "YES" : "NO");

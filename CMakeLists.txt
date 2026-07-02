@@ -110,6 +110,7 @@ set(E2_EVAL_KERNEL_SOURCES
 add_library(e2_eval_kernel STATIC ${E2_EVAL_KERNEL_SOURCES})
 target_include_directories(e2_eval_kernel PUBLIC include)
 target_compile_definitions(e2_eval_kernel PUBLIC THOTH_E2_STRICT_KERNEL=1)
+set_target_properties(e2_eval_kernel PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Create the shared library
 add_library(basic_agent ${BASIC_AGENT_SOURCES})

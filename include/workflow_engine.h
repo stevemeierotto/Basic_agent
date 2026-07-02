@@ -20,10 +20,14 @@ class RAGPipeline;
 class Memory;
 class LLMInterface;
 class Config;
+class IndexManager;
+class EmbeddingEngine;
 
 namespace Thoth {
 
 class StepMetricsRepository;
+struct E2EvalConfig;
+class SealedEpisodeInjectionLog;
 
 /**
  * @brief Represents the outcome of a single PlanStep execution.
@@ -54,6 +58,9 @@ struct StepExecutionContext {
     std::vector<float> goal_embedding;
     std::vector<float> current_embedding;
     std::vector<float> trajectory_embedding;
+    /** E2 A4: evaluation-only STRICT kernel context (injected by harness; null in production). */
+    const SealedEpisodeInjectionLog* e2_strict_episode_log = nullptr;
+    const E2EvalConfig* e2_eval_config = nullptr;
 };
 
 /**

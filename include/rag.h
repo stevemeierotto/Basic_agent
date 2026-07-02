@@ -24,6 +24,10 @@
 
 class Memory;
 
+namespace Thoth {
+struct E2EvalConfig;
+}
+
 /**
  * @brief Coordinates retrieval logic across multiple indices.
  */
@@ -60,6 +64,10 @@ public:
     void setTrajectoryEmbedding(const std::vector<float>& t) { trajectoryEmbedding = t; }
     void setPlanContext(const std::string& pId, const std::string& sId) { planId = pId; stepId = sId; }
 
+    /** E2 A5 — authoritative eval tier for runtime heuristic guard (null in production). */
+    void setActiveE2EvalConfig(const Thoth::E2EvalConfig* config) { activeE2EvalConfig_ = config; }
+    const Thoth::E2EvalConfig* getActiveE2EvalConfig() const { return activeE2EvalConfig_; }
+
     std::unique_ptr<EmbeddingEngine> engine;
     IndexManager* indexManager;
     Config* config;
@@ -72,6 +80,7 @@ public:
     std::vector<float> trajectoryEmbedding;
     std::string planId;
     std::string stepId;
+    const Thoth::E2EvalConfig* activeE2EvalConfig_ = nullptr;
 
     void logGragBenchmark(const std::string& requestId, 
                           const std::string& query,

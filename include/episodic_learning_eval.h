@@ -14,9 +14,15 @@
 
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+struct Plan;
+
+class EmbeddingEngine;
+class IndexManager;
 
 namespace Thoth {
 
@@ -136,6 +142,7 @@ private:
 };
 
 struct EpisodicLearningCase;
+struct E2StrictRetrievalResult;
 
 /**
  * STRICT-only: build a sealed injection log from the frozen case table.
@@ -146,6 +153,10 @@ SealedEpisodeInjectionLog buildStrictInjectionLogFromCaseTable(
     const EpisodicLearningCase& case_spec,
     const std::string& arm_label,
     std::int64_t builder_timestamp_ms);
+
+/** Test-only: count buildStrictInjectionLogFromCaseTable invocations (E2-09b). */
+void setStrictInjectionLogBuilderCallCounterForTests(int* counter);
+void clearStrictInjectionLogBuilderCallCounterForTests();
 
 /** Per-chunk provenance (STRICT — all fields required for scoring). */
 struct RetrievedChunkRecord {
@@ -224,6 +235,39 @@ bool strictProvenanceValid(const std::vector<RetrievedChunkRecord>& chunks);
 EpisodicRetrievalProvenance provenanceFromRetrievalStepResult(
     const nlohmann::json& step_result,
     const EpisodicLearningExpectations& expectations);
+
+/**
+ * A3.0a — episodic content expected when arm semantics inject a non-empty plant episode.
+ * Used for vacuous-retrieval guard at the STRICT evaluation boundary.
+ */
+bool strictEpisodicContentRequired(const EpisodicLearningCase& case_spec,
+                                   const std::string& arm_label);
+
+/**
+ * STRICT evaluation boundary — maps kernel output only (no case-table bypass).
+ * @param episodic_content_required from strictEpisodicContentRequired()
+ */
+EpisodicRetrievalProvenance provenanceFromStrictRetrievalResult(
+    const E2StrictRetrievalResult& retrieval,
+    const EpisodicLearningExpectations& expectations,
+    bool episodic_content_required);
+
+/** Reconstruct kernel result from Executive RETRIEVAL step (STRICT branch output). */
+E2StrictRetrievalResult e2StrictRetrievalResultFromRetrievalStep(
+    const nlohmann::json& step_result);
+
+/** A4 equivalence — chunk ids, ordering, status (success and failure paths). */
+bool e2StrictRetrievalResultsEquivalent(const E2StrictRetrievalResult& harness,
+                                        const E2StrictRetrievalResult& executive);
+
+/** First STRICT E2 RETRIEVAL step result in a completed plan (A4). */
+std::optional<E2StrictRetrievalResult> executiveStrictRetrievalFromPlan(const Plan& plan);
+
+/** E2 harness corpus helper — accepts cold TfIdf zero-embed via keyword fallback. */
+void addEpisodicEvalCorpusChunk(EmbeddingEngine* engine,
+                                IndexManager* idx,
+                                const std::string& text,
+                                const std::string& file_name = "e2-distractor.md");
 
 EpisodicRetrievalProvenance provenanceFromRetrievalDiagnostics(
     const nlohmann::json& metadata,

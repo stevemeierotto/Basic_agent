@@ -33,6 +33,18 @@ public:
         : std::runtime_error(message) {}
 };
 
+/** A5 runtime fuse — STRICT context reached heuristic retrieval (architectural violation). */
+class E2RuntimeHeuristicGuardViolation : public std::runtime_error {
+public:
+    E2RuntimeHeuristicGuardViolation();
+};
+
+/**
+ * A5 guard entry — inspects authoritative E2EvalConfig::tier only (not THOTH_* env).
+ * Throws E2RuntimeHeuristicGuardViolation when tier == STRICT.
+ */
+void guardAgainstStrictHeuristicRetrieval(const E2EvalConfig* eval_config);
+
 /**
  * Single reproducibility unit: hash of full evaluation configuration.
  * Logged on every STRICT arm and summary.

@@ -298,6 +298,25 @@ int ExecutiveController::get_reflection_count() const {
     return reflection_count_;
 }
 
+void ExecutiveController::set_e2_strict_eval_context(const SealedEpisodeInjectionLog* episode_log,
+                                                   const E2EvalConfig* eval_config) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    e2_strict_episode_log_ = episode_log;
+    e2_eval_config_ = eval_config;
+    if (rag_) {
+        rag_->setActiveE2EvalConfig(eval_config);
+    }
+}
+
+void ExecutiveController::clear_e2_strict_eval_context() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    e2_strict_episode_log_ = nullptr;
+    e2_eval_config_ = nullptr;
+    if (rag_) {
+        rag_->setActiveE2EvalConfig(nullptr);
+    }
+}
+
 std::string ExecutiveController::execute_goal(const std::string& goal,
                                               const BenchmarkAttribution& benchmark) {
     {
@@ -803,6 +822,8 @@ void ExecutiveController::decide_transition() {
         plan_id_for_dispatch = current_plan_.plan_id;
         execution_context = buildStepExecutionContext(current_plan_);
         attachEmbeddingSnapshot_unlocked(execution_context);
+        execution_context.e2_strict_episode_log = e2_strict_episode_log_;
+        execution_context.e2_eval_config = e2_eval_config_;
     }
 
     for (const auto& [step_id, cached] : prefetched_completions) {
@@ -973,6 +994,8 @@ nlohmann::json ExecutiveController::dispatch_step(PlanStep& step) {
     const StepExecutionContext context = [&]() {
         StepExecutionContext ctx = buildStepExecutionContext(current_plan_);
         attachEmbeddingSnapshot_unlocked(ctx);
+        ctx.e2_strict_episode_log = e2_strict_episode_log_;
+        ctx.e2_eval_config = e2_eval_config_;
         return ctx;
     }();
     auto result = workflow_engine_->executeStep(step, current_plan_.plan_id, context);

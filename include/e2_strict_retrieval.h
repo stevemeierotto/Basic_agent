@@ -45,7 +45,8 @@ struct E2StrictRetrievalResult {
  * Fail closed on error — no partial chunks.
  *
  * Pure function invariant (A3+): no writes, global state, caches, SQLite, Executive, or RAG.
- * Harness wires this at the evaluation boundary; executive diagnostics are non-authoritative until A4.
+ * Episodes: deterministic token overlap (not EmbeddingEngine embed — avoids vocab mutation).
+ * See docs/E2_PROTOCOL.md § STRICT kernel scoring (A3).
  */
 E2StrictRetrievalResult e2StrictRetrieve(const E2StrictRetrievalInput& input);
 

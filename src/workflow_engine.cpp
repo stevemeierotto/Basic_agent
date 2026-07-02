@@ -9,6 +9,8 @@
 #include "../include/workflow_engine.h"
 #include "../include/tools.h"
 #include "../include/rag.h"
+#include "../include/e2_strict_retrieval.h"
+#include "../include/episodic_learning_eval.h"
 #include "../include/decision_trace.h"
 #include "../include/config.h"
 #include "../include/runtime_latency_config.h"
@@ -490,6 +492,81 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
         if (query.empty()) {
             result.success = false;
             result.error_message = "Empty retrieval query";
+            return result;
+        }
+
+        // A4.0b — Single dispatch decision point: STRICT → e2StrictRetrieve(); else RAG below.
+        if (context.e2_eval_config &&
+            context.e2_eval_config->tier == E2EvalTier::STRICT) {
+            if (!context.e2_strict_episode_log) {
+                result.success = false;
+                result.error_message = "STRICT retrieval missing sealed episode log";
+                result.data = {{"status", "error"},
+                               {"strict_e2_retrieval", true},
+                               {"strict_retrieval_status",
+                                e2ArmScoringStatusToString(
+                                    E2ArmScoringStatus::FAILED_STRICT_BOUNDARY)},
+                               {"error_message", result.error_message},
+                               {"data", {{"chunks", nlohmann::json::array()}}},
+                               {"retrieved_chunk_count", 0}};
+                return result;
+            }
+
+            if (!ragPipeline_->indexManager || !ragPipeline_->engine) {
+                result.success = false;
+                result.error_message = "STRICT retrieval index or engine unavailable";
+                result.data = {{"status", "error"},
+                               {"strict_e2_retrieval", true},
+                               {"strict_retrieval_status",
+                                e2ArmScoringStatusToString(
+                                    E2ArmScoringStatus::FAILED_RETRIEVAL)},
+                               {"error_message", result.error_message},
+                               {"data", {{"chunks", nlohmann::json::array()}}},
+                               {"retrieved_chunk_count", 0}};
+                return result;
+            }
+
+            E2StrictRetrievalInput strictInput;
+            strictInput.query = query;
+            strictInput.episode_log = context.e2_strict_episode_log;
+            strictInput.config = *context.e2_eval_config;
+            strictInput.index = ragPipeline_->indexManager;
+            strictInput.engine = ragPipeline_->engine.get();
+            strictInput.top_k = topK;
+
+            const E2StrictRetrievalResult strictResult = e2StrictRetrieve(strictInput);
+            const std::string statusStr = e2ArmScoringStatusToString(strictResult.status);
+
+            nlohmann::json chunksJson = nlohmann::json::array();
+            for (const auto& chunk : strictResult.chunks) {
+                nlohmann::json chunkObj = retrievedChunkToJson(chunk);
+                chunkObj["content"] = chunk.content;
+                chunkObj["file"] = chunk.chunk_id;
+                chunksJson.push_back(chunkObj);
+            }
+
+            if (strictResult.status != E2ArmScoringStatus::OK) {
+                result.success = false;
+                result.error_message =
+                    strictResult.error_message.empty()
+                        ? ("STRICT retrieval: " + statusStr)
+                        : strictResult.error_message;
+                result.data = {{"status", "error"},
+                               {"strict_e2_retrieval", true},
+                               {"strict_retrieval_status", statusStr},
+                               {"error_message", result.error_message},
+                               {"data", {{"chunks", nlohmann::json::array()}}},
+                               {"retrieved_chunk_count", 0}};
+                return result;
+            }
+
+            result.success = true;
+            result.data = {{"status", "success"},
+                           {"strict_e2_retrieval", true},
+                           {"strict_retrieval_status", statusStr},
+                           {"data", {{"chunks", chunksJson}}},
+                           {"retrieved_chunk_count",
+                            static_cast<int>(strictResult.chunks.size())}};
             return result;
         }
 

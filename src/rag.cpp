@@ -1,4 +1,5 @@
 #include "../include/rag.h"
+#include "../include/e2_strict_enforcement.h"
 #include "../include/decision_trace.h"
 #include "../include/file_handler.h"
 #include "../include/chunkers/chunker.h"
@@ -41,7 +42,9 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
                                                    const std::vector<float>& c_emb,
                                                    const std::vector<float>& t_emb,
                                                    GragDiagnostics* outDiagnostics) {
-    
+    // A5.0b — runtime diagnostic fuse: STRICT eval context must not reach heuristics.
+    Thoth::guardAgainstStrictHeuristicRetrieval(activeE2EvalConfig_);
+
     std::vector<CodeChunk> finalMatches;
     if (!indexManager) {
         if (outDiagnostics) {
