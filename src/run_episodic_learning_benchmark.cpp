@@ -121,6 +121,13 @@ public:
         finished_ = true;
     }
 
+    void completeWiringCheckpoint(const std::string& wiring_stage, std::size_t case_count) {
+        wiring_stage_ = wiring_stage;
+        case_count_ = case_count;
+        run_.emit("E2_WIRING_CHECKPOINT", wiringPayload());
+        finished_ = true;
+    }
+
 private:
     nlohmann::json payload() const {
         return {{"e2_outcome", e2_outcome_},
@@ -130,8 +137,17 @@ private:
                 {"scoring_function", Thoth::kEpisodicLearningScoringFunction}};
     }
 
+    nlohmann::json wiringPayload() const {
+        return {{"wiring_stage", wiring_stage_},
+                {"scoring_enabled", false},
+                {"official_scoring", false},
+                {"case_count", case_count_},
+                {"scoring_function", Thoth::kEpisodicLearningScoringFunction}};
+    }
+
     Thoth::BenchmarkRun& run_;
     std::string e2_outcome_;
+    std::string wiring_stage_;
     float mean_lift_ = 0.0f;
     int cases_passed_ = 0;
     std::size_t case_count_ = 0;
@@ -311,7 +327,8 @@ int main() {
     strictConfig.tier = Thoth::E2EvalTier::STRICT;
     strictConfig.versions.corpus_snapshot_id = benchmarkRun.index_hash();
     strictConfig.versions.model_version_or_weights_hash = "mock";
-    strictConfig.versions.embedding_model_version = probeEngine->getInternalVersion();
+    strictConfig.versions.embedding_model_version =
+        Thoth::makeEmbeddingModelVersionPin("TfIdf", probeEngine->getInternalVersion());
     strictConfig.versions.retrieval_engine_version = Thoth::kE2StrictRetrievalEngineVersion;
 
     try {
@@ -333,9 +350,52 @@ int main() {
         return 2;
     }
 
+    std::string wiringStage = "A1";
+    if (const char* stageEnv = std::getenv("THOTH_E2_WIRING_STAGE")) {
+        wiringStage = stageEnv;
+    }
+
     const auto cases = Thoth::getEpisodicLearningCases();
     const std::string logPath = benchmarkLogPath();
     const std::int64_t ts = nowMs();
+
+    if (wiringStage == "A1" || wiringStage == "A2") {
+        std::cout << "E2 wiring checkpoint " << wiringStage
+                  << " — evaluation disabled (no scoring)\n";
+
+        for (const auto& spec : cases) {
+            for (const char* armLabel : {"cold", "warm"}) {
+                const Thoth::SealedEpisodeInjectionLog log =
+                    Thoth::buildStrictInjectionLogFromCaseTable(spec, armLabel, ts);
+                appendJsonLine(logPath, {{"event", "E2_STRICT_INJECTION_LOG_DIAG"},
+                                         {"timestamp_ms", ts},
+                                         {"run_id", suiteAttribution.run_id},
+                                         {"env_hash", suiteAttribution.env_hash},
+                                         {"wiring_stage", wiringStage},
+                                         {"scoring_enabled", false},
+                                         {"official_scoring", false},
+                                         {"case_id", spec.id},
+                                         {"arm", armLabel},
+                                         {"strict_injection_log", log.toJson()}});
+            }
+        }
+
+        appendJsonLine(logPath, {{"event", "E2_WIRING_CHECKPOINT"},
+                                 {"timestamp_ms", ts},
+                                 {"run_id", suiteAttribution.run_id},
+                                 {"env_hash", suiteAttribution.env_hash},
+                                 {"wiring_stage", wiringStage},
+                                 {"scoring_enabled", false},
+                                 {"official_scoring", false},
+                                 {"case_count", cases.size()},
+                                 {"evaluation_fingerprint", evalFingerprint.toJson()},
+                                 {"e2_eval_config", strictConfig.toJson()}});
+
+        std::cout << "  wiring checkpoint complete — " << cases.size() << " case(s), log: " << logPath
+                  << '\n';
+        suiteRecorder.completeWiringCheckpoint(wiringStage, cases.size());
+        return 0;
+    }
 
     std::vector<Thoth::EpisodicLearningCaseEvaluation> evaluations;
     std::vector<Thoth::EpisodicLearningExpectations> expectations;

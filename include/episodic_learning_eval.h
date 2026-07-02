@@ -135,6 +135,18 @@ private:
     bool sealed_ = false;
 };
 
+struct EpisodicLearningCase;
+
+/**
+ * STRICT-only: build a sealed injection log from the frozen case table.
+ * @param arm_label "cold" or "warm"
+ * @param builder_timestamp_ms shared by every entry in this invocation (deterministic)
+ */
+SealedEpisodeInjectionLog buildStrictInjectionLogFromCaseTable(
+    const EpisodicLearningCase& case_spec,
+    const std::string& arm_label,
+    std::int64_t builder_timestamp_ms);
+
 /** Per-chunk provenance (STRICT — all fields required for scoring). */
 struct RetrievedChunkRecord {
     std::string chunk_id;

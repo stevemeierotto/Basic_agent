@@ -44,7 +44,8 @@ struct E2StrictRetrievalResult {
  * Deterministic STRICT retrieval: f(query, corpus_snapshot, frozen_episode_log).
  * Fail closed on error — no partial chunks.
  *
- * Implementation wiring: pending harness migration off RAGPipeline.
+ * Pure function invariant (A3+): no writes, global state, caches, SQLite, Executive, or RAG.
+ * Harness wires this at the evaluation boundary; executive diagnostics are non-authoritative until A4.
  */
 E2StrictRetrievalResult e2StrictRetrieve(const E2StrictRetrievalInput& input);
 

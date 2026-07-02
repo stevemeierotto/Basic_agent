@@ -48,6 +48,16 @@ struct E2EvaluationFingerprint {
 E2EvaluationFingerprint computeEvaluationFingerprint(const E2EvalConfig& config);
 
 /**
+ * Canonical embedding pin: "{method}:{internal_version}" (e.g. "TfIdf:2").
+ * Use instead of assigning getInternalVersion() int to std::string (int→char coercion bug).
+ */
+std::string makeEmbeddingModelVersionPin(const std::string& embedding_method,
+                                         int internal_version);
+
+/** True when every byte is printable ASCII (0x20–0x7E). Empty → false. */
+bool isPrintableVersionPin(const std::string& value);
+
+/**
  * STRICT official run gate — throws E2StrictValidationError on any missing field.
  * No implicit defaults. Call before any scored arm executes.
  */

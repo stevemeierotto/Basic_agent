@@ -10,6 +10,7 @@
 #include "../include/benchmark_environment.h"
 
 #include <sstream>
+#include <string>
 
 namespace Thoth {
 
@@ -21,7 +22,32 @@ void requireNonEmpty(const std::string& field, const char* name) {
     }
 }
 
+void requirePrintablePin(const std::string& field, const char* name) {
+    requireNonEmpty(field, name);
+    if (!isPrintableVersionPin(field)) {
+        throw E2StrictValidationError(std::string("STRICT invalid version pin (non-printable): ") +
+                                      name);
+    }
+}
+
 } // namespace
+
+std::string makeEmbeddingModelVersionPin(const std::string& embedding_method,
+                                         int internal_version) {
+    return embedding_method + ":" + std::to_string(internal_version);
+}
+
+bool isPrintableVersionPin(const std::string& value) {
+    if (value.empty()) {
+        return false;
+    }
+    for (unsigned char c : value) {
+        if (c < 0x20 || c == 0x7F) {
+            return false;
+        }
+    }
+    return true;
+}
 
 nlohmann::json E2EvaluationFingerprint::toJson() const {
     return {{"fingerprint_hash", fingerprint_hash}, {"canonical_json", canonical_json}};
@@ -47,13 +73,13 @@ void validateStrictConfigForOfficialRun(const E2EvalConfig& config, bool uses_em
         throw E2StrictValidationError("validateStrictConfigForOfficialRun requires STRICT tier");
     }
 
-    requireNonEmpty(config.versions.corpus_snapshot_id, "corpus_snapshot_id");
-    requireNonEmpty(config.versions.model_version_or_weights_hash,
-                    "model_version_or_weights_hash");
-    requireNonEmpty(config.versions.retrieval_engine_version, "retrieval_engine_version");
+    requirePrintablePin(config.versions.corpus_snapshot_id, "corpus_snapshot_id");
+    requirePrintablePin(config.versions.model_version_or_weights_hash,
+                        "model_version_or_weights_hash");
+    requirePrintablePin(config.versions.retrieval_engine_version, "retrieval_engine_version");
 
     if (uses_embeddings) {
-        requireNonEmpty(config.versions.embedding_model_version, "embedding_model_version");
+        requirePrintablePin(config.versions.embedding_model_version, "embedding_model_version");
     }
 
     if (config.versions.retrieval_engine_version != kE2StrictRetrievalEngineVersion) {

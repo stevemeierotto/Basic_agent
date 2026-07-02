@@ -9,6 +9,8 @@
  */
 
 #include "../include/episodic_learning_eval.h"
+#include "../include/benchmark_environment.h"
+#include "../include/episodic_learning_cases.h"
 #include "../include/e2_strict_enforcement.h"
 
 #include <sstream>
@@ -208,6 +210,42 @@ nlohmann::json SealedEpisodeInjectionLog::toJson() const {
                        {"injected_at_ms", e.injected_at_ms}});
     }
     return {{"sealed", sealed_}, {"entries", arr}};
+}
+
+namespace {
+
+bool shouldInjectStrictEpisodeForArm(const EpisodicLearningCase& spec,
+                                     const std::string& arm_label) {
+    if (spec.plant_message.empty()) {
+        return false;
+    }
+    if (arm_label == "warm") {
+        return true;
+    }
+    if (arm_label == "cold") {
+        return spec.cold_arm_pre_consolidated;
+    }
+    return false;
+}
+
+} // namespace
+
+SealedEpisodeInjectionLog buildStrictInjectionLogFromCaseTable(
+    const EpisodicLearningCase& case_spec,
+    const std::string& arm_label,
+    std::int64_t builder_timestamp_ms) {
+    SealedEpisodeInjectionLog log;
+    if (shouldInjectStrictEpisodeForArm(case_spec, arm_label)) {
+        EpisodeInjectionEntry entry;
+        entry.episode_id = case_spec.plant_session_id;
+        entry.source = "evaluation";
+        entry.content = case_spec.plant_message;
+        entry.content_hash = sha256Hex(case_spec.plant_message);
+        entry.injected_at_ms = builder_timestamp_ms;
+        log.append(std::move(entry));
+    }
+    log.seal();
+    return log;
 }
 
 bool strictProvenanceValid(const std::vector<RetrievedChunkRecord>& chunks) {
