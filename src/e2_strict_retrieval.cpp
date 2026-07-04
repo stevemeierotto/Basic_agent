@@ -146,6 +146,8 @@ E2StrictRetrievalResult e2StrictRetrieve(const E2StrictRetrievalInput& input) {
 
         std::sort(ranked.begin(), ranked.end(), rankedBefore);
 
+        // B5 — retrieval canonicalization: sorted + chunk_id tie-break before evaluation boundary.
+
         const std::size_t limit = static_cast<std::size_t>(input.top_k);
         result.chunks.reserve(std::min(limit, ranked.size()));
         for (std::size_t i = 0; i < ranked.size() && i < limit; ++i) {

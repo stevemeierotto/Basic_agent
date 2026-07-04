@@ -359,6 +359,13 @@ struct EpisodicLearningLogContext {
     nlohmann::json e2_eval_config = nlohmann::json::object();
 };
 
+/** B5 — harness run envelope; stage label for JSONL only (never consulted inside scored loop). */
+struct EpisodicLearningRunEnvelope {
+    bool official_scoring = false;
+    bool scoring_enabled = false;
+    std::string wiring_stage;
+};
+
 /**
  * B4 export-only — derived at serialization time; never a persisted source-of-truth field.
  * Empty when resolution is unset or NOT_SCORABLE.
@@ -380,7 +387,24 @@ nlohmann::json episodicLearningCaseLogRow(const EpisodicLearningLogContext& ctx,
 nlohmann::json episodicLearningSummaryLogRow(const EpisodicLearningLogContext& ctx,
                                              const EpisodicLearningSummary& summary,
                                              int cases_passed,
-                                             std::size_t case_count);
+                                             std::size_t case_count,
+                                             const EpisodicLearningRunEnvelope& envelope = {});
+
+/** B5 — E2-28 scoped equivalence snapshot (excludes timestamps / log ordering). */
+nlohmann::json episodicLearningScopedEquivalenceSnapshot(
+    const EpisodicLearningSummary& summary,
+    const nlohmann::json& evaluation_fingerprint,
+    const nlohmann::json& e2_eval_config);
+bool episodicLearningScopedEquivalenceEqual(const nlohmann::json& a, const nlohmann::json& b);
+
+/**
+ * B5 — fingerprint mismatch diagnosis bucket when snapshots differ.
+ * @return 0 equivalent; 1 config; 2 corpus; 3 retrieval nondeterminism; 4 semantic drift.
+ */
+int episodicLearningFingerprintMismatchBucket(const nlohmann::json& snapshot_a,
+                                              const nlohmann::json& snapshot_b,
+                                              const std::string& corpus_hash_a,
+                                              const std::string& corpus_hash_b);
 nlohmann::json retrievedChunkToJson(const RetrievedChunkRecord& chunk);
 
 } // namespace Thoth

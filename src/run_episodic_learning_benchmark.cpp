@@ -118,6 +118,22 @@ public:
         mean_lift_ = mean_lift;
         cases_passed_ = cases_passed;
         case_count_ = case_count;
+        official_scoring_ = false;
+        run_.emit("EPISODIC_LEARNING_COMPLETE", payload());
+        finished_ = true;
+    }
+
+    void completeOfficial(const Thoth::EpisodicLearningRunEnvelope& envelope,
+                          const std::string& outcome_display,
+                          float mean_lift,
+                          int cases_passed,
+                          std::size_t case_count) {
+        envelope_ = envelope;
+        e2_outcome_ = outcome_display;
+        mean_lift_ = mean_lift;
+        cases_passed_ = cases_passed;
+        case_count_ = case_count;
+        official_scoring_ = envelope.official_scoring;
         run_.emit("EPISODIC_LEARNING_COMPLETE", payload());
         finished_ = true;
     }
@@ -136,11 +152,19 @@ public:
 
 private:
     nlohmann::json payload() const {
-        return {{"e2_outcome", e2_outcome_},
-                {"mean_episodic_lift", mean_lift_},
-                {"cases_passed", cases_passed_},
-                {"case_count", case_count_},
-                {"scoring_function", Thoth::kEpisodicLearningScoringFunction}};
+        nlohmann::json row = {{"mean_episodic_lift", mean_lift_},
+                              {"cases_passed", cases_passed_},
+                              {"case_count", case_count_},
+                              {"scoring_function", Thoth::kEpisodicLearningScoringFunction},
+                              {"official_scoring", official_scoring_},
+                              {"scoring_enabled", envelope_.scoring_enabled}};
+        if (!envelope_.wiring_stage.empty()) {
+            row["wiring_stage"] = envelope_.wiring_stage;
+        }
+        if (!e2_outcome_.empty()) {
+            row["e2_outcome"] = e2_outcome_;
+        }
+        return row;
     }
 
     nlohmann::json wiringPayload() const {
@@ -156,11 +180,13 @@ private:
     Thoth::BenchmarkRun& run_;
     std::string e2_outcome_;
     std::string wiring_stage_;
+    Thoth::EpisodicLearningRunEnvelope envelope_;
     float mean_lift_ = 0.0f;
     int cases_passed_ = 0;
     std::size_t case_count_ = 0;
     bool retrieval_enabled_ = false;
     bool evaluation_boundary_verified_ = false;
+    bool official_scoring_ = false;
     bool finished_ = false;
 };
 
@@ -365,6 +391,140 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
             harnessExecutiveEquivalent};
 }
 
+struct ScoredLoopOutcome {
+    std::vector<Thoth::EpisodicLearningCaseEvaluation> evaluations;
+    std::vector<Thoth::EpisodicLearningExpectations> expectations;
+    Thoth::EpisodicLearningSummary summary;
+    int cases_passed = 0;
+    std::string outcome_display;
+};
+
+/** B5 — sole scored-loop implementation; no wiring_stage conditionals inside. */
+ScoredLoopOutcome runScoredEvaluationLoop(
+    const std::vector<Thoth::EpisodicLearningCase>& cases,
+    const Thoth::BenchmarkAttribution& suiteAttribution,
+    const Thoth::E2EvalConfig& strictConfig,
+    const Thoth::E2EvaluationFingerprint& evalFingerprint,
+    const std::string& logPath,
+    const std::string& metricsLogPath,
+    std::int64_t ts) {
+    ScoredLoopOutcome result;
+    result.evaluations.reserve(cases.size());
+    result.expectations.reserve(cases.size());
+
+    const Thoth::EpisodicLearningLogContext logCtx{ts,
+                                                   suiteAttribution.run_id,
+                                                   suiteAttribution.env_hash,
+                                                   evalFingerprint.toJson(),
+                                                   strictConfig.toJson()};
+
+    for (const auto& spec : cases) {
+        std::cout << "\n" << spec.id << " — " << spec.description << '\n';
+
+        const E2CaseArmPlumbingResult coldArm = runCaseArm(
+            spec, "cold", suiteAttribution, strictConfig, metricsLogPath, ts,
+            /*strictBoundaryRetrieval=*/true,
+            /*executiveStrictDispatch=*/true);
+        const E2CaseArmPlumbingResult warmArm = runCaseArm(
+            spec, "warm", suiteAttribution, strictConfig, metricsLogPath, ts,
+            /*strictBoundaryRetrieval=*/true,
+            /*executiveStrictDispatch=*/true);
+
+        const auto eval = Thoth::evaluateEpisodicLearningCase(
+            spec.id, spec.expectations, coldArm.observation, warmArm.observation, strictConfig);
+        Thoth::EpisodicLearningCaseEvaluation resolvedEval = eval;
+        resolvedEval.run_block_reason = warmArm.run_block_reason;
+        Thoth::applyCaseEvaluationResolution(resolvedEval);
+        result.evaluations.push_back(resolvedEval);
+        result.expectations.push_back(spec.expectations);
+
+        if (resolvedEval.passes) {
+            ++result.cases_passed;
+        }
+
+        std::cout << "  cold: state=" << coldArm.observation.terminal_state
+                  << " score=" << coldArm.observation.final_success_score
+                  << " warm_hit="
+                  << (coldArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no") << '\n';
+        std::cout << "  warm: state=" << warmArm.observation.terminal_state
+                  << " score=" << warmArm.observation.final_success_score
+                  << " warm_hit="
+                  << (warmArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no");
+        if (!warmArm.observation.retrieval.retrieved_memory_id.empty()) {
+            std::cout << " mem_id=" << warmArm.observation.retrieval.retrieved_memory_id;
+        }
+        std::cout << '\n';
+        std::cout << "  lift=" << resolvedEval.lift << " pass=" << (resolvedEval.passes ? "YES" : "NO");
+        if (!resolvedEval.failure_reason.empty()) {
+            std::cout << " (" << resolvedEval.failure_reason << ')';
+        }
+        if (resolvedEval.evaluation_resolution.has_value()) {
+            std::cout << " resolution="
+                      << Thoth::e2EvaluationResolutionToString(*resolvedEval.evaluation_resolution);
+        }
+        std::cout << '\n';
+
+        appendJsonLine(logPath, Thoth::episodicLearningCaseLogRow(logCtx, resolvedEval));
+    }
+
+    result.summary = Thoth::summarizeEpisodicLearning(
+        result.evaluations, result.expectations, strictConfig);
+    if (const auto exported = Thoth::e2OutcomeForExport(result.summary)) {
+        result.outcome_display = Thoth::e2OutcomeToString(*exported);
+    } else if (result.summary.evaluation_resolution.has_value()) {
+        result.outcome_display =
+            Thoth::e2EvaluationResolutionToString(*result.summary.evaluation_resolution);
+    } else {
+        result.outcome_display = Thoth::e2OutcomeToString(result.summary.outcome);
+    }
+    return result;
+}
+
+int runScoredEvaluationHarness(const std::vector<Thoth::EpisodicLearningCase>& cases,
+                               const Thoth::BenchmarkAttribution& suiteAttribution,
+                               const Thoth::E2EvalConfig& strictConfig,
+                               const Thoth::E2EvaluationFingerprint& evalFingerprint,
+                               const std::string& logPath,
+                               const std::string& metricsLogPath,
+                               std::int64_t ts,
+                               const Thoth::EpisodicLearningRunEnvelope& envelope,
+                               EpisodicLearningRunRecorder& suiteRecorder) {
+    const ScoredLoopOutcome scored = runScoredEvaluationLoop(
+        cases, suiteAttribution, strictConfig, evalFingerprint, logPath, metricsLogPath, ts);
+
+    const Thoth::EpisodicLearningLogContext logCtx{ts,
+                                                   suiteAttribution.run_id,
+                                                   suiteAttribution.env_hash,
+                                                   evalFingerprint.toJson(),
+                                                   strictConfig.toJson()};
+    appendJsonLine(logPath,
+                   Thoth::episodicLearningSummaryLogRow(
+                       logCtx, scored.summary, scored.cases_passed, cases.size(), envelope));
+
+    std::cout << "\nSummary\n";
+    std::cout << "  E2 outcome: " << scored.outcome_display << '\n';
+    std::cout << "  mean episodic lift: " << scored.summary.mean_episodic_lift << '\n';
+    std::cout << "  cases passed: " << scored.cases_passed << '/' << cases.size() << '\n';
+    if (envelope.official_scoring) {
+        std::cout << "  scorable_cases: " << scored.summary.scorable_cases
+                  << " not_scorable_cases: " << scored.summary.not_scorable_cases << '\n';
+    }
+    std::cout << "  log: " << logPath << '\n';
+
+    if (envelope.official_scoring) {
+        suiteRecorder.completeOfficial(
+            envelope, scored.outcome_display, scored.summary.mean_episodic_lift, scored.cases_passed,
+            cases.size());
+    } else {
+        suiteRecorder.complete(
+            scored.outcome_display, scored.summary.mean_episodic_lift, scored.cases_passed,
+            cases.size());
+    }
+
+    const bool allCasesPass = scored.cases_passed == static_cast<int>(cases.size());
+    return (allCasesPass && scored.summary.outcome == Thoth::E2Outcome::SUCCESS) ? 0 : 2;
+}
+
 } // namespace
 
 int main() {
@@ -420,7 +580,7 @@ int main() {
         return 2;
     }
 
-    std::string wiringStage = "A5";
+    std::string wiringStage = "B";
     if (const char* stageEnv = std::getenv("THOTH_E2_WIRING_STAGE")) {
         wiringStage = stageEnv;
     }
@@ -643,94 +803,23 @@ int main() {
         return allEquivalent ? 0 : 3;
     }
 
+    if (wiringStage == "B") {
+        std::cout << "E2 wiring B — authoritative official scoring\n";
+        const Thoth::EpisodicLearningRunEnvelope envelope{true, true, "B"};
+        return runScoredEvaluationHarness(
+            cases, suiteAttribution, strictConfig, evalFingerprint, logPath, metricsLog.string(), ts,
+            envelope, suiteRecorder);
+    }
+
     if (wiringStage == "SCORING") {
-        std::cout << "E2 wiring SCORING — legacy full loop (dev only, not authoritative)\n";
+        std::cout << "E2 wiring SCORING — scored loop configuration (dev only, not authoritative)\n";
+        const Thoth::EpisodicLearningRunEnvelope envelope{false, true, "SCORING"};
+        return runScoredEvaluationHarness(
+            cases, suiteAttribution, strictConfig, evalFingerprint, logPath, metricsLog.string(), ts,
+            envelope, suiteRecorder);
     }
 
-    std::vector<Thoth::EpisodicLearningCaseEvaluation> evaluations;
-    std::vector<Thoth::EpisodicLearningExpectations> expectations;
-    evaluations.reserve(cases.size());
-    expectations.reserve(cases.size());
-
-    int casesPassed = 0;
-
-    const Thoth::EpisodicLearningLogContext logCtx{ts,
-                                                   suiteAttribution.run_id,
-                                                   suiteAttribution.env_hash,
-                                                   evalFingerprint.toJson(),
-                                                   strictConfig.toJson()};
-
-    for (const auto& spec : cases) {
-        std::cout << "\n" << spec.id << " — " << spec.description << '\n';
-
-        const E2CaseArmPlumbingResult coldArm = runCaseArm(
-            spec, "cold", suiteAttribution, strictConfig, metricsLog.string(), ts,
-            /*strictBoundaryRetrieval=*/true,
-            /*executiveStrictDispatch=*/true);
-        const E2CaseArmPlumbingResult warmArm = runCaseArm(
-            spec, "warm", suiteAttribution, strictConfig, metricsLog.string(), ts,
-            /*strictBoundaryRetrieval=*/true,
-            /*executiveStrictDispatch=*/true);
-
-        const auto eval = Thoth::evaluateEpisodicLearningCase(
-            spec.id, spec.expectations, coldArm.observation, warmArm.observation, strictConfig);
-        Thoth::EpisodicLearningCaseEvaluation resolvedEval = eval;
-        resolvedEval.run_block_reason = warmArm.run_block_reason;
-        Thoth::applyCaseEvaluationResolution(resolvedEval);
-        evaluations.push_back(resolvedEval);
-        expectations.push_back(spec.expectations);
-
-        if (resolvedEval.passes) {
-            ++casesPassed;
-        }
-
-        std::cout << "  cold: state=" << coldArm.observation.terminal_state
-                  << " score=" << coldArm.observation.final_success_score
-                  << " warm_hit="
-                  << (coldArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no") << '\n';
-        std::cout << "  warm: state=" << warmArm.observation.terminal_state
-                  << " score=" << warmArm.observation.final_success_score
-                  << " warm_hit="
-                  << (warmArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no");
-        if (!warmArm.observation.retrieval.retrieved_memory_id.empty()) {
-            std::cout << " mem_id=" << warmArm.observation.retrieval.retrieved_memory_id;
-        }
-        std::cout << '\n';
-        std::cout << "  lift=" << resolvedEval.lift << " pass=" << (resolvedEval.passes ? "YES" : "NO");
-        if (!resolvedEval.failure_reason.empty()) {
-            std::cout << " (" << resolvedEval.failure_reason << ')';
-        }
-        if (resolvedEval.evaluation_resolution.has_value()) {
-            std::cout << " resolution="
-                      << Thoth::e2EvaluationResolutionToString(*resolvedEval.evaluation_resolution);
-        }
-        std::cout << '\n';
-
-        appendJsonLine(logPath, Thoth::episodicLearningCaseLogRow(logCtx, resolvedEval));
-    }
-
-    const Thoth::EpisodicLearningSummary summary =
-        Thoth::summarizeEpisodicLearning(evaluations, expectations, strictConfig);
-    std::string outcomeStr;
-    if (const auto exported = Thoth::e2OutcomeForExport(summary)) {
-        outcomeStr = Thoth::e2OutcomeToString(*exported);
-    } else if (summary.evaluation_resolution.has_value()) {
-        outcomeStr = Thoth::e2EvaluationResolutionToString(*summary.evaluation_resolution);
-    } else {
-        outcomeStr = Thoth::e2OutcomeToString(summary.outcome);
-    }
-
-    appendJsonLine(logPath,
-                   Thoth::episodicLearningSummaryLogRow(logCtx, summary, casesPassed, cases.size()));
-
-    std::cout << "\nSummary\n";
-    std::cout << "  E2 outcome: " << outcomeStr << '\n';
-    std::cout << "  mean episodic lift: " << summary.mean_episodic_lift << '\n';
-    std::cout << "  cases passed: " << casesPassed << '/' << cases.size() << '\n';
-    std::cout << "  log: " << logPath << '\n';
-
-    suiteRecorder.complete(outcomeStr, summary.mean_episodic_lift, casesPassed, cases.size());
-
-    const bool allCasesPass = casesPassed == static_cast<int>(cases.size());
-    return (allCasesPass && summary.outcome == Thoth::E2Outcome::SUCCESS) ? 0 : 2;
+    std::cerr << "E2 wiring stage '" << wiringStage
+              << "' is not supported. Use A1–A5 checkpoints, B (official), or SCORING (dev).\n";
+    return 2;
 }

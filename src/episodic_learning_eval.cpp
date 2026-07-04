@@ -1089,7 +1089,8 @@ nlohmann::json episodicLearningCaseLogRow(const EpisodicLearningLogContext& ctx,
 nlohmann::json episodicLearningSummaryLogRow(const EpisodicLearningLogContext& ctx,
                                              const EpisodicLearningSummary& summary,
                                              int cases_passed,
-                                             std::size_t case_count) {
+                                             std::size_t case_count,
+                                             const EpisodicLearningRunEnvelope& envelope) {
     nlohmann::json row = {{"event", "EPISODIC_LEARNING_SUMMARY"},
                           {"timestamp_ms", ctx.timestamp_ms},
                           {"run_id", ctx.run_id},
@@ -1100,7 +1101,72 @@ nlohmann::json episodicLearningSummaryLogRow(const EpisodicLearningLogContext& c
                           {"cases_passed", cases_passed},
                           {"case_count", case_count}};
     row.update(episodicLearningSummaryToJson(summary));
+    if (!envelope.wiring_stage.empty()) {
+        row["wiring_stage"] = envelope.wiring_stage;
+    }
+    row["scoring_enabled"] = envelope.scoring_enabled;
+    row["official_scoring"] = envelope.official_scoring;
     return row;
+}
+
+nlohmann::json episodicLearningScopedEquivalenceSnapshot(
+    const EpisodicLearningSummary& summary,
+    const nlohmann::json& evaluation_fingerprint,
+    const nlohmann::json& e2_eval_config) {
+    nlohmann::json case_resolutions = nlohmann::json::array();
+    for (const auto& eval : summary.case_results) {
+        nlohmann::json row = {{"case_id", eval.case_id}};
+        if (eval.evaluation_resolution.has_value()) {
+            row["evaluation_resolution"] =
+                e2EvaluationResolutionToString(*eval.evaluation_resolution);
+        }
+        case_resolutions.push_back(std::move(row));
+    }
+    nlohmann::json snapshot = {{"case_resolutions", case_resolutions},
+                              {"scorable_cases", summary.scorable_cases},
+                              {"not_scorable_cases", summary.not_scorable_cases},
+                              {"e2_eval_config", e2_eval_config},
+                              {"fingerprint_hash",
+                               evaluation_fingerprint.value("fingerprint_hash", "")}};
+    if (summary.evaluation_resolution.has_value()) {
+        snapshot["summary_evaluation_resolution"] =
+            e2EvaluationResolutionToString(*summary.evaluation_resolution);
+    }
+    return snapshot;
+}
+
+bool episodicLearningScopedEquivalenceEqual(const nlohmann::json& a, const nlohmann::json& b) {
+    return a == b;
+}
+
+int episodicLearningFingerprintMismatchBucket(const nlohmann::json& snapshot_a,
+                                              const nlohmann::json& snapshot_b,
+                                              const std::string& corpus_hash_a,
+                                              const std::string& corpus_hash_b) {
+    if (episodicLearningScopedEquivalenceEqual(snapshot_a, snapshot_b)) {
+        return 0;
+    }
+    if (snapshot_a.value("e2_eval_config", nlohmann::json::object()) !=
+        snapshot_b.value("e2_eval_config", nlohmann::json::object())) {
+        return 1;
+    }
+    if (corpus_hash_a != corpus_hash_b) {
+        return 2;
+    }
+    const bool same_resolution =
+        snapshot_a.value("case_resolutions", nlohmann::json::array()) ==
+            snapshot_b.value("case_resolutions", nlohmann::json::array()) &&
+        snapshot_a.value("summary_evaluation_resolution", "") ==
+            snapshot_b.value("summary_evaluation_resolution", "") &&
+        snapshot_a.value("scorable_cases", 0) == snapshot_b.value("scorable_cases", 0) &&
+        snapshot_a.value("not_scorable_cases", 0) == snapshot_b.value("not_scorable_cases", 0);
+    if (!same_resolution) {
+        return 4;
+    }
+    if (snapshot_a.value("fingerprint_hash", "") != snapshot_b.value("fingerprint_hash", "")) {
+        return 3;
+    }
+    return 4;
 }
 
 } // namespace Thoth
