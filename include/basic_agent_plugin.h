@@ -17,6 +17,7 @@
 #include "iplanner.h"
 #include "prompt_factory.h"
 #include "benchmark_environment.h"
+#include "episode_event_channel.h"
 
 //#include "Plugin.h"  // Plugin interface
 
@@ -98,6 +99,7 @@ private:
     std::shared_ptr<IPlanner> planner;
     std::shared_ptr<PromptFactory> planner_prompt_factory_;
     std::shared_ptr<Thoth::ExecutiveController> controller;
+    std::shared_ptr<Thoth::InProcessEpisodeEventChannel> episode_event_channel_;
 
     std::vector<std::string> lastRagFilePaths_;
     bool ragPathsNeedIndexing(const std::vector<std::string>& filePaths) const;

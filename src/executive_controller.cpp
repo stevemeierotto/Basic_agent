@@ -283,6 +283,36 @@ void ExecutiveController::set_config(Config* cfg) {
     }
 }
 
+void ExecutiveController::set_episode_event_channel(Thoth::IEpisodeEventChannel* channel) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    episode_event_channel_ = channel;
+}
+
+void ExecutiveController::publish_episode_completed_unlocked(bool goal_succeeded,
+                                                             float trajectory_score) {
+    if (!config_ || !config_->enable_episodic_evaluation_publication) {
+        return;
+    }
+    if (!episode_event_channel_) {
+        return;
+    }
+    Thoth::EpisodeCompleted event;
+    event.plan_id = current_plan_.plan_id;
+    event.goal = current_plan_.goal;
+    event.terminal_state = goal_succeeded ? "COMPLETED" : "FAILED";
+    event.final_success_score = trajectory_score;
+    event.completed_at_ms = nowMs();
+    event.run_id = benchmark_attribution_.run_id;
+    event.env_hash = benchmark_attribution_.env_hash;
+    event.plan_snapshot = current_plan_.to_json();
+    event.trajectory_snapshot = current_trajectory_.to_json();
+    try {
+        episode_event_channel_->publish(event);
+    } catch (...) {
+        // Best-effort publication — must not affect execution outcome.
+    }
+}
+
 void ExecutiveController::set_max_reflections(int value) {
     std::lock_guard<std::mutex> lock(mutex_);
     max_reflections_ = std::max(0, value);
@@ -714,6 +744,8 @@ void ExecutiveController::decide_transition() {
 
             emit_goal_cognitive_metrics_unlocked(
                 (all_successful && !current_plan_.steps.empty()) ? "completed" : "failed", score);
+
+            publish_episode_completed_unlocked(all_successful && !current_plan_.steps.empty(), score);
             
             auto history_meta = store_plan_history(score);
             if (memory_) memory_->deleteActivePlan(current_plan_.plan_id);

@@ -15,6 +15,7 @@
 #include "../include/embedding_engine.h"
 #include "../include/episodic_learning_cases.h"
 #include "../include/episodic_learning_eval.h"
+#include "../include/episodic_evaluation_service.h"
 #include "../include/executive_controller.h"
 #include "../include/index_manager.h"
 #include "../include/memory.h"
@@ -418,6 +419,8 @@ ScoredLoopOutcome runScoredEvaluationLoop(
                                                    evalFingerprint.toJson(),
                                                    strictConfig.toJson()};
 
+    const Thoth::IEpisodicEvaluationService& evalService = Thoth::episodicEvaluationService();
+
     for (const auto& spec : cases) {
         std::cout << "\n" << spec.id << " — " << spec.description << '\n';
 
@@ -430,11 +433,11 @@ ScoredLoopOutcome runScoredEvaluationLoop(
             /*strictBoundaryRetrieval=*/true,
             /*executiveStrictDispatch=*/true);
 
-        const auto eval = Thoth::evaluateEpisodicLearningCase(
+        const auto eval = evalService.evaluateCase(
             spec.id, spec.expectations, coldArm.observation, warmArm.observation, strictConfig);
         Thoth::EpisodicLearningCaseEvaluation resolvedEval = eval;
         resolvedEval.run_block_reason = warmArm.run_block_reason;
-        Thoth::applyCaseEvaluationResolution(resolvedEval);
+        evalService.applyCaseResolution(resolvedEval);
         result.evaluations.push_back(resolvedEval);
         result.expectations.push_back(spec.expectations);
 
@@ -467,8 +470,7 @@ ScoredLoopOutcome runScoredEvaluationLoop(
         appendJsonLine(logPath, Thoth::episodicLearningCaseLogRow(logCtx, resolvedEval));
     }
 
-    result.summary = Thoth::summarizeEpisodicLearning(
-        result.evaluations, result.expectations, strictConfig);
+    result.summary = evalService.summarize(result.evaluations, result.expectations, strictConfig);
     if (const auto exported = Thoth::e2OutcomeForExport(result.summary)) {
         result.outcome_display = Thoth::e2OutcomeToString(*exported);
     } else if (result.summary.evaluation_resolution.has_value()) {
@@ -569,7 +571,7 @@ int main() {
     }
 
     const Thoth::E2EvaluationFingerprint evalFingerprint =
-        Thoth::computeEvaluationFingerprint(strictConfig);
+        Thoth::episodicEvaluationService().computeFingerprint(strictConfig);
     Thoth::assertOfficialHarnessBuild();
 
     std::cout << "E2 evaluation fingerprint=" << evalFingerprint.fingerprint_hash << '\n';

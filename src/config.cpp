@@ -99,6 +99,12 @@ bool Config::loadFromJson(const std::string& path) {
     if (j.contains("synthesis_num_predict")) synthesis_num_predict = j["synthesis_num_predict"];
     if (j.contains("max_parallel_retrieval")) max_parallel_retrieval = j["max_parallel_retrieval"];
     if (j.contains("enable_retrieval_prefetch")) enable_retrieval_prefetch = j["enable_retrieval_prefetch"];
+    if (j.contains("enable_episodic_evaluation_publication")) {
+        enable_episodic_evaluation_publication = j["enable_episodic_evaluation_publication"];
+    }
+    if (j.contains("enable_episodic_pipeline_telemetry")) {
+        enable_episodic_pipeline_telemetry = j["enable_episodic_pipeline_telemetry"];
+    }
 
     if (j.contains("memory") && j["memory"].is_object()) {
         const auto& mem = j["memory"];
@@ -148,6 +154,8 @@ bool Config::saveToJson(const std::string& path) const {
     j["synthesis_num_predict"] = synthesis_num_predict;
     j["max_parallel_retrieval"] = max_parallel_retrieval;
     j["enable_retrieval_prefetch"] = enable_retrieval_prefetch;
+    j["enable_episodic_evaluation_publication"] = enable_episodic_evaluation_publication;
+    j["enable_episodic_pipeline_telemetry"] = enable_episodic_pipeline_telemetry;
     j["memory"] = {
         {"max_hot_messages", memory_max_hot_messages},
         {"max_hot_age_days", memory_max_hot_age_days},

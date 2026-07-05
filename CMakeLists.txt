@@ -97,6 +97,8 @@ set(BASIC_AGENT_SOURCES
     src/ollama_snapshot.cpp
     src/benchmark_context.cpp
     src/cognitive_metrics_logger.cpp
+    src/episode_events.cpp
+    src/episode_event_channel.cpp
     src/trajectory_ablation.cpp
 )
 
@@ -104,6 +106,11 @@ set(BASIC_AGENT_SOURCES
 set(E2_EVAL_KERNEL_SOURCES
     src/episodic_learning_eval.cpp
     src/episodic_learning_cases.cpp
+    src/episodic_evaluation_service.cpp
+    src/evaluation_subscriber.cpp
+    src/diagnostic_service.cpp
+    src/pipeline_telemetry_service.cpp
+    src/e2_path_equivalence.cpp
     src/e2_strict_enforcement.cpp
     src/e2_strict_retrieval.cpp
 )

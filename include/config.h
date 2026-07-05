@@ -64,6 +64,12 @@ public:
     /** C7 Phase 3: start RETRIEVAL when only one RUNNING dependency remains. */
     bool enable_retrieval_prefetch = true;
 
+    /** E2-C2: publish EpisodeCompleted to event channel (default OFF). */
+    bool enable_episodic_evaluation_publication = false;
+
+    /** E2-C4: emit pipeline telemetry JSONL from EvaluationSubscriber (default OFF). */
+    bool enable_episodic_pipeline_telemetry = false;
+
     /** M2: memory consolidation policy (`config.json` → `memory` section). */
     std::size_t memory_max_hot_messages = 50;
     int memory_max_hot_age_days = 30;

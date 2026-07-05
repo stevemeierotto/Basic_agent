@@ -9,6 +9,8 @@
 #include "../include/planner_injection_config.h"
 #include "../include/benchmark_context.h"
 #include "../include/ollama_snapshot.h"
+#include "../include/episode_event_channel.h"
+#include "../include/evaluation_subscriber.h"
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -59,6 +61,9 @@ BasicAgentPlugin::BasicAgentPlugin()
     rag.setEventCallback(cb);
     indexManager->setEventCallback(cb);
 
+    episode_event_channel_ = std::make_shared<Thoth::InProcessEpisodeEventChannel>();
+    controller->set_episode_event_channel(episode_event_channel_.get());
+
     FileHandler fileHandler;
     PromptFactory::ensureDefaultTemplatesExist();
 
@@ -84,6 +89,13 @@ BasicAgentPlugin::BasicAgentPlugin()
         // Save defaults if not exists
         config.saveRetrievalConfig(retConfigPath);
         std::cerr << "[BasicAgentPlugin] Created default retrieval_config.json\n";
+    }
+
+    if (config.enable_episodic_evaluation_publication && episode_event_channel_) {
+        Thoth::setEvaluationSubscriberPipelineTelemetryEnabled(
+            config.enable_episodic_pipeline_telemetry);
+        Thoth::registerEvaluationSubscriber(*episode_event_channel_);
+        std::cerr << "[BasicAgentPlugin] E2-C2 episode publication enabled (EvaluationSubscriber)\n";
     }
 
     // Set model based on config if available

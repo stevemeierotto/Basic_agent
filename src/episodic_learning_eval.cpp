@@ -1065,8 +1065,10 @@ nlohmann::json episodicLearningSummaryToJson(const EpisodicLearningSummary& summ
             if (!protocol.empty() && summary.not_scorable_cases == 1) {
                 j["scoring_block_reason"] = protocol;
             }
-        } else if (const auto outcome = e2OutcomeForExport(summary)) {
-            j["e2_outcome"] = e2OutcomeToString(*outcome);
+        } else if (summary.scoring_tier != E2EvalTier::INTEGRATION) {
+            if (const auto outcome = e2OutcomeForExport(summary)) {
+                j["e2_outcome"] = e2OutcomeToString(*outcome);
+            }
         }
     } else {
         j["outcome"] = e2OutcomeToString(summary.outcome);

@@ -29,6 +29,7 @@
 #include "trajectory_builder.h"
 #include "reflection_utils.h"
 #include "benchmark_environment.h"
+#include "episode_events.h"
 #include "episodic_learning_eval.h"
 
 class LLMInterface;
@@ -94,6 +95,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         session_id_ = session_id; 
     }
+
+    /** E2-C2: optional episode publication channel (execution domain only). */
+    void set_episode_event_channel(Thoth::IEpisodeEventChannel* channel);
 
     // Mode switching (called internally, but exposed for testing)
     void set_execution_mode(std::unique_ptr<IExecutionMode> mode);
@@ -185,6 +189,7 @@ protected:
     void record_step_metrics_unlocked(const PlanStep& step, const StepResult& result);
     void sync_planning_tokens_unlocked();
     void emit_goal_cognitive_metrics_unlocked(const std::string& outcome, float trajectory_score);
+    void publish_episode_completed_unlocked(bool goal_succeeded, float trajectory_score);
 
     int countActiveRetrievals_unlocked() const;
     const PlanStep* findStepById_unlocked(const std::string& step_id) const;
@@ -228,6 +233,7 @@ protected:
     std::string session_id_;
     bool plan_reused_ = false;
     BenchmarkAttribution benchmark_attribution_;
+    Thoth::IEpisodeEventChannel* episode_event_channel_ = nullptr;
 
     std::int64_t goal_started_at_ms_ = 0;
     std::int64_t planning_time_ms_ = 0;
