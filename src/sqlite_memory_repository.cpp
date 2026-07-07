@@ -1279,12 +1279,13 @@ bool SQLiteMemoryRepository::consolidateSessionBatch(const MemoryConsolidationRe
             metadata["derived_from_hash"] = digest;
             metadata["turn_index"] = idx - 1;
 
+            const std::string metadataJson = metadata.dump();
             sqlite3_bind_text(insert_archive, 1, archive_id.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_text(insert_archive, 2, request.session_id.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_int64(insert_archive, 3, rec.timestamp_ms);
             sqlite3_bind_text(insert_archive, 4, rec.role.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_text(insert_archive, 5, rec.content.c_str(), -1, SQLITE_STATIC);
-            sqlite3_bind_text(insert_archive, 6, metadata.dump().c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_archive, 6, metadataJson.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_int64(insert_archive, 7, now);
             sqlite3_bind_int(insert_archive, 8, wantsWarm ? request.warm->summary_version : 0);
 
