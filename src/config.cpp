@@ -105,6 +105,15 @@ bool Config::loadFromJson(const std::string& path) {
     if (j.contains("enable_episodic_pipeline_telemetry")) {
         enable_episodic_pipeline_telemetry = j["enable_episodic_pipeline_telemetry"];
     }
+    if (j.contains("enable_episode_replay_subscriber")) {
+        enable_episode_replay_subscriber = j["enable_episode_replay_subscriber"];
+    }
+    if (j.contains("enable_metrics_subscriber")) {
+        enable_metrics_subscriber = j["enable_metrics_subscriber"];
+    }
+    if (j.contains("enable_trace_subscriber")) {
+        enable_trace_subscriber = j["enable_trace_subscriber"];
+    }
 
     if (j.contains("memory") && j["memory"].is_object()) {
         const auto& mem = j["memory"];
@@ -156,6 +165,9 @@ bool Config::saveToJson(const std::string& path) const {
     j["enable_retrieval_prefetch"] = enable_retrieval_prefetch;
     j["enable_episodic_evaluation_publication"] = enable_episodic_evaluation_publication;
     j["enable_episodic_pipeline_telemetry"] = enable_episodic_pipeline_telemetry;
+    j["enable_episode_replay_subscriber"] = enable_episode_replay_subscriber;
+    j["enable_metrics_subscriber"] = enable_metrics_subscriber;
+    j["enable_trace_subscriber"] = enable_trace_subscriber;
     j["memory"] = {
         {"max_hot_messages", memory_max_hot_messages},
         {"max_hot_age_days", memory_max_hot_age_days},

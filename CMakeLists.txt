@@ -99,6 +99,9 @@ set(BASIC_AGENT_SOURCES
     src/cognitive_metrics_logger.cpp
     src/episode_events.cpp
     src/episode_event_channel.cpp
+    src/replay_subscriber.cpp
+    src/metrics_subscriber.cpp
+    src/trace_subscriber.cpp
     src/trajectory_ablation.cpp
 )
 

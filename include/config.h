@@ -70,6 +70,15 @@ public:
     /** E2-C4: emit pipeline telemetry JSONL from EvaluationSubscriber (default OFF). */
     bool enable_episodic_pipeline_telemetry = false;
 
+    /** E2-D2: register ReplaySubscriber on episode channel (default OFF). */
+    bool enable_episode_replay_subscriber = false;
+
+    /** E2-D3: register MetricsSubscriber on episode channel (default OFF). */
+    bool enable_metrics_subscriber = false;
+
+    /** E2-D3: register TraceSubscriber on episode channel (default OFF). */
+    bool enable_trace_subscriber = false;
+
     /** M2: memory consolidation policy (`config.json` → `memory` section). */
     std::size_t memory_max_hot_messages = 50;
     int memory_max_hot_age_days = 30;

@@ -11,6 +11,9 @@
 #include "../include/ollama_snapshot.h"
 #include "../include/episode_event_channel.h"
 #include "../include/evaluation_subscriber.h"
+#include "../include/replay_subscriber.h"
+#include "../include/metrics_subscriber.h"
+#include "../include/trace_subscriber.h"
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -98,6 +101,21 @@ BasicAgentPlugin::BasicAgentPlugin()
         std::cerr << "[BasicAgentPlugin] E2-C2 episode publication enabled (EvaluationSubscriber)\n";
     }
 
+    if (config.enable_episode_replay_subscriber && episode_event_channel_) {
+        Thoth::registerReplaySubscriber(*episode_event_channel_);
+        std::cerr << "[BasicAgentPlugin] E2-D2 replay subscriber enabled (ReplaySubscriber)\n";
+    }
+
+    if (config.enable_metrics_subscriber && episode_event_channel_) {
+        Thoth::registerMetricsSubscriber(*episode_event_channel_);
+        std::cerr << "[BasicAgentPlugin] E2-D3 metrics subscriber enabled (MetricsSubscriber)\n";
+    }
+
+    if (config.enable_trace_subscriber && episode_event_channel_) {
+        Thoth::registerTraceSubscriber(*episode_event_channel_);
+        std::cerr << "[BasicAgentPlugin] E2-D3 trace subscriber enabled (TraceSubscriber)\n";
+    }
+
     // Set model based on config if available
     llm.setConfig(&config);
     ToolRegistry::instance().setConfig(&config);
@@ -129,6 +147,10 @@ BasicAgentPlugin::BasicAgentPlugin()
 BasicAgentPlugin::~BasicAgentPlugin() {
     delete indexManager;
     std::cerr << "[BasicAgentPlugin] Destroyed.\n";
+}
+
+Thoth::InProcessEpisodeEventChannel* BasicAgentPlugin::episodeEventChannelForTests() const {
+    return episode_event_channel_.get();
 }
 
 void BasicAgentPlugin::bootstrapSandboxIfEmpty() {

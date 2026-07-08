@@ -49,6 +49,7 @@ public:
 class IEpisodeEventChannel {
 public:
     virtual ~IEpisodeEventChannel() = default;
+    /** Fire-and-forget fan-out. Delivery order is FIFO by registration order. */
     virtual void publish(const EpisodeCompleted& event) = 0;
     virtual void subscribe(std::shared_ptr<IEpisodeEventSubscriber> subscriber) = 0;
 };

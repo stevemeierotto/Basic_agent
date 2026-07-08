@@ -1279,6 +1279,9 @@ bool SQLiteMemoryRepository::consolidateSessionBatch(const MemoryConsolidationRe
             metadata["derived_from_hash"] = digest;
             metadata["turn_index"] = idx - 1;
 
+            // Keep the dumped JSON alive through sqlite3_step().
+            // SQLITE_STATIC requires the caller to own the buffer for the duration
+            // of statement execution.
             const std::string metadataJson = metadata.dump();
             sqlite3_bind_text(insert_archive, 1, archive_id.c_str(), -1, SQLITE_STATIC);
             sqlite3_bind_text(insert_archive, 2, request.session_id.c_str(), -1, SQLITE_STATIC);

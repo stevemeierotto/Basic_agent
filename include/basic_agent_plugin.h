@@ -60,6 +60,9 @@ public:
                                                                     const std::string& corpusPath) const;
     Thoth::IndexEnvironment benchmarkIndexEnvironment() const;
 
+    /** E2-D3-05: testing only — production episode channel after plugin init. */
+    Thoth::InProcessEpisodeEventChannel* episodeEventChannelForTests() const;
+
     // --- Cognate UI Integration ---
     std::vector<Memory::CognateStrategyRecord> getAllStrategies() const;
     std::vector<Memory::CognateTrajectoryRecord> getAllTrajectories() const;
