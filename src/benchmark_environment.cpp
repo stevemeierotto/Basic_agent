@@ -375,6 +375,23 @@ BenchmarkTier inferTier(const BenchmarkEnvironmentInputs& inputs) {
         return BenchmarkTier::DEV;
     }
 
+    if (inputs.harness == "episodic_learning_benchmark") {
+        const bool mockSignals = envFlagTruthy(flags, "THOTH_MOCK_EPISODIC") ||
+                                 envFlagTruthy(flags, "THOTH_MOCK_LLM") ||
+                                 inputs.model.llm_model == "mock" ||
+                                 inputs.model.embedding_method == "TfIdf";
+        if (mockSignals) {
+            return BenchmarkTier::MOCK;
+        }
+        if (inputs.model.embedding_method == "External" && inputs.ollama_reachable) {
+            return BenchmarkTier::OLLAMA;
+        }
+        if (inputs.tier == BenchmarkTier::FULL && inputs.ollama_reachable) {
+            return BenchmarkTier::FULL;
+        }
+        return BenchmarkTier::UNKNOWN;
+    }
+
     if (inputs.harness == "test_suite") {
         if (inputs.tier == BenchmarkTier::FULL && inputs.ollama_reachable) {
             return BenchmarkTier::FULL;

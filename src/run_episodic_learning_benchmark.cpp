@@ -10,6 +10,7 @@
 
 #include "../include/benchmark_context.h"
 #include "../include/config.h"
+#include "../include/ollama_snapshot.h"
 #include "../include/e2_strict_enforcement.h"
 #include "../include/e2_strict_retrieval.h"
 #include "../include/embedding_engine.h"
@@ -38,6 +39,60 @@
 namespace fs = std::filesystem;
 
 namespace {
+
+enum class EpisodicInferenceMode { Mock, Authoritative };
+
+struct HarnessRuntimeContext {
+    EpisodicInferenceMode inference_mode = EpisodicInferenceMode::Mock;
+    Config config;
+
+    bool useMockInference() const {
+        return inference_mode == EpisodicInferenceMode::Mock;
+    }
+
+    EmbeddingEngine::Method engineMethod() const {
+        return useMockInference() ? EmbeddingEngine::Method::TfIdf
+                                  : EmbeddingEngine::Method::External;
+    }
+};
+
+EpisodicInferenceMode parseInferenceMode(int argc, char** argv) {
+    EpisodicInferenceMode mode = EpisodicInferenceMode::Mock;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (arg == "--mock") {
+            mode = EpisodicInferenceMode::Mock;
+        } else if (arg == "--full" || arg == "--authoritative") {
+            mode = EpisodicInferenceMode::Authoritative;
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "Usage: run_episodic_learning_benchmark [--mock|--full|--authoritative]\n"
+                      << "  --mock           Mock inference tier (default; TfIdf, no Ollama)\n"
+                      << "  --full           Authoritative inference tier (live backend)\n"
+                      << "  --authoritative  Alias for --full\n"
+                      << "Env: THOTH_EPISODIC_LEARNING_INFERENCE=mock|authoritative\n";
+            std::exit(0);
+        }
+    }
+    if (const char* env = std::getenv("THOTH_EPISODIC_LEARNING_INFERENCE")) {
+        const std::string value(env);
+        if (value == "authoritative" || value == "full") {
+            mode = EpisodicInferenceMode::Authoritative;
+        } else if (value == "mock") {
+            mode = EpisodicInferenceMode::Mock;
+        }
+    }
+    return mode;
+}
+
+void applyInferenceEnv(EpisodicInferenceMode mode) {
+    if (mode == EpisodicInferenceMode::Mock) {
+        setenv("THOTH_MOCK_EPISODIC", "1", 1);
+        setenv("THOTH_MOCK_LLM", "true", 1);
+    } else {
+        unsetenv("THOTH_MOCK_EPISODIC");
+        unsetenv("THOTH_MOCK_LLM");
+    }
+}
 
 std::int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -72,15 +127,41 @@ std::string stateName(Thoth::ControllerState state) {
     }
 }
 
-Thoth::BenchmarkEnvironmentInputs makeEpisodicBenchmarkInputs(EmbeddingEngine* engine,
-                                                              IndexManager* idx) {
+Thoth::BenchmarkEnvironmentInputs makeEpisodicBenchmarkInputs(
+    const HarnessRuntimeContext& runtime,
+    EmbeddingEngine* engine,
+    IndexManager* idx,
+    const std::optional<Thoth::OllamaSnapshot>& ollama) {
     Thoth::BenchmarkEnvironmentInputs inputs;
     inputs.harness = "episodic_learning_benchmark";
-    inputs.tier = Thoth::BenchmarkTier::MOCK;
-    inputs.model.llm_model = "mock";
-    inputs.model.embedding_model = "tfidf-local";
+    if (runtime.useMockInference()) {
+        inputs.tier = Thoth::BenchmarkTier::MOCK;
+        inputs.model.llm_model = "mock";
+        inputs.model.embedding_model = "tfidf-local";
+    } else {
+        inputs.tier = Thoth::BenchmarkTier::FULL;
+        inputs.model.llm_model = runtime.config.llm_model;
+        inputs.model.embedding_model = runtime.config.embedding_model;
+        inputs.ollama_reachable = Thoth::isOllamaReachable();
+        if (ollama.has_value()) {
+            inputs.ollama = *ollama;
+        }
+    }
     if (engine) {
-        inputs.model.embedding_method = "TfIdf";
+        switch (engine->getMethod()) {
+        case EmbeddingEngine::Method::TfIdf:
+            inputs.model.embedding_method = "TfIdf";
+            break;
+        case EmbeddingEngine::Method::External:
+            inputs.model.embedding_method = "External";
+            break;
+        case EmbeddingEngine::Method::Simple:
+            inputs.model.embedding_method = "Simple";
+            break;
+        case EmbeddingEngine::Method::WordHash:
+            inputs.model.embedding_method = "WordHash";
+            break;
+        }
         inputs.model.embedding_dimension = engine->getDimension();
         inputs.model.embedding_internal_version = engine->getInternalVersion();
     }
@@ -266,14 +347,16 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
                                    const std::string& metricsLogPath,
                                    std::int64_t builderTimestampMs,
                                    bool strictBoundaryRetrieval,
-                                   bool executiveStrictDispatch) {
-    setenv("THOTH_MOCK_EPISODIC", "1", 1);
-    setenv("THOTH_MOCK_LLM", "true", 1);
+                                   bool executiveStrictDispatch,
+                                   const HarnessRuntimeContext& runtime) {
+    applyInferenceEnv(runtime.inference_mode);
 
     const Thoth::SealedEpisodeInjectionLog sealedLog =
         Thoth::buildStrictInjectionLogFromCaseTable(spec, armLabel, builderTimestampMs);
 
     Config cfg;
+    cfg.llm_model = runtime.config.llm_model;
+    cfg.embedding_model = runtime.config.embedding_model;
     cfg.max_reflections = 0;
     cfg.database_path =
         (fs::temp_directory_path() / ("thoth_e2_" + spec.id + "_" + armLabel + ".db")).string();
@@ -282,7 +365,7 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
     }
 
     auto memory = std::make_shared<Memory>(cfg);
-    auto engine = std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf, &cfg);
+    auto engine = std::make_unique<EmbeddingEngine>(runtime.engineMethod(), &cfg);
     EmbeddingEngine* enginePtr = engine.get();
 
     auto idx = new IndexManager(enginePtr);
@@ -408,7 +491,8 @@ ScoredLoopOutcome runScoredEvaluationLoop(
     const Thoth::E2EvaluationFingerprint& evalFingerprint,
     const std::string& logPath,
     const std::string& metricsLogPath,
-    std::int64_t ts) {
+    std::int64_t ts,
+    const HarnessRuntimeContext& runtime) {
     ScoredLoopOutcome result;
     result.evaluations.reserve(cases.size());
     result.expectations.reserve(cases.size());
@@ -427,11 +511,13 @@ ScoredLoopOutcome runScoredEvaluationLoop(
         const E2CaseArmPlumbingResult coldArm = runCaseArm(
             spec, "cold", suiteAttribution, strictConfig, metricsLogPath, ts,
             /*strictBoundaryRetrieval=*/true,
-            /*executiveStrictDispatch=*/true);
+            /*executiveStrictDispatch=*/true,
+            runtime);
         const E2CaseArmPlumbingResult warmArm = runCaseArm(
             spec, "warm", suiteAttribution, strictConfig, metricsLogPath, ts,
             /*strictBoundaryRetrieval=*/true,
-            /*executiveStrictDispatch=*/true);
+            /*executiveStrictDispatch=*/true,
+            runtime);
 
         const auto eval = evalService.evaluateCase(
             spec.id, spec.expectations, coldArm.observation, warmArm.observation, strictConfig);
@@ -490,9 +576,11 @@ int runScoredEvaluationHarness(const std::vector<Thoth::EpisodicLearningCase>& c
                                const std::string& metricsLogPath,
                                std::int64_t ts,
                                const Thoth::EpisodicLearningRunEnvelope& envelope,
-                               EpisodicLearningRunRecorder& suiteRecorder) {
+                               EpisodicLearningRunRecorder& suiteRecorder,
+                               const HarnessRuntimeContext& runtime) {
     const ScoredLoopOutcome scored = runScoredEvaluationLoop(
-        cases, suiteAttribution, strictConfig, evalFingerprint, logPath, metricsLogPath, ts);
+        cases, suiteAttribution, strictConfig, evalFingerprint, logPath, metricsLogPath, ts,
+        runtime);
 
     const Thoth::EpisodicLearningLogContext logCtx{ts,
                                                    suiteAttribution.run_id,
@@ -529,11 +617,23 @@ int runScoredEvaluationHarness(const std::vector<Thoth::EpisodicLearningCase>& c
 
 } // namespace
 
-int main() {
-    std::cout << "E2 — Episodic Memory Learning Benchmark (mock, no Ollama)\n";
+int main(int argc, char** argv) {
+    const EpisodicInferenceMode inferenceMode = parseInferenceMode(argc, argv);
+    HarnessRuntimeContext runtime;
+    runtime.inference_mode = inferenceMode;
 
-    setenv("THOTH_MOCK_EPISODIC", "1", 1);
-    setenv("THOTH_MOCK_LLM", "true", 1);
+    if (inferenceMode == EpisodicInferenceMode::Authoritative) {
+        if (!Thoth::isOllamaReachable()) {
+            std::cerr << "EPISODIC_LEARNING: Ollama not reachable at http://127.0.0.1:11434 — "
+                         "start Ollama first.\n";
+            return 2;
+        }
+        std::cout << "E2 — Episodic Memory Learning Benchmark (authoritative inference)\n";
+    } else {
+        std::cout << "E2 — Episodic Memory Learning Benchmark (mock, no Ollama)\n";
+    }
+
+    applyInferenceEnv(inferenceMode);
 
     FileHandler fh;
     const fs::path metricsLog =
@@ -541,26 +641,38 @@ int main() {
     fs::create_directories(metricsLog.parent_path());
     setenv("THOTH_COGNITIVE_METRICS_LOG", metricsLog.string().c_str(), 1);
 
-    auto probeEngine = std::make_unique<EmbeddingEngine>(EmbeddingEngine::Method::TfIdf);
+    std::optional<Thoth::OllamaSnapshot> ollamaSnap;
+    if (inferenceMode == EpisodicInferenceMode::Authoritative) {
+        ollamaSnap = Thoth::fetchOllamaSnapshot();
+    }
+
+    auto probeEngine =
+        std::make_unique<EmbeddingEngine>(runtime.engineMethod(), &runtime.config);
     IndexManager probeIdx(probeEngine.get());
 
-    Thoth::BenchmarkRun benchmarkRun =
-        Thoth::BenchmarkRun::create(makeEpisodicBenchmarkInputs(probeEngine.get(), &probeIdx));
+    Thoth::BenchmarkRun benchmarkRun = Thoth::BenchmarkRun::create(
+        makeEpisodicBenchmarkInputs(runtime, probeEngine.get(), &probeIdx, ollamaSnap));
     benchmarkRun.bindIndex(indexEnvironmentFrom(probeEngine.get(), &probeIdx));
     const Thoth::BenchmarkAttribution suiteAttribution = benchmarkRun.attribution();
 
+    const char* tierLabel = inferenceMode == EpisodicInferenceMode::Mock ? "mock" : "authoritative";
     std::cout << "BENCHMARK_ENV run_id=" << benchmarkRun.run_id()
               << " env_hash=" << benchmarkRun.environment_hash()
-              << " index_hash=" << benchmarkRun.index_hash() << " tier=mock\n";
+              << " index_hash=" << benchmarkRun.index_hash() << " tier=" << tierLabel << '\n';
 
     EpisodicLearningRunRecorder suiteRecorder(benchmarkRun);
 
     Thoth::E2EvalConfig strictConfig;
     strictConfig.tier = Thoth::E2EvalTier::STRICT;
     strictConfig.versions.corpus_snapshot_id = benchmarkRun.index_hash();
-    strictConfig.versions.model_version_or_weights_hash = "mock";
-    strictConfig.versions.embedding_model_version =
-        Thoth::makeEmbeddingModelVersionPin("TfIdf", probeEngine->getInternalVersion());
+    if (inferenceMode == EpisodicInferenceMode::Mock) {
+        strictConfig.versions.model_version_or_weights_hash = "mock";
+    } else {
+        strictConfig.versions.model_version_or_weights_hash = runtime.config.llm_model;
+    }
+    strictConfig.versions.embedding_model_version = Thoth::makeEmbeddingModelVersionPin(
+        inferenceMode == EpisodicInferenceMode::Mock ? "TfIdf" : "External",
+        probeEngine->getInternalVersion());
     strictConfig.versions.retrieval_engine_version = Thoth::kE2StrictRetrievalEngineVersion;
 
     try {
@@ -638,7 +750,8 @@ int main() {
                 const E2CaseArmPlumbingResult armResult = runCaseArm(
                     spec, armLabel, suiteAttribution, strictConfig, metricsLog.string(), ts,
                     /*strictBoundaryRetrieval=*/false,
-                    /*executiveStrictDispatch=*/false);
+                    /*executiveStrictDispatch=*/false,
+                    runtime);
                 appendJsonLine(logPath, {{"event", "E2_STRICT_INJECTION_LOG_DIAG"},
                                          {"timestamp_ms", ts},
                                          {"run_id", suiteAttribution.run_id},
@@ -681,7 +794,8 @@ int main() {
                 const E2CaseArmPlumbingResult armResult = runCaseArm(
                     spec, armLabel, suiteAttribution, strictConfig, metricsLog.string(), ts,
                     /*strictBoundaryRetrieval=*/true,
-                    /*executiveStrictDispatch=*/false);
+                    /*executiveStrictDispatch=*/false,
+                    runtime);
                 nlohmann::json row = {{"event", "E2_STRICT_INJECTION_LOG_DIAG"},
                                       {"timestamp_ms", ts},
                                       {"run_id", suiteAttribution.run_id},
@@ -742,7 +856,8 @@ int main() {
                 const E2CaseArmPlumbingResult armResult = runCaseArm(
                     spec, armLabel, suiteAttribution, strictConfig, metricsLog.string(), ts,
                     /*strictBoundaryRetrieval=*/true,
-                    /*executiveStrictDispatch=*/true);
+                    /*executiveStrictDispatch=*/true,
+                    runtime);
                 if (!armResult.harness_executive_equivalent) {
                     allEquivalent = false;
                     std::cerr << "[E2 " << wiringStage
@@ -810,7 +925,7 @@ int main() {
         const Thoth::EpisodicLearningRunEnvelope envelope{true, true, "B"};
         return runScoredEvaluationHarness(
             cases, suiteAttribution, strictConfig, evalFingerprint, logPath, metricsLog.string(), ts,
-            envelope, suiteRecorder);
+            envelope, suiteRecorder, runtime);
     }
 
     if (wiringStage == "SCORING") {
@@ -818,7 +933,7 @@ int main() {
         const Thoth::EpisodicLearningRunEnvelope envelope{false, true, "SCORING"};
         return runScoredEvaluationHarness(
             cases, suiteAttribution, strictConfig, evalFingerprint, logPath, metricsLog.string(), ts,
-            envelope, suiteRecorder);
+            envelope, suiteRecorder, runtime);
     }
 
     std::cerr << "E2 wiring stage '" << wiringStage
