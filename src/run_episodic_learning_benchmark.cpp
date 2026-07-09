@@ -340,7 +340,42 @@ struct E2CaseArmPlumbingResult {
     Thoth::E2StrictRetrievalResult strict_retrieval;
     Thoth::E2StrictRetrievalResult executive_strict_retrieval;
     bool harness_executive_equivalent = false;
+    /** EP-01.5 Phase 3 — inference proof only; independent of trajectory success. */
+    bool authoritative_execution_gate_ok = true;
+    std::string authoritative_execution_gate_detail;
 };
+
+/**
+ * EP-01.5 Phase 3 execution gate: prove actual inference, not mere latency.
+ * Latency alone is insufficient (failed requests can consume time).
+ * Gate success ≠ trajectory / benchmark pass.
+ */
+bool authoritativeExecutionGatePasses(bool llm_wired,
+                                      std::int64_t total_tokens,
+                                      std::int64_t prompt_tokens,
+                                      std::int64_t completion_tokens,
+                                      std::int64_t /*llm_synthesis_time_ms*/,
+                                      std::string* detail_out) {
+    const bool tokens_ok =
+        total_tokens > 0 || (prompt_tokens + completion_tokens) > 0;
+    const bool ok = llm_wired && tokens_ok;
+    if (detail_out) {
+        if (!llm_wired) {
+            *detail_out = "AUTHORITATIVE_LLM_NOOP: LLMInterface not wired";
+        } else if (!tokens_ok) {
+            *detail_out = "AUTHORITATIVE_LLM_NOOP: token_count==0 "
+                          "(prompt+completion also 0; latency alone insufficient)";
+        } else {
+            *detail_out = "execution_gate_ok";
+        }
+    }
+    return ok;
+}
+
+bool forceAuthoritativeLlmNoop() {
+    const char* env = std::getenv("THOTH_E2_EP015_FORCE_LLM_NOOP");
+    return env && (std::string(env) == "1" || std::string(env) == "true");
+}
 
 nlohmann::json strictRetrievalDiagFields(const Thoth::E2StrictRetrievalResult& retrieval) {
     nlohmann::json chunkSummary = nlohmann::json::array();
@@ -420,13 +455,17 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
     controller.set_max_reflections(0);
     // EP-01.5 Phase 1: authoritative path injects owned LLM via existing setters only.
     // Do not alter ExecutiveController constructors (production paths unchanged).
-    if (!runtime.useMockInference()) {
+    // EP-01.5 Phase 3: THOTH_E2_EP015_FORCE_LLM_NOOP skips injection to prove fail-closed.
+    const bool forceNoop = !runtime.useMockInference() && forceAuthoritativeLlmNoop();
+    if (!runtime.useMockInference() && !forceNoop) {
         if (!runtime.llm) {
             std::cerr << "[E2] AUTHORITATIVE_LLM_NOOP: HarnessRuntimeContext has no LLMInterface\n";
         } else {
             controller.set_config(&cfg);
             controller.set_llm_interface(runtime.llm.get());
         }
+    } else if (forceNoop) {
+        std::cerr << "[E2] EP-01.5 FORCE_LLM_NOOP: skipping set_llm_interface (fail-closed proof)\n";
     }
     if (executiveStrictDispatch) {
         controller.set_e2_strict_eval_context(&sealedLog, &strictConfig);
@@ -488,6 +527,34 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
         obs.final_success_score = 1.0f;
     }
 
+    std::int64_t promptTokens = 0;
+    std::int64_t completionTokens = 0;
+    std::int64_t synthesisMs = 0;
+    if (const auto metrics = readLatestMetricsForGoal(metricsLogPath, spec.goal)) {
+        promptTokens = static_cast<std::int64_t>(metrics->value("prompt_tokens", 0));
+        completionTokens = static_cast<std::int64_t>(metrics->value("completion_tokens", 0));
+        synthesisMs = static_cast<std::int64_t>(metrics->value("llm_synthesis_time_ms", 0));
+    }
+    if (!runtime.useMockInference() && runtime.llm && !forceNoop) {
+        const LlmTokenUsage usage = runtime.llm->sessionTokenUsage();
+        obs.total_tokens = std::max(obs.total_tokens, usage.total_tokens);
+        promptTokens = std::max(promptTokens, usage.prompt_tokens);
+        completionTokens = std::max(completionTokens, usage.completion_tokens);
+    }
+
+    bool executionGateOk = true;
+    std::string executionGateDetail;
+    if (!runtime.useMockInference()) {
+        const bool llmWired = runtime.llm != nullptr && !forceNoop;
+        executionGateOk = authoritativeExecutionGatePasses(
+            llmWired, obs.total_tokens, promptTokens, completionTokens, synthesisMs,
+            &executionGateDetail);
+        if (!executionGateOk) {
+            std::cerr << "[E2] " << executionGateDetail << " case=" << spec.id << " arm=" << armLabel
+                      << " terminal=" << obs.terminal_state << '\n';
+        }
+    }
+
     (void)sealedLog;
 
     const bool harnessExecutiveEquivalent =
@@ -507,7 +574,9 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
             sealedLog,
             strictRetrieval,
             executiveRetrieval,
-            harnessExecutiveEquivalent};
+            harnessExecutiveEquivalent,
+            executionGateOk,
+            executionGateDetail};
 }
 
 struct ScoredLoopOutcome {
@@ -516,6 +585,9 @@ struct ScoredLoopOutcome {
     Thoth::EpisodicLearningSummary summary;
     int cases_passed = 0;
     std::string outcome_display;
+    /** EP-01.5 Phase 3 — all arms passed inference proof (not trajectory pass). */
+    bool all_execution_gates_ok = true;
+    std::string execution_gate_failure_detail;
 };
 
 /** B5 — sole scored-loop implementation; no wiring_stage conditionals inside. */
@@ -554,6 +626,22 @@ ScoredLoopOutcome runScoredEvaluationLoop(
             /*executiveStrictDispatch=*/true,
             runtime);
 
+        if (!coldArm.authoritative_execution_gate_ok || !warmArm.authoritative_execution_gate_ok) {
+            result.all_execution_gates_ok = false;
+            if (result.execution_gate_failure_detail.empty()) {
+                result.execution_gate_failure_detail =
+                    !coldArm.authoritative_execution_gate_ok
+                        ? (spec.id + "/cold: " + coldArm.authoritative_execution_gate_detail)
+                        : (spec.id + "/warm: " + warmArm.authoritative_execution_gate_detail);
+            }
+            // Fail closed: stop further arms once inference proof fails (authoritative only).
+            if (!runtime.useMockInference()) {
+                std::cerr << "[E2] AUTHORITATIVE_LLM_NOOP: aborting scored loop after "
+                          << result.execution_gate_failure_detail << '\n';
+                break;
+            }
+        }
+
         const auto eval = evalService.evaluateCase(
             spec.id, spec.expectations, coldArm.observation, warmArm.observation, strictConfig);
         Thoth::EpisodicLearningCaseEvaluation resolvedEval = eval;
@@ -569,11 +657,15 @@ ScoredLoopOutcome runScoredEvaluationLoop(
         std::cout << "  cold: state=" << coldArm.observation.terminal_state
                   << " score=" << coldArm.observation.final_success_score
                   << " warm_hit="
-                  << (coldArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no") << '\n';
+                  << (coldArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no")
+                  << " exec_gate="
+                  << (coldArm.authoritative_execution_gate_ok ? "ok" : "FAIL") << '\n';
         std::cout << "  warm: state=" << warmArm.observation.terminal_state
                   << " score=" << warmArm.observation.final_success_score
                   << " warm_hit="
-                  << (warmArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no");
+                  << (warmArm.observation.retrieval.warm_retrieval_hit ? "yes" : "no")
+                  << " exec_gate="
+                  << (warmArm.authoritative_execution_gate_ok ? "ok" : "FAIL");
         if (!warmArm.observation.retrieval.retrieved_memory_id.empty()) {
             std::cout << " mem_id=" << warmArm.observation.retrieval.retrieved_memory_id;
         }
@@ -616,6 +708,28 @@ int runScoredEvaluationHarness(const std::vector<Thoth::EpisodicLearningCase>& c
     const ScoredLoopOutcome scored = runScoredEvaluationLoop(
         cases, suiteAttribution, strictConfig, evalFingerprint, logPath, metricsLogPath, ts,
         runtime);
+
+    // EP-01.5 Phase 3 pre-summary gate: official summaries require execution-gate proof
+    // on every arm. Gate ≠ trajectory success. Fail closed — do not emit official summary.
+    if (envelope.official_scoring && !runtime.useMockInference() &&
+        !scored.all_execution_gates_ok) {
+        appendJsonLine(logPath,
+                       {{"event", "EPISODIC_LEARNING_ABORTED"},
+                        {"timestamp_ms", ts},
+                        {"run_id", suiteAttribution.run_id},
+                        {"env_hash", suiteAttribution.env_hash},
+                        {"wiring_stage", envelope.wiring_stage},
+                        {"official_scoring", false},
+                        {"scoring_enabled", false},
+                        {"abort_reason", "AUTHORITATIVE_LLM_NOOP"},
+                        {"detail", scored.execution_gate_failure_detail},
+                        {"case_count", cases.size()}});
+        std::cerr << "AUTHORITATIVE_LLM_NOOP: pre-summary gate failed — "
+                  << scored.execution_gate_failure_detail
+                  << "\n  Official EPISODIC_LEARNING_SUMMARY suppressed.\n";
+        // Leave suiteRecorder unfinished so destructor emits EPISODIC_LEARNING_ABORTED.
+        return 2;
+    }
 
     const Thoth::EpisodicLearningLogContext logCtx{ts,
                                                    suiteAttribution.run_id,
