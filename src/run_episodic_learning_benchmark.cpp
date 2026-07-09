@@ -385,6 +385,61 @@ bool forceAuthoritativeLlmNoop() {
     return env && (std::string(env) == "1" || std::string(env) == "true");
 }
 
+/**
+ * Arm wait budget (ms). Protocol invariant: authoritative timeout must exceed
+ * expected completion for the configured benchmark environment by a documented
+ * safety margin. Implementation note (2026-07-09): observed ≈18 s → 60 s budget.
+ * Override: THOTH_E2_ARM_WAIT_MS (tests / E2-33).
+ */
+int armWaitBudgetMs(const HarnessRuntimeContext& runtime) {
+    if (const char* env = std::getenv("THOTH_E2_ARM_WAIT_MS")) {
+        const int overrideMs = std::atoi(env);
+        if (overrideMs > 0) {
+            return overrideMs;
+        }
+    }
+    if (runtime.useMockInference()) {
+        return 15'000; // CI mock — keep fast
+    }
+    return 60'000; // authoritative: configured-env expected completion + margin
+}
+
+/**
+ * Wait precedence:
+ * 1) Controller terminal (PLAN_COMPLETED / FAILED / ABORTED) — primary authority
+ * 2) Else, if a metrics row for (run_id, goal) appears, brief grace for a late
+ *    controller event (metrics are the persisted record, not a score substitute)
+ * 3) If neither: caller classifies TIMEOUT/INCOMPLETE
+ * Returns true if controller signaled terminal within budget (+ optional grace).
+ */
+bool waitForArmCompletion(std::atomic<bool>& terminal,
+                          const std::string& metricsLogPath,
+                          const std::string& goal,
+                          const std::string& runId,
+                          int budgetMs) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+    bool sawMetrics = false;
+    while (!terminal.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!sawMetrics &&
+            readLatestMetricsForGoal(metricsLogPath, goal, runId).has_value()) {
+            sawMetrics = true;
+        }
+    }
+    if (terminal.load()) {
+        return true;
+    }
+    // Secondary: metrics landed but controller event lagged — short grace only.
+    if (sawMetrics ||
+        readLatestMetricsForGoal(metricsLogPath, goal, runId).has_value()) {
+        for (int i = 0; i < 50 && !terminal.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    return terminal.load();
+}
+
 nlohmann::json strictRetrievalDiagFields(const Thoth::E2StrictRetrievalResult& retrieval) {
     nlohmann::json chunkSummary = nlohmann::json::array();
     for (const auto& chunk : retrieval.chunks) {
@@ -493,11 +548,9 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
     const auto start = nowMs();
     controller.execute_goal(spec.goal, attribution);
 
-    int timeout = 150;
-    while (!terminal.load() && timeout > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        --timeout;
-    }
+    const int budgetMs = armWaitBudgetMs(runtime);
+    const bool controllerTerminal = waitForArmCompletion(
+        terminal, metricsLogPath, spec.goal, attribution.run_id, budgetMs);
 
     Thoth::EpisodicLearningArmObservation obs;
     obs.arm_label = armLabel;
@@ -524,8 +577,20 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
     obs.terminal_state = stateName(controller.get_state());
     obs.wall_clock_ms = nowMs() - start;
 
-    if (const auto metrics =
-            readLatestMetricsForGoal(metricsLogPath, spec.goal, attribution.run_id)) {
+    // TIMEOUT/INCOMPLETE: do not invent scores from metrics when controller never
+    // reached a terminal state (avoids score=1 on INCOMPLETE race).
+    if (!controllerTerminal &&
+        obs.terminal_state != "COMPLETED" && obs.terminal_state != "FAILED" &&
+        obs.terminal_state != "ABORTED") {
+        obs.terminal_state = "INCOMPLETE";
+        obs.final_success_score = 0.0f;
+        if (!runtime.useMockInference()) {
+            std::cerr << "[E2] ARM_TIMEOUT: case=" << spec.id << " arm=" << armLabel
+                      << " budget_ms=" << budgetMs
+                      << " (controller non-terminal; score forced 0)\n";
+        }
+    } else if (const auto metrics =
+                   readLatestMetricsForGoal(metricsLogPath, spec.goal, attribution.run_id)) {
         obs.final_success_score = metrics->value("final_success_score", 0.0f);
         obs.planning_time_ms = metrics->value("planning_time_ms", 0);
         obs.total_tokens = metrics->value("total_tokens", 0);
