@@ -19,6 +19,7 @@
 #include "../include/episodic_evaluation_service.h"
 #include "../include/executive_controller.h"
 #include "../include/index_manager.h"
+#include "../include/llm_interface.h"
 #include "../include/memory.h"
 #include "../include/rag.h"
 #include "../include/tools.h"
@@ -31,6 +32,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -45,6 +47,8 @@ enum class EpisodicInferenceMode { Mock, Authoritative };
 struct HarnessRuntimeContext {
     EpisodicInferenceMode inference_mode = EpisodicInferenceMode::Mock;
     Config config;
+    /** Owned for one authoritative harness execution; unused in mock mode. */
+    std::unique_ptr<LLMInterface> llm;
 
     bool useMockInference() const {
         return inference_mode == EpisodicInferenceMode::Mock;
@@ -53,6 +57,16 @@ struct HarnessRuntimeContext {
     EmbeddingEngine::Method engineMethod() const {
         return useMockInference() ? EmbeddingEngine::Method::TfIdf
                                   : EmbeddingEngine::Method::External;
+    }
+
+    /** EP-01.5 Phase 1 — construct owned LLM once for authoritative runs. */
+    void ensureAuthoritativeLlm() {
+        if (useMockInference() || llm) {
+            return;
+        }
+        // Harness-local pin only (EP-01.5): do not change global Config defaults.
+        config.temperature = 0.0;
+        llm = std::make_unique<LLMInterface>(LLMBackend::Ollama, &config);
     }
 };
 
@@ -348,8 +362,12 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
                                    std::int64_t builderTimestampMs,
                                    bool strictBoundaryRetrieval,
                                    bool executiveStrictDispatch,
-                                   const HarnessRuntimeContext& runtime) {
+                                   HarnessRuntimeContext& runtime) {
     applyInferenceEnv(runtime.inference_mode);
+    // Arm isolation: clear cumulative token state before each authoritative arm.
+    if (!runtime.useMockInference() && runtime.llm) {
+        runtime.llm->resetSessionTokenUsage();
+    }
 
     const Thoth::SealedEpisodeInjectionLog sealedLog =
         Thoth::buildStrictInjectionLogFromCaseTable(spec, armLabel, builderTimestampMs);
@@ -358,6 +376,10 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
     cfg.llm_model = runtime.config.llm_model;
     cfg.embedding_model = runtime.config.embedding_model;
     cfg.max_reflections = 0;
+    if (!runtime.useMockInference()) {
+        // Harness-local pin only — model/context/token limits unchanged (EP-01.5).
+        cfg.temperature = 0.0;
+    }
     cfg.database_path =
         (fs::temp_directory_path() / ("thoth_e2_" + spec.id + "_" + armLabel + ".db")).string();
     if (fs::exists(cfg.database_path)) {
@@ -393,6 +415,16 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
     auto registry = std::make_shared<ToolRegistry>();
     Thoth::ExecutiveController controller(planner, registry, rag, memory);
     controller.set_max_reflections(0);
+    // EP-01.5 Phase 1: authoritative path injects owned LLM via existing setters only.
+    // Do not alter ExecutiveController constructors (production paths unchanged).
+    if (!runtime.useMockInference()) {
+        if (!runtime.llm) {
+            std::cerr << "[E2] AUTHORITATIVE_LLM_NOOP: HarnessRuntimeContext has no LLMInterface\n";
+        } else {
+            controller.set_config(&cfg);
+            controller.set_llm_interface(runtime.llm.get());
+        }
+    }
     if (executiveStrictDispatch) {
         controller.set_e2_strict_eval_context(&sealedLog, &strictConfig);
     }
@@ -492,7 +524,7 @@ ScoredLoopOutcome runScoredEvaluationLoop(
     const std::string& logPath,
     const std::string& metricsLogPath,
     std::int64_t ts,
-    const HarnessRuntimeContext& runtime) {
+    HarnessRuntimeContext& runtime) {
     ScoredLoopOutcome result;
     result.evaluations.reserve(cases.size());
     result.expectations.reserve(cases.size());
@@ -577,7 +609,7 @@ int runScoredEvaluationHarness(const std::vector<Thoth::EpisodicLearningCase>& c
                                std::int64_t ts,
                                const Thoth::EpisodicLearningRunEnvelope& envelope,
                                EpisodicLearningRunRecorder& suiteRecorder,
-                               const HarnessRuntimeContext& runtime) {
+                               HarnessRuntimeContext& runtime) {
     const ScoredLoopOutcome scored = runScoredEvaluationLoop(
         cases, suiteAttribution, strictConfig, evalFingerprint, logPath, metricsLogPath, ts,
         runtime);
@@ -628,6 +660,7 @@ int main(int argc, char** argv) {
                          "start Ollama first.\n";
             return 2;
         }
+        runtime.ensureAuthoritativeLlm();
         std::cout << "E2 — Episodic Memory Learning Benchmark (authoritative inference)\n";
     } else {
         std::cout << "E2 — Episodic Memory Learning Benchmark (mock, no Ollama)\n";
@@ -692,6 +725,83 @@ int main(int argc, char** argv) {
         abortSmoke && (std::string(abortSmoke) == "1" || std::string(abortSmoke) == "true")) {
         std::cerr << "EPISODIC_LEARNING: benchmark abort smoke — exiting before complete()\n";
         return 2;
+    }
+
+    // EP-01.5 Phase 1 — single-arm authoritative LLM wiring smoke (non-scoring).
+    if (const char* ep015Smoke = std::getenv("THOTH_E2_EP015_SMOKE");
+        ep015Smoke && (std::string(ep015Smoke) == "1" || std::string(ep015Smoke) == "true")) {
+        if (inferenceMode != EpisodicInferenceMode::Authoritative) {
+            std::cerr << "EP-01.5 smoke: requires --authoritative\n";
+            return 2;
+        }
+        const auto cases = Thoth::getEpisodicLearningCases();
+        if (cases.empty()) {
+            std::cerr << "EP-01.5 smoke: no cases\n";
+            return 2;
+        }
+        const auto& spec = cases.front(); // E2-01
+        const std::string logPath = benchmarkLogPath();
+        const std::int64_t ts = nowMs();
+        std::cout << "EP-01.5 smoke — E2-01 warm arm only (wiring proof; official_scoring=false)\n";
+        const E2CaseArmPlumbingResult armResult = runCaseArm(
+            spec, "warm", suiteAttribution, strictConfig, metricsLog.string(), ts,
+            /*strictBoundaryRetrieval=*/true,
+            /*executiveStrictDispatch=*/true,
+            runtime);
+
+        const auto metrics = readLatestMetricsForGoal(metricsLog.string(), spec.goal);
+        std::int64_t totalTokens = armResult.observation.total_tokens;
+        std::int64_t promptTokens = 0;
+        std::int64_t completionTokens = 0;
+        std::int64_t synthesisMs = 0;
+        if (metrics) {
+            totalTokens = std::max(totalTokens, static_cast<std::int64_t>(
+                                                    metrics->value("total_tokens", 0)));
+            promptTokens = static_cast<std::int64_t>(metrics->value("prompt_tokens", 0));
+            completionTokens =
+                static_cast<std::int64_t>(metrics->value("completion_tokens", 0));
+            synthesisMs =
+                static_cast<std::int64_t>(metrics->value("llm_synthesis_time_ms", 0));
+        }
+        // Prefer live session usage from owned LLM if metrics lag.
+        if (runtime.llm) {
+            const LlmTokenUsage usage = runtime.llm->sessionTokenUsage();
+            totalTokens = std::max(totalTokens, usage.total_tokens);
+            promptTokens = std::max(promptTokens, usage.prompt_tokens);
+            completionTokens = std::max(completionTokens, usage.completion_tokens);
+        }
+        const bool tokensOk =
+            totalTokens > 0 || (promptTokens + completionTokens) > 0;
+
+        appendJsonLine(logPath,
+                       {{"event", "E2_EP015_LLM_WIRING_SMOKE"},
+                        {"timestamp_ms", ts},
+                        {"run_id", suiteAttribution.run_id},
+                        {"env_hash", suiteAttribution.env_hash},
+                        {"wiring_stage", "EP015_SMOKE"},
+                        {"scoring_enabled", false},
+                        {"official_scoring", false},
+                        {"case_id", spec.id},
+                        {"arm", "warm"},
+                        {"terminal_state", armResult.observation.terminal_state},
+                        {"total_tokens", totalTokens},
+                        {"prompt_tokens", promptTokens},
+                        {"completion_tokens", completionTokens},
+                        {"llm_synthesis_time_ms", synthesisMs},
+                        {"tokens_ok", tokensOk}});
+
+        if (!tokensOk) {
+            std::cerr << "EP-01.5 smoke FAIL: no tokens recorded (total=" << totalTokens
+                      << " prompt+completion=" << (promptTokens + completionTokens)
+                      << " synthesis_ms=" << synthesisMs << ")\n";
+            return 2;
+        }
+        std::cout << "EP-01.5 smoke PASS — tokens=" << totalTokens
+                  << " synthesis_ms=" << synthesisMs
+                  << " terminal=" << armResult.observation.terminal_state << '\n';
+        suiteRecorder.completeWiringCheckpoint("EP015_SMOKE", 1, /*retrieval_enabled=*/true,
+                                               /*evaluation_boundary_verified=*/true);
+        return 0;
     }
 
     std::string wiringStage = "B";
