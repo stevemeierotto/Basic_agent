@@ -153,10 +153,13 @@ Thoth::BenchmarkEnvironmentInputs makeEpisodicBenchmarkInputs(
         inputs.model.llm_model = "mock";
         inputs.model.embedding_model = "tfidf-local";
     } else {
-        inputs.tier = Thoth::BenchmarkTier::FULL;
+        // EP-01.5 Phase 2: declare OLLAMA to match inferTier() episodic branch
+        // (External + reachable → OLLAMA). Do not edit shared inferTier() logic.
         inputs.model.llm_model = runtime.config.llm_model;
         inputs.model.embedding_model = runtime.config.embedding_model;
         inputs.ollama_reachable = Thoth::isOllamaReachable();
+        inputs.tier = inputs.ollama_reachable ? Thoth::BenchmarkTier::OLLAMA
+                                             : Thoth::BenchmarkTier::FULL;
         if (ollama.has_value()) {
             inputs.ollama = *ollama;
         }
