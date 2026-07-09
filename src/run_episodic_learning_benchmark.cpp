@@ -307,8 +307,12 @@ void addDistractorChunk(EmbeddingEngine* engine, IndexManager* idx, const std::s
     Thoth::addEpisodicEvalCorpusChunk(engine, idx, text);
 }
 
+/** Latest GOAL_COGNITIVE_METRICS row for goal, restricted to the current run_id.
+ *  Matching by goal alone is forbidden — it cross-pollutes consecutive harness runs
+ *  (Step 2 redo E2-28 failure, 2026-07-09). */
 std::optional<nlohmann::json> readLatestMetricsForGoal(const std::string& logPath,
-                                                       const std::string& goalSubstring) {
+                                                       const std::string& goalSubstring,
+                                                       const std::string& runId) {
     std::ifstream in(logPath);
     if (!in.is_open()) {
         return std::nullopt;
@@ -321,9 +325,13 @@ std::optional<nlohmann::json> readLatestMetricsForGoal(const std::string& logPat
         }
         try {
             auto row = nlohmann::json::parse(line);
-            if (row.value("goal", "").find(goalSubstring) != std::string::npos) {
-                last = row;
+            if (row.value("goal", "").find(goalSubstring) == std::string::npos) {
+                continue;
             }
+            if (!runId.empty() && row.value("run_id", "") != runId) {
+                continue;
+            }
+            last = std::move(row);
         } catch (...) {
         }
     }
@@ -516,13 +524,11 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
     obs.terminal_state = stateName(controller.get_state());
     obs.wall_clock_ms = nowMs() - start;
 
-    if (const auto metrics = readLatestMetricsForGoal(metricsLogPath, spec.goal)) {
+    if (const auto metrics =
+            readLatestMetricsForGoal(metricsLogPath, spec.goal, attribution.run_id)) {
         obs.final_success_score = metrics->value("final_success_score", 0.0f);
         obs.planning_time_ms = metrics->value("planning_time_ms", 0);
         obs.total_tokens = metrics->value("total_tokens", 0);
-        if (metrics->contains("run_id") && (*metrics)["run_id"].get<std::string>() != attribution.run_id) {
-            std::cerr << "[E2] metrics run_id mismatch for " << spec.id << " arm " << armLabel << '\n';
-        }
     } else if (obs.terminal_state == "COMPLETED") {
         obs.final_success_score = 1.0f;
     }
@@ -530,7 +536,8 @@ E2CaseArmPlumbingResult runCaseArm(const Thoth::EpisodicLearningCase& spec,
     std::int64_t promptTokens = 0;
     std::int64_t completionTokens = 0;
     std::int64_t synthesisMs = 0;
-    if (const auto metrics = readLatestMetricsForGoal(metricsLogPath, spec.goal)) {
+    if (const auto metrics =
+            readLatestMetricsForGoal(metricsLogPath, spec.goal, attribution.run_id)) {
         promptTokens = static_cast<std::int64_t>(metrics->value("prompt_tokens", 0));
         completionTokens = static_cast<std::int64_t>(metrics->value("completion_tokens", 0));
         synthesisMs = static_cast<std::int64_t>(metrics->value("llm_synthesis_time_ms", 0));
@@ -866,7 +873,8 @@ int main(int argc, char** argv) {
             /*executiveStrictDispatch=*/true,
             runtime);
 
-        const auto metrics = readLatestMetricsForGoal(metricsLog.string(), spec.goal);
+        const auto metrics =
+            readLatestMetricsForGoal(metricsLog.string(), spec.goal, suiteAttribution.run_id);
         std::int64_t totalTokens = armResult.observation.total_tokens;
         std::int64_t promptTokens = 0;
         std::int64_t completionTokens = 0;
