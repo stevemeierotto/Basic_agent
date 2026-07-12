@@ -1,5 +1,6 @@
 #include "../include/basic_agent_plugin.h"
 #include "../include/file_handler.h"
+#include "../include/runtime_bootstrap.h"
 #include "logger.h"
 #include "../include/similarity.h"
 #include "../include/standard_execution_mode.h"
@@ -79,6 +80,8 @@ BasicAgentPlugin::BasicAgentPlugin()
             std::cerr << "[BasicAgentPlugin] Error parsing config.json\n";
         }
     }
+
+    Thoth::logResolvedRuntimeConfig(&config);
 
     // --- Load retrieval_config.json (Phase 5.1) ---
     std::string retConfigPath = fileHandler.getAgentWorkspacePath("retrieval_config.json");

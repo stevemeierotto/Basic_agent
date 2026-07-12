@@ -63,6 +63,11 @@ public:
     void logGoalMetrics(const GoalCognitiveMetricsRecord& record) const;
     static nlohmann::json toJson(const GoalCognitiveMetricsRecord& record);
 
+    /**
+     * Precedence: THOTH_COGNITIVE_METRICS_LOG > THOTH_LOGS_PATH > {projectRoot}/logs
+     */
+    static std::string resolveLogFilePath();
+
 private:
     CognitiveMetricsLogger();
     std::string logFilePath() const;

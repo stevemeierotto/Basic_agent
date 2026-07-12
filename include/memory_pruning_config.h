@@ -21,6 +21,19 @@ constexpr std::size_t kPruneBatchSize = 10;
 /** Max consolidation batches per single invocation (M2). */
 constexpr std::size_t kMaxBatchesPerInvocation = 5;
 
+/**
+ * Circuit breaker: after this many consecutive automatic consolidation
+ * attempts that make no forward progress (0 turns archived while the policy
+ * still wants consolidation), stop retrying on every message. This prevents a
+ * persistent failure (e.g. a poisoned DB transaction, an unavailable embedding
+ * backend, or a stalled LLM) from re-running expensive, multi-minute
+ * consolidation work on the worker thread for every new turn — the failure
+ * mode that could freeze the control panel. The backoff is cleared on a
+ * successful archive, an explicit (manual) consolidation, or session
+ * (re)activation.
+ */
+constexpr int kMaxConsecutiveNoProgress = 3;
+
 } // namespace Thoth::MemoryPruning
 
 #endif // THOTH_MEMORY_PRUNING_CONFIG_H

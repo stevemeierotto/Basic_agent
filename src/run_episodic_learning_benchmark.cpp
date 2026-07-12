@@ -116,9 +116,7 @@ std::int64_t nowMs() {
 
 std::string benchmarkLogPath() {
     FileHandler fh;
-    fs::path logsDir = fs::path(fh.getProjectRoot()) / "logs";
-    fs::create_directories(logsDir);
-    return (logsDir / "episodic_learning_benchmark.jsonl").string();
+    return fh.getLogsPath("episodic_learning_benchmark.jsonl");
 }
 
 void appendJsonLine(const std::string& path, const nlohmann::json& event) {
@@ -858,9 +856,7 @@ int main(int argc, char** argv) {
     applyInferenceEnv(inferenceMode);
 
     FileHandler fh;
-    const fs::path metricsLog =
-        fs::path(fh.getProjectRoot()) / "logs" / "cognitive_metrics.jsonl";
-    fs::create_directories(metricsLog.parent_path());
+    const fs::path metricsLog = fs::path(fh.getLogsPath("cognitive_metrics.jsonl"));
     setenv("THOTH_COGNITIVE_METRICS_LOG", metricsLog.string().c_str(), 1);
 
     std::optional<Thoth::OllamaSnapshot> ollamaSnap;

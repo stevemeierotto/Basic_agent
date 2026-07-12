@@ -82,6 +82,9 @@ nlohmann::json collectThothEnvFlags() {
     appendEnvFlagIfSet(flags, "THOTH_MOCK_LLM_UNAVAILABLE");
     appendEnvFlagIfSet(flags, "OLLAMA_MODEL");
     appendEnvFlagIfSet(flags, "OLLAMA_EMBED_MODEL");
+    appendEnvFlagIfSet(flags, "THOTH_INFERENCE_BASE_URL");
+    appendEnvFlagIfSet(flags, "THOTH_EMBED_BASE_URL");
+    appendEnvFlagIfSet(flags, "OLLAMA_HOST");
     return flags;
 }
 
@@ -153,7 +156,7 @@ std::string BenchmarkRun::logsDirectory() const {
         return *options_.logs_directory;
     }
     FileHandler fh;
-    return (fs::path(fh.getProjectRoot()) / "logs").string();
+    return fh.getLogsPath();
 }
 
 std::string BenchmarkRun::sidecarPath() const {

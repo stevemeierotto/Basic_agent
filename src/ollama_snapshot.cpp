@@ -7,6 +7,7 @@
  */
 
 #include "../include/ollama_snapshot.h"
+#include "../include/inference_endpoint.h"
 
 #include "json.hpp"
 
@@ -29,7 +30,7 @@ std::optional<std::string> httpGet(const OllamaFetchOptions& options, const std:
         return std::nullopt;
     }
 
-    const std::string url = options.base_url + path;
+    const std::string url = inferenceUrl(options.base_url, path);
     std::string body;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
@@ -88,15 +89,25 @@ std::optional<OllamaSnapshot> parseOllamaResponses(const std::string& versionBod
     return snapshot;
 }
 
+OllamaFetchOptions effectiveFetchOptions(const OllamaFetchOptions& options) {
+    OllamaFetchOptions effective = options;
+    if (effective.base_url.empty()) {
+        effective.base_url = resolveInferenceEndpoints().base_url;
+    }
+    return effective;
+}
+
 } // namespace
 
 bool isOllamaReachable(const OllamaFetchOptions& options) {
-    return httpGet(options, "/api/tags").has_value();
+    const OllamaFetchOptions effective = effectiveFetchOptions(options);
+    return httpGet(effective, "/api/tags").has_value();
 }
 
 std::optional<OllamaSnapshot> fetchOllamaSnapshot(const OllamaFetchOptions& options) {
-    const auto versionBody = httpGet(options, "/api/version");
-    const auto tagsBody = httpGet(options, "/api/tags");
+    const OllamaFetchOptions effective = effectiveFetchOptions(options);
+    const auto versionBody = httpGet(effective, "/api/version");
+    const auto tagsBody = httpGet(effective, "/api/tags");
     if (!versionBody.has_value() || !tagsBody.has_value()) {
         return std::nullopt;
     }

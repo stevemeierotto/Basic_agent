@@ -138,6 +138,27 @@ void MemoryPruner::finalizeResultCompat(ConsolidationResult& result) const {
     result.final_decision = result.decision;
 }
 
+void MemoryPruner::resetConsolidationBackoff(const std::string& sessionId) {
+    std::lock_guard<std::mutex> lock(backoff_mtx_);
+    no_progress_counts_.erase(sessionId);
+}
+
+bool MemoryPruner::isBackedOff(const std::string& sessionId) const {
+    std::lock_guard<std::mutex> lock(backoff_mtx_);
+    const auto it = no_progress_counts_.find(sessionId);
+    return it != no_progress_counts_.end()
+        && it->second >= MemoryPruning::kMaxConsecutiveNoProgress;
+}
+
+void MemoryPruner::recordProgress(const std::string& sessionId, bool madeProgress) {
+    std::lock_guard<std::mutex> lock(backoff_mtx_);
+    if (madeProgress) {
+        no_progress_counts_.erase(sessionId);
+    } else {
+        ++no_progress_counts_[sessionId];
+    }
+}
+
 BatchConsolidationOutcome MemoryPruner::consolidateOneBatchInternal(
     const std::string& sessionId,
     const ConsolidationDecision& decision,
@@ -321,6 +342,35 @@ ConsolidationResult MemoryPruner::runConsolidation(const std::string& sessionId,
         return result;
     }
 
+    // Circuit breaker: a human-driven / forced run always retries and clears
+    // any prior backoff. An automatic run that has repeatedly failed to make
+    // progress is suppressed so it stops re-running expensive, timeout-less
+    // LLM+embed work on the worker thread for every new message (the freeze
+    // failure mode).
+    const bool forced = request.source == ConsolidationSource::MANUAL
+        || request.ignore_thresholds;
+    if (forced) {
+        resetConsolidationBackoff(sessionId);
+    } else if (isBackedOff(sessionId)) {
+        result.remaining_hot = result.decision.hot_count;
+        result.blocked = true;
+        result.block_reason = "consolidation backed off after repeated no-progress attempts";
+        DecisionTraceLogger logger;
+        DecisionTrace trace = logger.startTrace("memory_consolidation", result.decision.hot_count);
+        logger.addStage(trace, "consolidation_backoff", true,
+                        "Automatic consolidation suppressed — no forward progress after "
+                        + std::to_string(MemoryPruning::kMaxConsecutiveNoProgress)
+                        + " consecutive attempts. Awaiting manual /prune or session change.", {
+            {"session_id", sessionId},
+            {"remaining_hot", result.remaining_hot},
+            {"decision", consolidationDecisionToJson(result.decision)}
+        });
+        logger.finishTrace(trace, true, "Consolidation backoff active");
+        logger.writeTrace(trace);
+        finalizeResultCompat(result);
+        return result;
+    }
+
     const std::string requested_by = request.requested_by.empty() ? "SYSTEM" : request.requested_by;
 
     if (request.single_batch) {
@@ -331,6 +381,11 @@ ConsolidationResult MemoryPruner::runConsolidation(const std::string& sessionId,
         result.batches = batch.archived > 0 ? 1 : 0;
         result.decision = evaluatePolicy(sessionId);
         result.remaining_hot = result.decision.hot_count;
+        if (!forced) {
+            const bool madeProgress = result.archived > 0
+                || !shouldEnterConsolidation(result.decision, request);
+            recordProgress(sessionId, madeProgress);
+        }
         finalizeResultCompat(result);
         return result;
     }
@@ -357,21 +412,36 @@ ConsolidationResult MemoryPruner::runConsolidation(const std::string& sessionId,
 
     if (shouldEnterConsolidation(result.decision, request)) {
         result.deferred = true;
+        // Distinguish an honest "batch cap reached" (progress made, more to do)
+        // from a "no forward progress" stall (nothing archived — a failure).
+        // The old message always claimed "batch cap reached", masking failures.
+        const bool made_progress = result.archived > 0;
+        const std::string reason = made_progress
+            ? "Consolidation paused — batch cap reached. "
+              "Remaining stale messages will be consolidated on next access."
+            : "Consolidation made no forward progress (0 turns archived) — "
+              "likely a persistent consolidation failure. See preceding "
+              "consolidation_failed stage.";
         DecisionTraceLogger logger;
         DecisionTrace trace = logger.startTrace("memory_consolidation", result.decision.hot_count);
-        logger.addStage(trace, "consolidation_deferred", true,
-                        "Consolidation paused — batch cap reached. "
-                        "Remaining stale messages will be consolidated on next access.", {
+        logger.addStage(trace, "consolidation_deferred", true, reason, {
             {"session_id", sessionId},
             {"batches_completed", result.batches},
             {"total_archived", result.archived},
             {"remaining_hot", result.remaining_hot},
+            {"made_progress", made_progress},
             {"decision", consolidationDecisionToJson(result.decision)},
             {"source", consolidationSourceToString(request.source)},
             {"requested_by", requested_by}
         });
         logger.finishTrace(trace, true, "Consolidation deferred");
         logger.writeTrace(trace);
+    }
+
+    if (!forced) {
+        const bool madeProgress = result.archived > 0
+            || !shouldEnterConsolidation(result.decision, request);
+        recordProgress(sessionId, madeProgress);
     }
 
     finalizeResultCompat(result);

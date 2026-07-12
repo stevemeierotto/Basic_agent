@@ -48,6 +48,21 @@ std::string FileHandler::getAgentWorkspacePath(const std::string& filename) cons
     return workspace.string();
 }
 
+std::string FileHandler::getLogsPath(const std::string& filename) const {
+    std::string logsOverride = getEnvOrEmpty("THOTH_LOGS_PATH");
+    fs::path logs = logsOverride.empty()
+        ? fs::path(getProjectRoot()) / "logs"
+        : fs::path(logsOverride);
+
+    fs::create_directories(logs);
+
+    if (!filename.empty()) {
+        logs /= filename;
+    }
+
+    return logs.string();
+}
+
 std::string FileHandler::getRagPath(const std::string& filename) const {
     fs::path ragFolder = fs::path(getAgentWorkspacePath()) / "rag";
 

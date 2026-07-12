@@ -24,6 +24,10 @@ include_directories(include)
 find_package(CURL REQUIRED)
 find_package(SQLite3 REQUIRED)
 
+if(NOT DEFINED THOTH_BUILD_ENGINE)
+    set(THOTH_BUILD_ENGINE ON)
+endif()
+
 # List source files for the library
 set(BASIC_AGENT_SOURCES
     src/command_processor.cpp
@@ -32,6 +36,8 @@ set(BASIC_AGENT_SOURCES
     src/default_planner.cpp
     src/llm_planner.cpp
     src/embedding_engine.cpp
+    src/inference_endpoint.cpp
+    src/runtime_bootstrap.cpp
     src/env_loader.cpp
     src/flat_vector_store.cpp
     src/constraint_checker.cpp
@@ -148,6 +154,14 @@ target_link_libraries(run_trajectory_ablation_benchmark PRIVATE basic_agent)
 add_executable(run_episodic_learning_benchmark src/run_episodic_learning_benchmark.cpp)
 target_compile_definitions(run_episodic_learning_benchmark PRIVATE THOTH_E2_OFFICIAL_HARNESS=1)
 target_link_libraries(run_episodic_learning_benchmark PRIVATE basic_agent e2_eval_kernel)
+
+if(THOTH_BUILD_ENGINE)
+    add_executable(thoth-engine src/thoth_engine_main.cpp)
+    target_link_libraries(thoth-engine PRIVATE basic_agent)
+    target_compile_definitions(thoth-engine PRIVATE
+        THOTH_ENGINE_VERSION="${THOTH_ENGINE_VERSION}")
+    set_target_properties(thoth-engine PROPERTIES FOLDER "apps")
+endif()
 
 # CLI executable for debugging or standalone use
 # Only build CLI tool if we're building standalone

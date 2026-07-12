@@ -8,17 +8,24 @@
 #include "../include/llm_interface.h"
 #include "../include/clock.h"
 #include "../include/decision_trace.h"
+#include "../include/file_handler.h"
 #include <iostream>
 #include <algorithm>
 #include <ctime>
 #include <chrono>
+#include <filesystem>
 
 using json = nlohmann::json;
+
+namespace fs = std::filesystem;
 
 Memory::Memory(const Config& config)
     : config_(&config),
       clock_(Thoth::makeSystemClock()) {
-    repo = Thoth::MemoryRepositoryFactory::createRepository(config, "agent_workspace/memory.db");
+    FileHandler fh;
+    const std::string dbPath =
+        (fs::path(fh.getAgentWorkspacePath()) / "memory.db").string();
+    repo = Thoth::MemoryRepositoryFactory::createRepository(config, dbPath);
     
     if (!repo) {
         std::cerr << "[Memory] CRITICAL: Failed to initialize repository backend.\n";
@@ -51,6 +58,10 @@ void Memory::onSessionActivated(const std::string& sessionId) {
     if (!pruner) {
         return;
     }
+
+    // Activating a session is a deliberate state change; give consolidation a
+    // fresh attempt even if it had backed off after earlier failures.
+    pruner->resetConsolidationBackoff(sessionId);
 
     bool markedStale = false;
     {
@@ -515,7 +526,9 @@ void Memory::consolidateIfNeeded(const std::string& sessionId) {
             std::cerr << ')';
         }
         if (result.deferred) {
-            std::cerr << " [deferred: batch cap reached]";
+            std::cerr << (result.archived > 0
+                ? " [deferred: batch cap reached]"
+                : " [deferred: no forward progress — consolidation failing]");
         }
         std::cerr << '\n';
     }

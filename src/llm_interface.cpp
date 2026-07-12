@@ -1,5 +1,6 @@
 #include "../include/llm_interface.h"
 #include "../include/decision_trace.h"
+#include "../include/inference_endpoint.h"
 #include "../include/test_suite_dev.h"
 #include "../include/robustness_mock_responses.h"
 #include <../include/json.hpp>
@@ -142,7 +143,10 @@ std::string LLMInterface::detectOllamaModel() {
     if (!curl) return "";
 
     try {
-        curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:11434/api/tags");
+        const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
+                                      : Thoth::resolveInferenceEndpoints();
+        const std::string tagsUrl = Thoth::inferenceUrl(endpoints.base_url, "/api/tags");
+        curl_easy_setopt(curl, CURLOPT_URL, tagsUrl.c_str());
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(curl, CURLOPT_POST, 0L);
 
@@ -215,6 +219,23 @@ void LLMInterface::setBackend(LLMBackend b) {
             headers = curl_slist_append(nullptr, "Content-Type: application/json");
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+
+            // Bound the request so a stalled/unresponsive Ollama can never block
+            // the calling (worker) thread indefinitely — an unbounded curl call
+            // here previously froze the control panel during memory
+            // consolidation. The default is generous (slow local models can take
+            // minutes) but finite; override with THOTH_LLM_TIMEOUT_SECONDS.
+            long timeoutSeconds = 600;
+            if (const char* env = std::getenv("THOTH_LLM_TIMEOUT_SECONDS")) {
+                try {
+                    const long parsed = std::stol(env);
+                    if (parsed > 0) timeoutSeconds = parsed;
+                } catch (...) {
+                    // keep default on malformed override
+                }
+            }
+            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeoutSeconds);
         }
     }
 }
@@ -300,7 +321,11 @@ std::string LLMInterface::askOllama(const std::string& prompt, int num_predict_o
             };
             std::string jsonStr = payload.dump();
 
-            curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:11434/api/generate");
+            const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
+                                          : Thoth::resolveInferenceEndpoints();
+            const std::string generateUrl =
+                Thoth::inferenceUrl(endpoints.base_url, "/api/generate");
+            curl_easy_setopt(curl, CURLOPT_URL, generateUrl.c_str());
             curl_easy_setopt(curl, CURLOPT_HTTPGET, 0L);
             curl_easy_setopt(curl, CURLOPT_POST, 1L);
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());

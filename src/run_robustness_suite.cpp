@@ -32,9 +32,7 @@ std::int64_t nowMs() {
 
 std::string logPath() {
     FileHandler fh;
-    fs::path logsDir = fs::path(fh.getProjectRoot()) / "logs";
-    fs::create_directories(logsDir);
-    return (logsDir / "robustness_suite.jsonl").string();
+    return fh.getLogsPath("robustness_suite.jsonl");
 }
 
 void appendJsonLine(const std::string& path, const nlohmann::json& event) {

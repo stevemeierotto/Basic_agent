@@ -41,9 +41,7 @@ std::int64_t nowMs() {
 
 std::string ablationLogPath() {
     FileHandler fh;
-    fs::path logsDir = fs::path(fh.getProjectRoot()) / "logs";
-    fs::create_directories(logsDir);
-    return (logsDir / "trajectory_ablation_benchmark.jsonl").string();
+    return fh.getLogsPath("trajectory_ablation_benchmark.jsonl");
 }
 
 void appendJsonLine(const std::string& path, const nlohmann::json& event) {

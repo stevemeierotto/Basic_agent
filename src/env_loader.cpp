@@ -59,11 +59,13 @@ static void validateEnvFileSecurity(const std::string& filename) {
 }
 #endif
 
-bool loadEnvFile(const std::string& filename) {
+static bool loadEnvFileImpl(const std::string& filename, bool overwriteExisting, bool warnIfMissing) {
     std::ifstream file(filename);
     if (!file.is_open()) {
-        std::cerr << "EnvLoader: Warning - .env file not found: " << filename << "\n";
-        return false; // .env file not found
+        if (warnIfMissing) {
+            std::cerr << "EnvLoader: Warning - .env file not found: " << filename << "\n";
+        }
+        return false;
     }
 
 #ifndef _WIN32
@@ -81,15 +83,24 @@ bool loadEnvFile(const std::string& filename) {
             key = trim(key);
             value = trim(value);
 
-            if (key.empty()) continue; // skip invalid lines
+            if (!value.empty() && value.front() == '"' && value.back() == '"') {
+                value = value.substr(1, value.size() - 2);
+            } else if (!value.empty() && value.front() == '\'' && value.back() == '\'') {
+                value = value.substr(1, value.size() - 2);
+            }
+
+            if (key.empty()) continue;
 
 #ifdef _WIN32
+            if (!overwriteExisting && std::getenv(key.c_str()) != nullptr) {
+                continue;
+            }
             if (_putenv_s(key.c_str(), value.c_str()) != 0) {
                 std::cerr << "EnvLoader: Failed to set environment variable: "
                           << displayKeyName(key) << "\n";
             }
 #else
-            if (setenv(key.c_str(), value.c_str(), 1) != 0) {
+            if (setenv(key.c_str(), value.c_str(), overwriteExisting ? 1 : 0) != 0) {
                 std::cerr << "EnvLoader: Failed to set environment variable: "
                           << displayKeyName(key) << "\n";
             }
@@ -98,6 +109,14 @@ bool loadEnvFile(const std::string& filename) {
     }
 
     return true;
+}
+
+bool loadEnvFile(const std::string& filename) {
+    return loadEnvFileImpl(filename, true, true);
+}
+
+bool loadEnvFileIfUnset(const std::string& filename) {
+    return loadEnvFileImpl(filename, false, false);
 }
 
 } // namespace EnvLoader

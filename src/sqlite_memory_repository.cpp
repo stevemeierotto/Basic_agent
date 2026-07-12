@@ -36,6 +36,15 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
         return;
     }
 
+    // Harden the connection against transient lock contention. With a single
+    // shared connection and no busy handler, SQLite returns SQLITE_BUSY
+    // immediately under contention; a failed COMMIT then leaves the
+    // transaction open and poisons every subsequent BEGIN. A busy timeout plus
+    // WAL journaling let writers wait briefly and retry instead of failing.
+    sqlite3_busy_timeout(db_->handle, 5000);
+    sqlite3_exec(db_->handle, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    sqlite3_exec(db_->handle, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
+
     try {
         const char* schema = 
             "CREATE TABLE IF NOT EXISTS sessions ("
@@ -269,14 +278,43 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
 SQLiteMemoryRepository::~SQLiteMemoryRepository() = default;
 
 bool SQLiteMemoryRepository::beginTransaction() {
+    if (!db_ || !db_->handle) return false;
+    // Self-heal a poisoned connection: if a prior transaction was left open
+    // (e.g. a COMMIT that failed and was never rolled back) the connection is
+    // no longer in autocommit mode. A nested BEGIN would fail instantly
+    // ("cannot start a transaction within a transaction"), permanently
+    // blocking consolidation. Roll the stale transaction back first.
+    if (sqlite3_get_autocommit(db_->handle) == 0) {
+        std::cerr << "[SQLiteMemoryRepository] Rolling back stale open transaction before BEGIN.\n";
+        sqlite3_exec(db_->handle, "ROLLBACK;", nullptr, nullptr, nullptr);
+    }
     return sqlite3_exec(db_->handle, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr) == SQLITE_OK;
 }
 
 bool SQLiteMemoryRepository::commit() {
-    return sqlite3_exec(db_->handle, "COMMIT;", nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (!db_ || !db_->handle) return false;
+    if (sqlite3_exec(db_->handle, "COMMIT;", nullptr, nullptr, nullptr) == SQLITE_OK) {
+        return true;
+    }
+    // COMMIT failed (e.g. SQLITE_BUSY). Leaving the transaction open would
+    // poison every future beginTransaction() on this shared connection, so
+    // roll back to return the connection to autocommit mode before reporting
+    // failure to the caller.
+    std::cerr << "[SQLiteMemoryRepository] COMMIT failed: " << sqlite3_errmsg(db_->handle)
+              << " — rolling back to release transaction.\n";
+    if (sqlite3_get_autocommit(db_->handle) == 0) {
+        sqlite3_exec(db_->handle, "ROLLBACK;", nullptr, nullptr, nullptr);
+    }
+    return false;
 }
 
 bool SQLiteMemoryRepository::rollback() {
+    if (!db_ || !db_->handle) return false;
+    // No-op if no transaction is active, otherwise SQLite returns a harmless
+    // but noisy "cannot rollback - no transaction is active" error.
+    if (sqlite3_get_autocommit(db_->handle) != 0) {
+        return true;
+    }
     return sqlite3_exec(db_->handle, "ROLLBACK;", nullptr, nullptr, nullptr) == SQLITE_OK;
 }
 

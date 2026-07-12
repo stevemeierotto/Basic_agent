@@ -1,5 +1,6 @@
 #include "../include/embedding_engine.h"
 #include "../include/config.h"
+#include "../include/inference_endpoint.h"
 #include <iostream>
 #include <cmath>
 #include <numeric>
@@ -135,7 +136,11 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
         std::string jsonStr = payload.dump();
         std::string readBuffer;
 
-        curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:11434/api/embed");
+        const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
+                                      : Thoth::resolveInferenceEndpoints();
+        const std::string embedUrl =
+            Thoth::inferenceUrl(endpoints.embed_base_url, "/api/embed");
+        curl_easy_setopt(curl, CURLOPT_URL, embedUrl.c_str());
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
 
@@ -221,7 +226,11 @@ std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
     std::string jsonStr = payload.dump();
     std::string readBuffer;
 
-    curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_URL, "http://127.0.0.1:11434/api/embed");
+    const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
+                                  : Thoth::resolveInferenceEndpoints();
+    const std::string embedUrl =
+        Thoth::inferenceUrl(endpoints.embed_base_url, "/api/embed");
+    curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_URL, embedUrl.c_str());
     curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_POSTFIELDS, jsonStr.c_str());
     curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_WRITEDATA, &readBuffer);
 

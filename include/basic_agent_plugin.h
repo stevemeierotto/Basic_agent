@@ -10,7 +10,7 @@
 #include "rag.h"
 #include "command_processor.h"
 #include "llm_interface.h"
-#include "env_loader.h"
+#include "runtime_bootstrap.h"
 #include "embedding_engine.h"
 #include "executive_controller.h"
 #include "default_planner.h"
@@ -92,6 +92,7 @@ public:
     }
 
 private:
+    Thoth::RuntimeBootstrapGuard bootstrap_guard_;
     Config config;
     Memory memory;
     std::unique_ptr<EmbeddingEngine> embeddingEngine;

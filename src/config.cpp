@@ -93,6 +93,12 @@ bool Config::loadFromJson(const std::string& path) {
     if (j.contains("similarity_threshold")) similarity_threshold = j["similarity_threshold"];
     if (j.contains("llm_model")) llm_model = j["llm_model"];
     if (j.contains("embedding_model")) embedding_model = j["embedding_model"];
+    if (j.contains("inference_base_url") && j["inference_base_url"].is_string()) {
+        inference_base_url = j["inference_base_url"];
+    }
+    if (j.contains("embed_base_url") && j["embed_base_url"].is_string()) {
+        embed_base_url = j["embed_base_url"];
+    }
     if (j.contains("synthesis_max_context_chars")) {
         synthesis_max_context_chars = j["synthesis_max_context_chars"];
     }
@@ -143,6 +149,8 @@ bool Config::saveToJson(const std::string& path) const {
     j["similarity_metric"] = similarity_metric;
     j["llm_model"] = llm_model;
     j["embedding_model"] = embedding_model;
+    j["inference_base_url"] = inference_base_url;
+    j["embed_base_url"] = embed_base_url;
     j["verbosity"] = verbosity;
     j["max_retries"] = max_retries;
     j["grag_directional"] = grag_directional;

@@ -16,7 +16,7 @@
 namespace Thoth {
 
 struct OllamaFetchOptions {
-    std::string base_url = "http://127.0.0.1:11434";
+    std::string base_url;
     long timeout_ms = 2000;
 };
 

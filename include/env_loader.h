@@ -13,7 +13,11 @@
 
 namespace EnvLoader {
 
+/** Load all keys from filename (overwrites existing environment values). */
 [[nodiscard]] bool loadEnvFile(const std::string& filename = ".env");
+
+/** Load keys only when not already set in the process environment. Missing file is silent. */
+[[nodiscard]] bool loadEnvFileIfUnset(const std::string& filename);
 
 } // namespace EnvLoader
 

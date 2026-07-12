@@ -26,16 +26,18 @@ CognitiveMetricsLogger& CognitiveMetricsLogger::instance() {
 
 CognitiveMetricsLogger::CognitiveMetricsLogger() = default;
 
-std::string CognitiveMetricsLogger::logFilePath() const {
+std::string CognitiveMetricsLogger::resolveLogFilePath() {
     if (const char* overridePath = std::getenv("THOTH_COGNITIVE_METRICS_LOG")) {
         if (*overridePath) {
             return overridePath;
         }
     }
     FileHandler fh;
-    fs::path logsDir = fs::path(fh.getProjectRoot()) / "logs";
-    fs::create_directories(logsDir);
-    return (logsDir / "cognitive_metrics.jsonl").string();
+    return fh.getLogsPath("cognitive_metrics.jsonl");
+}
+
+std::string CognitiveMetricsLogger::logFilePath() const {
+    return resolveLogFilePath();
 }
 
 void CognitiveMetricsLogger::appendJsonLine(const nlohmann::json& event) const {

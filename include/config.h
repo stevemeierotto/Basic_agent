@@ -18,6 +18,10 @@ public:
     std::string llm_model = "qwen2.5:3b";
     std::string embedding_model = "nomic-embed-text:v1.5";
 
+    /** Inference service origins (env vars take precedence over these). */
+    std::string inference_base_url;
+    std::string embed_base_url;
+
     // Runtime parameters
     int verbosity = 1;  // 0 = silent, 1 = normal, 2 = debug
     bool grag_directional = true; // Phase 7 toggle

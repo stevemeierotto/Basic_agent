@@ -2,7 +2,7 @@
 #include "memory.h"
 #include "rag.h"
 #include "llm_interface.h"
-#include "env_loader.h"
+#include "runtime_bootstrap.h"
 #include "embedding_engine.h"
 #include "config.h"
 #include "similarity.h"
@@ -10,6 +10,8 @@
 
 #include <iostream>
 int main() {
+    Thoth::bootstrapRuntimeEnvironment();
+
     FileHandler fileHandler;
 
     // 1. Load config from JSON
@@ -17,13 +19,9 @@ int main() {
     const std::string configPath = fileHandler.getConfigPath();
     agentConfig.loadFromJson(configPath);
 
-    // 2. Load .env file early so environment is set for all components
-    const std::string envPath = fileHandler.getEnvPath();
-    if (!EnvLoader::loadEnvFile(envPath)) {
-        std::cerr << "Warning: .env file not found at: " << envPath << ". Using system environment variables.\n";
-    }
+    Thoth::logResolvedRuntimeConfig(&agentConfig);
 
-    // 3. Core objects
+    // 2. Core objects
     Memory memory;
     LLMInterface llm(LLMBackend::Ollama, &agentConfig);
 

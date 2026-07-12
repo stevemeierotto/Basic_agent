@@ -14,7 +14,9 @@
 #include "memory_pruning_config.h"
 #include "summary_generator.h"
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class Config;
@@ -78,7 +80,20 @@ public:
 
     bool isEmbedReady() const { return embeddingEngine_ != nullptr; }
 
+    /**
+     * Clear the no-progress circuit breaker for a session so automatic
+     * consolidation will be attempted again. Called on session (re)activation
+     * and whenever the failure condition may have been resolved.
+     */
+    void resetConsolidationBackoff(const std::string& sessionId);
+
 private:
+    /** True if the session's automatic consolidation is currently backed off. */
+    bool isBackedOff(const std::string& sessionId) const;
+
+    /** Record the outcome of an automatic run to drive the circuit breaker. */
+    void recordProgress(const std::string& sessionId, bool madeProgress);
+
     BatchConsolidationOutcome consolidateOneBatchInternal(
         const std::string& sessionId,
         const ConsolidationDecision& decision,
@@ -95,6 +110,9 @@ private:
     SummaryGenerator summaryGenerator_;
     EmbeddingEngine* embeddingEngine_;
     std::shared_ptr<Clock> clock_;
+
+    mutable std::mutex backoff_mtx_;
+    std::unordered_map<std::string, int> no_progress_counts_;
 };
 
 } // namespace Thoth

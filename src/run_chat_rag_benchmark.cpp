@@ -52,9 +52,7 @@ std::int64_t nowMs() {
 
 std::string benchmarkLogPath() {
     FileHandler fh;
-    fs::path logsDir = fs::path(fh.getProjectRoot()) / "logs";
-    fs::create_directories(logsDir);
-    return (logsDir / "chat_rag_benchmark.jsonl").string();
+    return fh.getLogsPath("chat_rag_benchmark.jsonl");
 }
 
 Thoth::BenchmarkEnvironmentInputs makeChatRagBenchmarkInputs(

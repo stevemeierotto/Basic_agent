@@ -10,6 +10,9 @@ public:
     // Returns full path to agent_workspace with optional filename
     std::string getAgentWorkspacePath(const std::string& filename = "") const;
 
+    // Returns logs root, or logs root + filename (same contract as getAgentWorkspacePath)
+    std::string getLogsPath(const std::string& filename = "") const;
+
     // Returns full path to agent_workspace/rag with optional filename
     std::string getRagPath(const std::string& filename = "") const;
 

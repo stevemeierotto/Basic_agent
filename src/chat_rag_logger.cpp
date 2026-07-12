@@ -27,9 +27,7 @@ ChatRagLogger::ChatRagLogger() = default;
 
 std::string ChatRagLogger::logFilePath() const {
     FileHandler fh;
-    fs::path logsDir = fs::path(fh.getProjectRoot()) / "logs";
-    fs::create_directories(logsDir);
-    return (logsDir / "chat_rag.jsonl").string();
+    return fh.getLogsPath("chat_rag.jsonl");
 }
 
 void ChatRagLogger::appendJsonLine(const nlohmann::json& event) const {

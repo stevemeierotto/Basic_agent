@@ -44,9 +44,7 @@ std::int64_t nowMs() {
 
 std::string benchmarkLogPath() {
     FileHandler fh;
-    fs::path logsDir = fs::path(fh.getProjectRoot()) / "logs";
-    fs::create_directories(logsDir);
-    return (logsDir / "reflection_ab_benchmark.jsonl").string();
+    return fh.getLogsPath("reflection_ab_benchmark.jsonl");
 }
 
 void appendJsonLine(const std::string& path, const nlohmann::json& event) {
