@@ -1,0 +1,69 @@
+/*
+ * Copyright (c) 2025 Steve Meierotto
+ *
+ * Thoth — EngineRuntime service layer (Plan F / Plan G)
+ *
+ * Licensed under the MIT License (see LICENSE in project root)
+ */
+#pragma once
+
+#include "controller_event.h"
+#include "engine_event.h"
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <future>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace Thoth {
+
+/**
+ * Owns BasicAgentPlugin, the worker thread, command queue, and session state.
+ * Transports (CLI, HTTP) call into EngineRuntime — not the plugin directly.
+ */
+class EngineRuntime {
+public:
+    static std::unique_ptr<EngineRuntime> create();
+    ~EngineRuntime();
+
+    EngineRuntime(const EngineRuntime&) = delete;
+    EngineRuntime& operator=(const EngineRuntime&) = delete;
+
+    /** Stop accepting work; drain queue (bounded), then tear down plugin and worker. */
+    void shutdown(std::chrono::milliseconds drain_timeout = std::chrono::seconds(5));
+
+    /** Marks not-ready for new commands (e.g. HTTP SIGTERM before drain). */
+    void beginShutdown();
+
+    std::future<std::string> submitChat(const std::string& session_id, const std::string& text);
+    std::future<std::string> submitGoal(const std::string& session_id, const std::string& goal);
+    void pause();
+    void resume();
+    void abort();
+
+    uint64_t subscribeEvents(std::function<void(const EngineEvent&)> handler);
+    void unsubscribeEvents(uint64_t subscription_id);
+
+    /** Unit tests only — enqueue a synthetic ControllerEvent through the ingress path. */
+    void publishControllerEventForTests(const ControllerEvent& event);
+
+    std::size_t eventSubscriberCountForTests() const;
+    uint64_t lastEventSequenceForTests() const;
+    std::size_t droppedEventCountForTests() const;
+
+    std::string workspacePath() const;
+    bool isReady() const;
+    std::vector<std::string> capabilities() const;
+
+private:
+    EngineRuntime();
+
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace Thoth

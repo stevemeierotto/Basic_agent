@@ -1,65 +1,31 @@
 #include "../include/embedding_engine.h"
 #include "../include/config.h"
+#include "../include/inference_client.h"
 #include "../include/inference_endpoint.h"
 #include <iostream>
 #include <cmath>
 #include <numeric>
 #include <algorithm>
-#include <curl/curl.h>
-#include <../include/json.hpp>
 
-using json = nlohmann::json;
-
-static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-    ((std::string*)userp)->append((char*)contents, size * nmemb);
-    return size * nmemb;
+void EmbeddingEngine::ensureInferenceClient() {
+    if (inference_client_) {
+        return;
+    }
+    const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
+                                  : Thoth::resolveInferenceEndpoints();
+    inference_client_ = Thoth::createInferenceClient(endpoints, config);
 }
 
 EmbeddingEngine::EmbeddingEngine(Method method, Config* config) 
-    : method(method), config(config), curl_headers(nullptr) {
-    if (method == Method::External) {
-        curl_headers = curl_slist_append(nullptr, "Content-Type: application/json");
-    }
-}
+    : method(method), config(config) {}
 
-EmbeddingEngine::~EmbeddingEngine() {
-    std::lock_guard<std::mutex> lock(engineMutex);
-    if (curl_headers) curl_slist_free_all(curl_headers);
-    for (void* handle : curl_pool) {
-        curl_easy_cleanup(static_cast<CURL*>(handle));
-    }
-}
-
-void* EmbeddingEngine::acquireCurlHandle() {
-    std::lock_guard<std::mutex> lock(engineMutex);
-    if (!curl_pool.empty()) {
-        void* handle = curl_pool.back();
-        curl_pool.pop_back();
-        return handle;
-    }
-
-    CURL* curl = curl_easy_init();
-    if (curl) {
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curl_headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
-    }
-    return curl;
-}
-
-void EmbeddingEngine::releaseCurlHandle(void* handle) {
-    if (!handle) return;
-    std::lock_guard<std::mutex> lock(engineMutex);
-    curl_pool.push_back(handle);
-}
-
-bool EmbeddingEngine::initCurl() {
-    return true;
-}
+EmbeddingEngine::~EmbeddingEngine() = default;
 
 void EmbeddingEngine::setMethod(Method m) {
     method = m;
+    if (m != Method::External) {
+        inference_client_.reset();
+    }
 }
 
 std::vector<float> EmbeddingEngine::embed(const std::string& text) {
@@ -99,12 +65,24 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
         return results;
     }
 
-    void* curl = acquireCurlHandle();
-    if (!curl) {
-        std::cerr << "[EmbeddingEngine] Ollama service unreachable. Falling back to local TfIdf.\n";
-        // Fallback for this batch
+    try {
+        ensureInferenceClient();
+    } catch (const std::exception& e) {
+        std::cerr << "[EmbeddingEngine] Inference client unavailable: " << e.what()
+                  << ". Falling back to local TfIdf.\n";
         std::vector<std::vector<float>> finalResults;
-        for (const auto& t : texts) finalResults.push_back(normalizeVector(embedTfIdf(t)));
+        for (const auto& t : texts) {
+            finalResults.push_back(normalizeVector(embedTfIdf(t)));
+        }
+        return finalResults;
+    }
+
+    if (!inference_client_) {
+        std::cerr << "[EmbeddingEngine] Inference service unreachable. Falling back to local TfIdf.\n";
+        std::vector<std::vector<float>> finalResults;
+        for (const auto& t : texts) {
+            finalResults.push_back(normalizeVector(embedTfIdf(t)));
+        }
         return finalResults;
     }
 
@@ -112,12 +90,11 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
     std::vector<std::vector<float>> finalResults;
     finalResults.reserve(texts.size());
 
-    // Phase 13 Hardening: Use micro-batches for efficiency
-    const size_t MAX_BATCH_SIZE = 10; 
-    const size_t MAX_CHAR_LIMIT = 8000; // Standard truncation (~2000 tokens)
-    
+    const size_t MAX_BATCH_SIZE = 10;
+    const size_t MAX_CHAR_LIMIT = 8000;
+
     for (size_t i = 0; i < texts.size(); i += MAX_BATCH_SIZE) {
-        if (method != Method::External) break; // Safety if changed during loop
+        if (method != Method::External) break;
 
         size_t end = std::min(i + MAX_BATCH_SIZE, texts.size());
         std::vector<std::string> microBatch;
@@ -129,50 +106,28 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
             }
         }
 
-        json payload;
-        payload["model"] = model;
-        payload["input"] = microBatch;
-        
-        std::string jsonStr = payload.dump();
-        std::string readBuffer;
+        Thoth::InferenceEmbedRequest request;
+        request.model = model;
+        request.inputs = microBatch;
 
-        const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
-                                      : Thoth::resolveInferenceEndpoints();
-        const std::string embedUrl =
-            Thoth::inferenceUrl(endpoints.embed_base_url, "/api/embed");
-        curl_easy_setopt(curl, CURLOPT_URL, embedUrl.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-
-        CURLcode res = curl_easy_perform(static_cast<CURL*>(curl));
-        bool microBatchSuccess = false;
-
-        if (res == CURLE_OK) {
-            try {
-                auto j = json::parse(readBuffer);
-                if (j.contains("embeddings") && j["embeddings"].is_array()) {
-                    for (const auto& emb : j["embeddings"]) {
-                        finalResults.push_back(normalizeVector(emb.get<std::vector<float>>()));
-                    }
-                    microBatchSuccess = true;
-                    // std::cout << "." << std::flush;
-                }
-            } catch (...) {
-                std::cerr << "\n[EmbeddingEngine] Ollama parse failed for batch starting at " << i << "\n";
+        const auto embedded = inference_client_->embed(request);
+        if (embedded.ok && embedded.embeddings.size() == microBatch.size()) {
+            for (const auto& vec : embedded.embeddings) {
+                finalResults.push_back(normalizeVector(vec));
             }
-        } else {
-            std::cerr << "\n[EmbeddingEngine] Ollama connection failed: " << curl_easy_strerror(res) << "\n";
+            continue;
         }
 
-        if (!microBatchSuccess) {
-            std::cerr << "[EmbeddingEngine] Falling back micro-batch items to TfIdf.\n";
-            for (const auto& text : microBatch) {
-                finalResults.push_back(normalizeVector(embedTfIdf(text)));
-            }
+        std::cerr << "[EmbeddingEngine] " << inference_client_->backendName() << " embed failed";
+        if (!embedded.error.empty()) {
+            std::cerr << ": " << embedded.error;
+        }
+        std::cerr << ". Falling back micro-batch items to TfIdf.\n";
+        for (const auto& text : microBatch) {
+            finalResults.push_back(normalizeVector(embedTfIdf(text)));
         }
     }
 
-    releaseCurlHandle(curl);
     return finalResults;
 }
 
@@ -209,8 +164,14 @@ std::vector<float> EmbeddingEngine::embedWordHash(const std::string& text) {
 }
 
 std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
-    void* curl = acquireCurlHandle();
-    if (!curl) return {};
+    try {
+        ensureInferenceClient();
+    } catch (...) {
+        return embedTfIdf(text);
+    }
+    if (!inference_client_) {
+        return embedTfIdf(text);
+    }
 
     const size_t MAX_CHAR_LIMIT = 8000;
     std::string safeText = text;
@@ -219,37 +180,15 @@ std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
         safeText = safeText.substr(0, MAX_CHAR_LIMIT);
     }
 
-    json payload;
-    payload["model"] = getModelName();
-    payload["input"] = safeText;
-    
-    std::string jsonStr = payload.dump();
-    std::string readBuffer;
+    Thoth::InferenceEmbedRequest request;
+    request.model = getModelName();
+    request.inputs = {safeText};
 
-    const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
-                                  : Thoth::resolveInferenceEndpoints();
-    const std::string embedUrl =
-        Thoth::inferenceUrl(endpoints.embed_base_url, "/api/embed");
-    curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_URL, embedUrl.c_str());
-    curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_POSTFIELDS, jsonStr.c_str());
-    curl_easy_setopt(static_cast<CURL*>(curl), CURLOPT_WRITEDATA, &readBuffer);
-
-    CURLcode res = curl_easy_perform(static_cast<CURL*>(curl));
-    if (res != CURLE_OK) {
-        releaseCurlHandle(curl);
-        return embedTfIdf(text);
+    const auto embedded = inference_client_->embed(request);
+    if (embedded.ok && !embedded.embeddings.empty()) {
+        return embedded.embeddings.front();
     }
 
-    try {
-        auto j = nlohmann::json::parse(readBuffer);
-        if (j.contains("embeddings") && j["embeddings"].is_array() && !j["embeddings"].empty()) {
-            auto result = j["embeddings"][0].get<std::vector<float>>();
-            releaseCurlHandle(curl);
-            return result;
-        }
-    } catch (...) {}
-
-    releaseCurlHandle(curl);
     return embedTfIdf(text);
 }
 
@@ -305,7 +244,7 @@ std::string EmbeddingEngine::getModelName() const {
 }
 
 int EmbeddingEngine::getDimension() const {
-    if (method == Method::External) return 768; // nomic-embed-text
+    if (method == Method::External) return 768;
     return VOCAB_SIZE;
 }
 

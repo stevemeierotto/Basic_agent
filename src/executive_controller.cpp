@@ -349,16 +349,25 @@ void ExecutiveController::clear_e2_strict_eval_context() {
 
 std::string ExecutiveController::execute_goal(const std::string& goal,
                                               const BenchmarkAttribution& benchmark) {
+    // Join any prior loop outside the lock (same pattern as ~ExecutiveController).
+    // Never unlock while a std::lock_guard still owns the mutex.
+    {
+        std::unique_ptr<std::thread> thread_to_join;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (loop_thread_) {
+                stop_requested_ = true;
+                thread_to_join = std::move(loop_thread_);
+            }
+        }
+        if (thread_to_join && thread_to_join->joinable()) {
+            thread_to_join->join();
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (loop_thread_) {
-            stop_requested_ = true;
-            mutex_.unlock(); 
-            if (loop_thread_->joinable()) loop_thread_->join();
-            mutex_.lock();
-            stop_requested_ = false;
-        }
-
+        stop_requested_ = false;
         revisions_count_ = 0;
         reflection_count_ = 0;
         plan_reused_ = false;
@@ -459,14 +468,22 @@ bool ExecutiveController::is_running() const {
 
 void ExecutiveController::resume_from_plan(const Plan& plan) {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (loop_thread_) {
-            stop_requested_ = true;
-            mutex_.unlock();
-            if (loop_thread_->joinable()) loop_thread_->join();
-            mutex_.lock();
-            stop_requested_ = false;
+        std::unique_ptr<std::thread> thread_to_join;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (loop_thread_) {
+                stop_requested_ = true;
+                thread_to_join = std::move(loop_thread_);
+            }
         }
+        if (thread_to_join && thread_to_join->joinable()) {
+            thread_to_join->join();
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_requested_ = false;
 
         current_plan_ = plan;
         current_plan_.updated_at_ms = nowMs();

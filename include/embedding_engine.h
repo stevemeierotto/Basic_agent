@@ -3,8 +3,13 @@
 #include <vector>
 #include <unordered_map>
 #include <mutex>
+#include <memory>
 
 class Config;
+
+namespace Thoth {
+class InferenceClient;
+}
 
 class EmbeddingEngine {
 public:
@@ -61,13 +66,8 @@ private:
     size_t hashToIndex(const std::string& term) const;
     float calculateIdf(const std::string& term) const;
 
-    // Helper implementations for pooled CURL
-    void* acquireCurlHandle();
-    void releaseCurlHandle(void* handle);
+    void ensureInferenceClient();
 
-    // CURL resources
-    std::vector<void*> curl_pool;
-    struct curl_slist* curl_headers;
+    std::unique_ptr<Thoth::InferenceClient> inference_client_;
     mutable std::mutex engineMutex;
-    bool initCurl();
 };

@@ -12,8 +12,12 @@
 #include <string>
 #include <mutex>
 #include <cstdint>
-#include <curl/curl.h>
+#include <memory>
 #include "config.h"
+
+namespace Thoth {
+class InferenceClient;
+}
 
 enum class LLMBackend {
     Ollama,
@@ -59,22 +63,16 @@ private:
     static LlmTokenUsage parseOllamaTokenUsage(const std::string& rawJson);
     static LlmTokenUsage parseOpenAiTokenUsage(const std::string& rawJson);
 
+    void ensureInferenceClient();
     std::string detectOllamaModel();
     std::string resolveOllamaModel();
 
     LLMBackend backend;
     Config* config;
-    CURL* curl = nullptr;
-    struct curl_slist* headers = nullptr;
+    std::unique_ptr<Thoth::InferenceClient> inference_client_;
     std::string selectedModel; 
     mutable std::recursive_mutex llmMutex;
     LlmTokenUsage last_call_usage_;
     LlmTokenUsage session_usage_;
-
-    static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-        ((std::string*)userp)->append((char*)contents, size * nmemb);
-        return size * nmemb;
-    }
-
 };
 

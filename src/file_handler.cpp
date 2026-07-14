@@ -19,11 +19,15 @@ std::string FileHandler::getProjectRoot() const {
 
     try {
         fs::path current = fs::current_path();
-        while (current.has_parent_path()) {
+        while (true) {
             if (fs::exists(current / "GEMINI.md") || fs::exists(current / ".git")) {
                 return fs::absolute(current).lexically_normal().string();
             }
-            current = current.parent_path();
+            const fs::path parent = current.parent_path();
+            if (parent == current) {
+                break;  // filesystem root — terminate walk
+            }
+            current = parent;
         }
 
         fs::path exePath = fs::canonical("/proc/self/exe");

@@ -10,6 +10,7 @@
 #include "config.h"
 #include "env_loader.h"
 #include "file_handler.h"
+#include "inference_client.h"
 #include "inference_endpoint.h"
 
 #include <cstdlib>
@@ -60,9 +61,16 @@ void logResolvedRuntimeConfig(const Config* config) {
     const auto endpoints = config != nullptr ? resolveInferenceEndpoints(*config)
                                            : resolveInferenceEndpoints();
 
+    std::string backend_error;
+    const auto backend = tryResolveInferenceBackend(backend_error);
+    const std::string backend_name =
+        backend ? inferenceBackendName(*backend)
+                : (backend_error.empty() ? "unknown" : "invalid");
+
     std::cerr << "[Thoth] project_root=" << fileHandler.getProjectRoot() << '\n'
               << "[Thoth] workspace=" << fileHandler.getAgentWorkspacePath() << '\n'
               << "[Thoth] logs=" << fileHandler.getLogsPath() << '\n'
+              << "[Thoth] inference_backend=" << backend_name << '\n'
               << "[Thoth] inference_base=" << endpoints.base_url << '\n'
               << "[Thoth] embed_base=" << endpoints.embed_base_url << '\n'
               << "[Thoth] database="

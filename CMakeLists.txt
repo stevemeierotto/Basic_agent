@@ -28,6 +28,10 @@ if(NOT DEFINED THOTH_BUILD_ENGINE)
     set(THOTH_BUILD_ENGINE ON)
 endif()
 
+if(NOT DEFINED THOTH_ENGINE_VERSION)
+    set(THOTH_ENGINE_VERSION "0.2")
+endif()
+
 # List source files for the library
 set(BASIC_AGENT_SOURCES
     src/command_processor.cpp
@@ -37,6 +41,11 @@ set(BASIC_AGENT_SOURCES
     src/llm_planner.cpp
     src/embedding_engine.cpp
     src/inference_endpoint.cpp
+    src/inference_client.cpp
+    src/inference_http.cpp
+    src/ollama_client.cpp
+    src/llama_server_client.cpp
+    src/mock_inference_client.cpp
     src/runtime_bootstrap.cpp
     src/env_loader.cpp
     src/flat_vector_store.cpp
@@ -87,6 +96,9 @@ set(BASIC_AGENT_SOURCES
     src/web_scrape_tool.cpp
     src/chunker/chunker.cpp
     src/basic_agent_plugin.cpp
+    src/engine_runtime.cpp
+    src/engine_event.cpp
+    src/engine_error.cpp
     src/benchmark_runner.cpp
     src/benchmark_reporter.cpp
     src/benchmark_case_registry.cpp
@@ -111,6 +123,10 @@ set(BASIC_AGENT_SOURCES
     src/trajectory_ablation.cpp
 )
 
+if(THOTH_BUILD_ENGINE)
+    list(APPEND BASIC_AGENT_SOURCES src/engine_http_transport.cpp src/engine_sse_session.cpp)
+endif()
+
 # E2 evaluation kernel — no rag.cpp / runtime heuristics (docs/E2_PROTOCOL.md § Link isolation)
 set(E2_EVAL_KERNEL_SOURCES
     src/episodic_learning_eval.cpp
@@ -131,6 +147,30 @@ set_target_properties(e2_eval_kernel PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Create the shared library
 add_library(basic_agent ${BASIC_AGENT_SOURCES})
 target_link_libraries(basic_agent PUBLIC e2_eval_kernel PRIVATE CURL::libcurl SQLite::SQLite3)
+
+if(THOTH_BUILD_ENGINE)
+    find_package(Threads REQUIRED)
+    find_package(Git QUIET)
+    set(THOTH_GIT_SHA_VALUE "unknown")
+    if(GIT_FOUND)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE THOTH_GIT_SHA_VALUE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+    if(NOT THOTH_GIT_SHA_VALUE)
+        set(THOTH_GIT_SHA_VALUE "unknown")
+    endif()
+
+    target_compile_definitions(basic_agent PRIVATE
+        THOTH_ENGINE_VERSION="${THOTH_ENGINE_VERSION}"
+        THOTH_GIT_SHA="${THOTH_GIT_SHA_VALUE}")
+    target_include_directories(basic_agent PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+    target_link_libraries(basic_agent PRIVATE Threads::Threads)
+endif()
 
 # Benchmark Tool
 add_executable(run_grag_benchmark src/run_grag_benchmark.cpp)

@@ -1,5 +1,6 @@
 #include "../include/llm_interface.h"
 #include "../include/decision_trace.h"
+#include "../include/inference_client.h"
 #include "../include/inference_endpoint.h"
 #include "../include/test_suite_dev.h"
 #include "../include/robustness_mock_responses.h"
@@ -17,6 +18,11 @@ namespace {
 
 std::int64_t estimateTokensFromText(const std::string& text) {
     return static_cast<std::int64_t>((text.size() + 3) / 4);
+}
+
+size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    ((std::string*)userp)->append((char*)contents, size * nmemb);
+    return size * nmemb;
 }
 
 } // namespace
@@ -113,71 +119,91 @@ static std::string redactSensitiveText(const std::string& input) {
     return output;
 }
 
+static std::string formatInferenceGenerateError(const Thoth::InferenceClient& client,
+                                                const Config* config,
+                                                const std::string& detail) {
+    const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
+                                  : Thoth::resolveInferenceEndpoints();
+    const std::string redacted = redactSensitiveText(detail);
+    const std::string& backend = client.backendName();
 
-// Constructor
+    const bool connection_like =
+        detail.find("Couldn't connect") != std::string::npos
+        || detail.find("connect to server") != std::string::npos
+        || detail.find("Connection refused") != std::string::npos
+        || detail.find("Failed to connect") != std::string::npos;
+
+    if (backend == "llama_cpp") {
+        if (connection_like) {
+            return std::string("Assistant: [Error] llama_cpp: Unable to connect to llama-server at ")
+                   + endpoints.base_url;
+        }
+        return std::string("Assistant: [Error] llama_cpp: ") + redacted;
+    }
+
+    if (backend == "ollama") {
+        if (connection_like) {
+            return std::string("Assistant: [Error] ollama: Unable to connect to inference server at ")
+                   + endpoints.base_url;
+        }
+        return std::string("Assistant: [Error] ollama: ") + redacted;
+    }
+
+    if (connection_like) {
+        return std::string(
+                   "Assistant: [Error] Inference request failed: Unable to connect to inference server at ")
+               + endpoints.base_url;
+    }
+
+    return std::string("Assistant: [Error] Inference request failed: ") + redacted;
+}
+
+void LLMInterface::ensureInferenceClient() {
+    if (inference_client_) {
+        return;
+    }
+    const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
+                                  : Thoth::resolveInferenceEndpoints();
+    inference_client_ = Thoth::createInferenceClient(endpoints, config);
+}
+
 LLMInterface::LLMInterface(LLMBackend b, Config* cfg)
     : backend(b),
       config(cfg),
-      curl(nullptr),
-      headers(nullptr),
-    selectedModel("")
-{
+      selectedModel("") {
     if (backend == LLMBackend::Ollama) {
-        curl = curl_easy_init();
-        if (!curl) {
+        try {
+            ensureInferenceClient();
+        } catch (const std::exception& e) {
             DecisionTraceLogger traceLogger;
             DecisionTrace trace = traceLogger.startTrace("llm_init_error", 0);
-            traceLogger.finishTrace(trace, false, "Failed to initialize CURL handle for Ollama");
+            traceLogger.finishTrace(trace, false, std::string("Inference client init failed: ") + e.what());
             traceLogger.writeTrace(trace);
-            // We don't throw here to allow graceful degradation, but we log.
-        } else {
-            headers = curl_slist_append(nullptr, "Content-Type: application/json");
-            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         }
     }
 }
 
 std::string LLMInterface::detectOllamaModel() {
     std::lock_guard<std::recursive_mutex> lock(llmMutex);
-    if (!curl) return "";
-
     try {
-        const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
-                                      : Thoth::resolveInferenceEndpoints();
-        const std::string tagsUrl = Thoth::inferenceUrl(endpoints.base_url, "/api/tags");
-        curl_easy_setopt(curl, CURLOPT_URL, tagsUrl.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
-        curl_easy_setopt(curl, CURLOPT_POST, 0L);
-
-        std::string readBuffer;
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-
-        CURLcode res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-            return "";
-        }
-
-        auto j = json::parse(readBuffer);
-        if (j.contains("models") && j["models"].is_array()) {
-            for (const auto& model : j["models"]) {
-                if (model.contains("name") && model["name"].is_string()) {
-                    std::string name = model["name"].get<std::string>();
-                    if (!name.empty()) return name;
-                }
-            }
-        }
+        ensureInferenceClient();
     } catch (...) {
         return "";
     }
+    if (!inference_client_) {
+        return "";
+    }
 
-    return "";
+    const auto health = inference_client_->health();
+    if (!health.reachable || health.available_models.empty()) {
+        return "";
+    }
+    return health.available_models.front();
 }
 
 std::string LLMInterface::resolveOllamaModel() {
     if (!selectedModel.empty()) return selectedModel;
 
-    // 1. Check config first
     if (config && !config->llm_model.empty()) {
         selectedModel = config->llm_model;
         return selectedModel;
@@ -193,49 +219,22 @@ std::string LLMInterface::resolveOllamaModel() {
     return selectedModel;
 }
 
-LLMInterface::~LLMInterface() {
-    std::lock_guard<std::recursive_mutex> lock(llmMutex);
-    if (headers) curl_slist_free_all(headers);
-    if (curl) curl_easy_cleanup(curl);
-    headers = nullptr;
-    curl = nullptr;
-}
+LLMInterface::~LLMInterface() = default;
 
 void LLMInterface::setBackend(LLMBackend b) {
     std::lock_guard<std::recursive_mutex> lock(llmMutex);
-    if (backend == b) return; // no-op if same backend
+    if (backend == b) return;
     backend = b;
-
-    // Clean up old handles if switching to a different backend
-    if (curl) curl_easy_cleanup(curl);
-    if (headers) curl_slist_free_all(headers);
-
-    curl = nullptr;
-    headers = nullptr;
+    inference_client_.reset();
 
     if (backend == LLMBackend::Ollama) {
-        curl = curl_easy_init();
-        if (curl) {
-            headers = curl_slist_append(nullptr, "Content-Type: application/json");
-            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-
-            // Bound the request so a stalled/unresponsive Ollama can never block
-            // the calling (worker) thread indefinitely — an unbounded curl call
-            // here previously froze the control panel during memory
-            // consolidation. The default is generous (slow local models can take
-            // minutes) but finite; override with THOTH_LLM_TIMEOUT_SECONDS.
-            long timeoutSeconds = 600;
-            if (const char* env = std::getenv("THOTH_LLM_TIMEOUT_SECONDS")) {
-                try {
-                    const long parsed = std::stol(env);
-                    if (parsed > 0) timeoutSeconds = parsed;
-                } catch (...) {
-                    // keep default on malformed override
-                }
-            }
-            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-            curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeoutSeconds);
+        try {
+            ensureInferenceClient();
+        } catch (const std::exception& e) {
+            DecisionTraceLogger traceLogger;
+            DecisionTrace trace = traceLogger.startTrace("llm_init_error", 0);
+            traceLogger.finishTrace(trace, false, std::string("Inference client init failed: ") + e.what());
+            traceLogger.writeTrace(trace);
         }
     }
 }
@@ -286,17 +285,22 @@ std::string LLMInterface::query(const std::string& prompt, int num_predict_overr
     }
 }
 
-
 std::string LLMInterface::askOllama(const std::string& prompt) {
     return askOllama(prompt, -1);
 }
 
 std::string LLMInterface::askOllama(const std::string& prompt, int num_predict_override) {
     std::lock_guard<std::recursive_mutex> lock(llmMutex);
-    if (!curl) return "Assistant: [Error] Ollama CURL handle not initialized.";
+    try {
+        ensureInferenceClient();
+    } catch (const std::exception& e) {
+        return std::string("Assistant: [Error] Inference client unavailable: ") + e.what();
+    }
+    if (!inference_client_) {
+        return "Assistant: [Error] Inference client not initialized.";
+    }
 
     try {
-        // Pull dynamic parameters from Config
         double temperature = config ? config->temperature : 0.7;
         double topP        = config ? config->top_p : 1.0;
         int maxTokens      = config ? config->max_tokens : 2048;
@@ -304,98 +308,54 @@ std::string LLMInterface::askOllama(const std::string& prompt, int num_predict_o
             maxTokens = num_predict_override;
         }
         std::string model = resolveOllamaModel();
-        
+
         if (model.empty()) {
-            return "Assistant: [Error] No Ollama model detected. Pull one first (e.g. 'ollama pull qwen2.5:3b') or set OLLAMA_MODEL.";
+            return "Assistant: [Error] No inference model configured. Set llm_model, OLLAMA_MODEL, or ensure the inference service is reachable.";
         }
 
-        auto callGenerate = [&](const std::string& modelName, std::string& rawOut, std::string& errorOut) -> std::string {
-            json payload;
-            payload["model"] = modelName;
-            payload["prompt"] = prompt;
-            payload["stream"] = false;
-            payload["options"] = {
-                {"temperature", temperature},
-                {"top_p", topP},
-                {"num_predict", maxTokens},
-            };
-            std::string jsonStr = payload.dump();
+        Thoth::InferenceGenerateRequest request;
+        request.model = model;
+        request.prompt = prompt;
+        request.temperature = temperature;
+        request.top_p = topP;
+        request.max_tokens = maxTokens;
 
-            const auto endpoints = config ? Thoth::resolveInferenceEndpoints(*config)
-                                          : Thoth::resolveInferenceEndpoints();
-            const std::string generateUrl =
-                Thoth::inferenceUrl(endpoints.base_url, "/api/generate");
-            curl_easy_setopt(curl, CURLOPT_URL, generateUrl.c_str());
-            curl_easy_setopt(curl, CURLOPT_HTTPGET, 0L);
-            curl_easy_setopt(curl, CURLOPT_POST, 1L);
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonStr.c_str());
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, jsonStr.size());
-
-            rawOut.clear();
-            errorOut.clear();
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &rawOut);
-
-            CURLcode res = curl_easy_perform(curl);
-            if (res != CURLE_OK) {
-                errorOut = std::string("CURL error: ") + curl_easy_strerror(res);
-                return "";
-            }
-
-            try {
-                auto j = json::parse(rawOut);
-                if (j.contains("response") && j["response"].is_string()) {
-                    return j["response"].get<std::string>();
-                }
-                if (j.contains("message") && j["message"].is_object() && j["message"].contains("content")) {
-                    return j["message"]["content"].get<std::string>();
-                }
-                if (j.contains("error") && j["error"].is_string()) {
-                    errorOut = j["error"].get<std::string>();
-                    return "";
-                }
-            } catch (const std::exception& e) {
-                errorOut = std::string("JSON parse error: ") + e.what();
-                return "";
-            }
-
-            errorOut = "Malformed response from Ollama.";
-            return "";
-        };
-
-        std::string raw;
-        std::string err;
-        std::string response = callGenerate(model, raw, err);
-        
-        if (response.empty() && err.find("not found") != std::string::npos) {
+        auto generated = inference_client_->generate(request);
+        if (!generated.ok && generated.error.find("not found") != std::string::npos) {
             const std::string detected = detectOllamaModel();
             if (!detected.empty() && detected != model) {
                 selectedModel = detected;
-                response = callGenerate(selectedModel, raw, err);
+                request.model = selectedModel;
+                generated = inference_client_->generate(request);
             }
         }
 
-        if (response.empty()) {
+        if (!generated.ok) {
             DecisionTraceLogger traceLogger;
-            DecisionTrace trace = traceLogger.startTrace("ollama_error", prompt.size());
-            traceLogger.finishTrace(trace, false, std::string("Ollama failure: ") + err);
+            DecisionTrace trace = traceLogger.startTrace("inference_error", prompt.size());
+            traceLogger.finishTrace(trace, false, std::string("Inference failure: ") + generated.error);
             traceLogger.writeTrace(trace);
-            return std::string("Assistant: [Error] Ollama failed: ") + redactSensitiveText(err);
+            return formatInferenceGenerateError(*inference_client_, config, generated.error);
         }
 
-        LlmTokenUsage usage = parseOllamaTokenUsage(raw);
+        LlmTokenUsage usage = generated.token_usage;
+        if (!generated.raw_json.empty() && usage.total_tokens <= 0) {
+            usage = parseOllamaTokenUsage(generated.raw_json);
+        }
         if (usage.total_tokens <= 0) {
-            usage = estimateTokenUsage(prompt, response);
+            usage = parseOpenAiTokenUsage(generated.raw_json);
+        }
+        if (usage.total_tokens <= 0) {
+            usage = estimateTokenUsage(prompt, generated.text);
         }
         recordTokenUsage(usage);
-        return response;
+        return generated.text;
 
     } catch (const std::exception& e) {
-        return std::string("Assistant: [Error] Ollama interface exception: ") + e.what();
+        return std::string("Assistant: [Error] Inference request failed: ") + e.what();
     }
 }
 
-
-// ---- OpenAI backend ----
 std::string LLMInterface::askOpenAI(const std::string& prompt) {
     CURL* curl_local = curl_easy_init();
     std::string readBuffer;
