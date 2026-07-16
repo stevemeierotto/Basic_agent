@@ -135,6 +135,16 @@ InferenceGenerateResult OllamaClient::generate(const InferenceGenerateRequest& r
         return result;
     }
 
+    const std::string url = inferenceUrl(base_url_, "/api/generate");
+    const auto http = inferenceHttpPost(url, serializeGeneratePayload(request), llmTimeoutSeconds());
+    if (!http.ok) {
+        result.error = http.error.empty() ? http.body : http.error;
+        return result;
+    }
+    return parseGenerateResponse(http.body);
+}
+
+std::string OllamaClient::serializeGeneratePayload(const InferenceGenerateRequest& request) {
     json payload;
     payload["model"] = request.model;
     payload["prompt"] = request.prompt;
@@ -144,14 +154,11 @@ InferenceGenerateResult OllamaClient::generate(const InferenceGenerateRequest& r
         {"top_p", request.top_p},
         {"num_predict", request.max_tokens},
     };
-
-    const std::string url = inferenceUrl(base_url_, "/api/generate");
-    const auto http = inferenceHttpPost(url, payload.dump(), llmTimeoutSeconds());
-    if (!http.ok) {
-        result.error = http.error.empty() ? http.body : http.error;
-        return result;
+    // Top-level stop is the documented Ollama /api/generate field; omit when empty.
+    if (!request.stop_sequences.empty()) {
+        payload["stop"] = request.stop_sequences;
     }
-    return parseGenerateResponse(http.body);
+    return payload.dump();
 }
 
 InferenceEmbedResult OllamaClient::embed(const InferenceEmbedRequest& request) {

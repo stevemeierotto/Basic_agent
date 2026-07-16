@@ -133,6 +133,16 @@ InferenceGenerateResult LlamaServerClient::generate(const InferenceGenerateReque
         return result;
     }
 
+    const std::string url = inferenceUrl(base_url_, "/v1/completions");
+    const auto http = inferenceHttpPost(url, serializeGeneratePayload(request), llmTimeoutSeconds());
+    if (!http.ok) {
+        result.error = http.error.empty() ? http.body : http.error;
+        return result;
+    }
+    return parseCompletionResponse(http.body);
+}
+
+std::string LlamaServerClient::serializeGeneratePayload(const InferenceGenerateRequest& request) {
     json payload;
     payload["model"] = request.model;
     payload["prompt"] = request.prompt;
@@ -140,14 +150,10 @@ InferenceGenerateResult LlamaServerClient::generate(const InferenceGenerateReque
     payload["temperature"] = request.temperature;
     payload["top_p"] = request.top_p;
     payload["stream"] = false;
-
-    const std::string url = inferenceUrl(base_url_, "/v1/completions");
-    const auto http = inferenceHttpPost(url, payload.dump(), llmTimeoutSeconds());
-    if (!http.ok) {
-        result.error = http.error.empty() ? http.body : http.error;
-        return result;
+    if (!request.stop_sequences.empty()) {
+        payload["stop"] = request.stop_sequences;
     }
-    return parseCompletionResponse(http.body);
+    return payload.dump();
 }
 
 InferenceEmbedResult LlamaServerClient::embed(const InferenceEmbedRequest& request) {

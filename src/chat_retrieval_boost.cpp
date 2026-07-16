@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <regex>
 #include <sstream>
@@ -278,6 +279,51 @@ std::vector<std::pair<CodeChunk, float>> selectTopKForInjection(
     syncBreakdownOrder(diagnostics, selected);
     diagnostics.chunks_retrieved = static_cast<int>(selected.size());
     return selected;
+}
+
+GroundingFloorResult applyGroundingFloor(
+    const std::vector<CodeChunk>& chunks,
+    const GragDiagnostics& diagnostics,
+    float minFinalScore) {
+    GroundingFloorResult result;
+    result.diagnostics = diagnostics;
+    result.diagnostics.breakdowns.clear();
+    result.diagnostics.final_scores.clear();
+
+    result.stats.candidates_found = static_cast<int>(chunks.size());
+
+    bool sawFiniteScore = false;
+    bool sawInjected = false;
+    for (std::size_t i = 0; i < chunks.size(); ++i) {
+        const bool hasBreakdown = i < diagnostics.breakdowns.size();
+        const float score = hasBreakdown ? diagnostics.breakdowns[i].final_score : 0.0f;
+        const bool valid = hasBreakdown && !std::isnan(score);
+
+        if (valid) {
+            if (!sawFiniteScore || score > result.stats.max_score) {
+                result.stats.max_score = score;
+            }
+            sawFiniteScore = true;
+        }
+
+        // Fail closed: reject missing / NaN scores and anything below the floor.
+        if (!valid || score < minFinalScore) {
+            continue;
+        }
+
+        result.injectable.push_back(chunks[i]);
+        result.diagnostics.breakdowns.push_back(diagnostics.breakdowns[i]);
+        result.diagnostics.final_scores.push_back(score);
+
+        if (!sawInjected || score < result.stats.min_injected_score) {
+            result.stats.min_injected_score = score;
+        }
+        sawInjected = true;
+    }
+
+    result.stats.has_candidates = sawFiniteScore;
+    result.stats.candidates_passed_gate = static_cast<int>(result.injectable.size());
+    return result;
 }
 
 std::string formatChunkForPrompt(const CodeChunk& chunk) {

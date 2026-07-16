@@ -13,6 +13,7 @@
 #include <mutex>
 #include <cstdint>
 #include <memory>
+#include <vector>
 #include "config.h"
 
 namespace Thoth {
@@ -39,11 +40,18 @@ public:
     // Internal helpers
     std::string askOllama(const std::string& prompt);
     std::string askOllama(const std::string& prompt, int num_predict_override);
+    std::string askOllama(const std::string& prompt,
+                          int num_predict_override,
+                          const std::vector<std::string>& stop_sequences);
     std::string askOpenAI(const std::string& prompt);
 
     std::string query(const std::string& prompt);
-    /** @param num_predict_override Ollama num_predict; -1 uses config->max_tokens. */
+    /** @param num_predict_override Ollama/llama num_predict; -1 uses config->max_tokens. */
     std::string query(const std::string& prompt, int num_predict_override);
+    /** Plan M G3 — chat path may pass stop sequences (empty = omit). */
+    std::string query(const std::string& prompt,
+                      int num_predict_override,
+                      const std::vector<std::string>& stop_sequences);
     LLMBackend getBackend() const { return backend; }
     
     // Allow switching dynamically

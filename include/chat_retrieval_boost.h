@@ -52,6 +52,39 @@ std::vector<std::pair<CodeChunk, float>> selectTopKForInjection(
 /** Format a chunk with document metadata for LLM context (injection-time only). */
 std::string formatChunkForPrompt(const CodeChunk& chunk);
 
+/** Plan M G1 (R1) — stats from applying the fail-closed grounding floor. */
+struct GroundingFloorStats {
+    int candidates_found = 0;       // pre-floor candidate count
+    int candidates_passed_gate = 0; // post-floor (injected) count
+    bool has_candidates = false;    // true when at least one candidate had a finite score
+    float max_score = 0.0f;         // max finite candidate score (valid iff has_candidates)
+    float min_injected_score = 0.0f;// min injected score (valid iff candidates_passed_gate > 0)
+};
+
+/** Plan M G1 (R1) — result of applying the grounding floor. */
+struct GroundingFloorResult {
+    std::vector<CodeChunk> injectable;   // chunks that passed the floor, original order
+    GragDiagnostics diagnostics;         // filtered + aligned with `injectable`
+    GroundingFloorStats stats;
+};
+
+/**
+ * Fail-closed relevance floor (Plan M G1 / R1).
+ *
+ * Keeps chunks whose aligned post-boost final_score is finite and >= minFinalScore.
+ * Missing or NaN scores are rejected (fail closed). The returned diagnostics are a
+ * copy of `diagnostics` with breakdowns/final_scores filtered to match `injectable`,
+ * so downstream metric builders stay index-aligned.
+ *
+ * This is a floor to keep zero / near-zero / broken scores from grounding — not a
+ * calibrated meaningful-relevance gate. Greeting handling and any stronger threshold
+ * are deferred to later Plan M checkpoints.
+ */
+GroundingFloorResult applyGroundingFloor(
+    const std::vector<CodeChunk>& chunks,
+    const GragDiagnostics& diagnostics,
+    float minFinalScore);
+
 } // namespace ChatRetrieval
 } // namespace Thoth
 

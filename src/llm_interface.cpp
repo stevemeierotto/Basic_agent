@@ -240,7 +240,7 @@ void LLMInterface::setBackend(LLMBackend b) {
 }
 
 std::string LLMInterface::query(const std::string& prompt) {
-    return query(prompt, -1);
+    return query(prompt, -1, {});
 }
 
 static bool envTruthy(const char* name) {
@@ -253,6 +253,12 @@ static bool envTruthy(const char* name) {
 }
 
 std::string LLMInterface::query(const std::string& prompt, int num_predict_override) {
+    return query(prompt, num_predict_override, {});
+}
+
+std::string LLMInterface::query(const std::string& prompt,
+                                int num_predict_override,
+                                const std::vector<std::string>& stop_sequences) {
     try {
         if (auto scripted = Thoth::RobustnessMockResponses::pop()) {
             const std::string response = *scripted;
@@ -270,7 +276,7 @@ std::string LLMInterface::query(const std::string& prompt, int num_predict_overr
             return response;
         }
         if (backend == LLMBackend::Ollama) {
-            return askOllama(prompt, num_predict_override);
+            return askOllama(prompt, num_predict_override, stop_sequences);
         } else {
             return askOpenAI(prompt);
         }
@@ -286,10 +292,16 @@ std::string LLMInterface::query(const std::string& prompt, int num_predict_overr
 }
 
 std::string LLMInterface::askOllama(const std::string& prompt) {
-    return askOllama(prompt, -1);
+    return askOllama(prompt, -1, {});
 }
 
 std::string LLMInterface::askOllama(const std::string& prompt, int num_predict_override) {
+    return askOllama(prompt, num_predict_override, {});
+}
+
+std::string LLMInterface::askOllama(const std::string& prompt,
+                                    int num_predict_override,
+                                    const std::vector<std::string>& stop_sequences) {
     std::lock_guard<std::recursive_mutex> lock(llmMutex);
     try {
         ensureInferenceClient();
@@ -319,6 +331,7 @@ std::string LLMInterface::askOllama(const std::string& prompt, int num_predict_o
         request.temperature = temperature;
         request.top_p = topP;
         request.max_tokens = maxTokens;
+        request.stop_sequences = stop_sequences;
 
         auto generated = inference_client_->generate(request);
         if (!generated.ok && generated.error.find("not found") != std::string::npos) {

@@ -24,6 +24,9 @@ public:
     static InferenceEmbedResult parseEmbedResponse(const std::string& raw_json);
     static InferenceHealthResult parseTagsResponse(const std::string& raw_json);
 
+    /** Plan M G3 — serialize generate payload (for tests + generate()). */
+    static std::string serializeGeneratePayload(const InferenceGenerateRequest& request);
+
 private:
     std::string base_url_;
     std::string embed_base_url_;

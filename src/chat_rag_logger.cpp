@@ -90,6 +90,17 @@ nlohmann::json ChatRagLogger::contextToJson(const ChatRagContextRecord& record) 
         {"memory_ratio", record.memory_ratio},
         {"llm_model", record.llm_model},
         {"grounding_mode", record.grounding_mode},
+        {"retrieval_ran", record.retrieval_ran},
+        {"retrieval_skip_reason", record.retrieval_skip_reason},
+        {"candidates_found", record.candidates_found},
+        {"candidates_passed_gate", record.candidates_passed_gate},
+        {"grounding_decision_reason", record.grounding_decision_reason},
+        {"grounded", record.grounded},
+        {"max_score", record.has_candidate_scores ? nlohmann::json(record.max_score)
+                                                  : nlohmann::json(nullptr)},
+        {"min_injected_score", record.has_injected_scores
+                                   ? nlohmann::json(record.min_injected_score)
+                                   : nlohmann::json(nullptr)},
     };
 }
 

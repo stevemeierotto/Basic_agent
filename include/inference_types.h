@@ -20,6 +20,8 @@ struct InferenceGenerateRequest {
     double temperature = 0.7;
     double top_p = 1.0;
     int max_tokens = 2048;
+    /** Plan M G3 — optional stop sequences; empty means omit from provider payload. */
+    std::vector<std::string> stop_sequences;
 };
 
 struct InferenceGenerateResult {

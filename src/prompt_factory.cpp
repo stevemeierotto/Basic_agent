@@ -152,6 +152,7 @@ std::string PromptFactory::assembleConversationSections(const std::string& user_
         systemPrompt = systemPrompt.substr(0, Thoth::ChatPrompt::kMaxSystemPromptChars);
     }
 
+    const std::string antiTranscript = std::string(Thoth::ChatPrompt::kAntiTranscriptRules);
     const std::string groundingRules =
         options.grounded ? std::string(Thoth::ChatPrompt::kGroundingRules) : "";
     const std::string toolList =
@@ -159,9 +160,11 @@ std::string PromptFactory::assembleConversationSections(const std::string& user_
     std::string memoryContext = getMemoryContext(useExtendedSummary);
     std::string conversationHistory = getConversationHistory();
 
-    const std::string userBlock = "[User] " + user_input + "\n[Agent] ";
+    // Plan M G3 cue B: no open [Agent] completion slot.
+    const std::string userBlock = Thoth::ChatPrompt::formatUserBlock(user_input);
 
-    const std::size_t coreBytes = groundingRules.size() + systemPrompt.size() + userBlock.size() + 8;
+    const std::size_t coreBytes =
+        antiTranscript.size() + groundingRules.size() + systemPrompt.size() + userBlock.size() + 8;
 
     auto trimFromStart = [](std::string& text, std::size_t targetSize) {
         if (text.size() <= targetSize) {
@@ -214,6 +217,7 @@ std::string PromptFactory::assembleConversationSections(const std::string& user_
     }
 
     std::ostringstream assembled;
+    assembled << antiTranscript << "\n";
     if (!groundingRules.empty()) {
         assembled << groundingRules << "\n";
     }
@@ -233,7 +237,7 @@ std::string PromptFactory::assembleConversationSections(const std::string& user_
 
     if (metrics) {
         metrics->system_prompt_chars = systemPrompt.size();
-        metrics->grounding_rules_chars = groundingRules.size();
+        metrics->grounding_rules_chars = groundingRules.size() + antiTranscript.size();
         metrics->tool_schema_chars = toolList.size();
         metrics->tools_included = toolsIncluded;
         metrics->tool_schema_chars_in_final = toolsIncluded ? toolList.size() : 0;
@@ -279,10 +283,13 @@ std::string PromptFactory::buildChatPrompt(const std::string& user_input,
     if (systemPrompt.size() > Thoth::ChatPrompt::kMaxSystemPromptChars) {
         systemPrompt = systemPrompt.substr(0, Thoth::ChatPrompt::kMaxSystemPromptChars);
     }
+    const std::string antiTranscript = std::string(Thoth::ChatPrompt::kAntiTranscriptRules);
     const std::string groundingRules =
         effectiveOptions.grounded ? std::string(Thoth::ChatPrompt::kGroundingRules) : "";
-    const std::string userBlock = "[User] " + user_input + "\n[Agent] ";
-    const std::size_t minCore = groundingRules.size() + systemPrompt.size() + userBlock.size() + 8;
+    // Plan M G3 cue B: no open [Agent] completion slot.
+    const std::string userBlock = Thoth::ChatPrompt::formatUserBlock(user_input);
+    const std::size_t minCore =
+        antiTranscript.size() + groundingRules.size() + systemPrompt.size() + userBlock.size() + 8;
 
     std::size_t ragBudget = 0;
     if (!ragContext.empty() && totalBudget > minCore + ragHeaderChars) {

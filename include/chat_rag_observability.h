@@ -64,6 +64,19 @@ struct ChatRagContextRecord {
     float memory_ratio = 0.0f;
     std::string llm_model;
     std::string grounding_mode;
+
+    // Plan M G1 (R1) — grounding gate telemetry (attempt vs success).
+    bool retrieval_ran = false;
+    std::string retrieval_skip_reason = "none";  // none | greeting | no_index
+    int candidates_found = 0;                     // pre-floor candidate count
+    int candidates_passed_gate = 0;               // post-floor (injected) count
+    std::string grounding_decision_reason;        // injected_meaningful_hits | below_threshold
+                                                  // | greeting_skip | empty_index | no_candidates
+    bool grounded = false;                        // aligned with grounding_mode
+    bool has_candidate_scores = false;            // true when max_score is meaningful
+    float max_score = 0.0f;                        // max finite candidate score
+    bool has_injected_scores = false;             // true when min_injected_score is meaningful
+    float min_injected_score = 0.0f;               // min injected score
 };
 
 struct ChatRagResponseRecord {

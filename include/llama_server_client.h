@@ -23,6 +23,9 @@ public:
     static InferenceGenerateResult parseCompletionResponse(const std::string& raw_json);
     static InferenceEmbedResult parseEmbeddingsResponse(const std::string& raw_json);
 
+    /** Plan M G3 — serialize generate payload (for tests + generate()). */
+    static std::string serializeGeneratePayload(const InferenceGenerateRequest& request);
+
 private:
     std::string base_url_;
     std::string embed_base_url_;

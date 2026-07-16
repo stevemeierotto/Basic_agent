@@ -15,6 +15,9 @@ namespace Thoth {
 /** True when the user message likely requests tool execution (not plain Q&A). */
 bool looksLikeToolIntent(const std::string& query);
 
+/** True when the user message is an exact greeting/chit-chat phrase that should skip retrieval. */
+bool isGreetingSkipQuery(const std::string& query);
+
 } // namespace Thoth
 
 #endif // THOTH_CHAT_QUERY_UTILS_H

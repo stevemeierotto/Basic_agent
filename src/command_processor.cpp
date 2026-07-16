@@ -8,7 +8,9 @@
 #include "decision_trace.h"
 #include "chat_rag_observability.h"
 #include "chat_retrieval_boost.h"
+#include "chat_retrieval_config.h"
 #include "chat_query_utils.h"
+#include "chat_prompt_config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -387,6 +389,12 @@ std::string CommandProcessor::processQuery(const std::string& input) {
                 promptMetrics,
                 llmModel,
                 "no_index");
+            contextRecord.retrieval_ran = false;
+            contextRecord.retrieval_skip_reason = "no_index";
+            contextRecord.candidates_found = 0;
+            contextRecord.candidates_passed_gate = 0;
+            contextRecord.grounding_decision_reason = "empty_index";
+            contextRecord.grounded = false;
             emitChatRagContext(contextRecord);
             traceLogger.addStage(
                 trace,
@@ -396,7 +404,10 @@ std::string CommandProcessor::processQuery(const std::string& input) {
                 Thoth::ChatRagLogger::contextToJson(contextRecord));
 
             const auto generationStartMs = nowMs();
-            std::string response = llm.query(finalPrompt);
+            std::string response = llm.query(
+                finalPrompt,
+                Thoth::ChatPrompt::kChatMaxTokens,
+                Thoth::ChatPrompt::chatStopSequences());
             const auto generationLatencyMs = elapsedMs(generationStartMs);
 
             traceLogger.addStage(
@@ -448,6 +459,98 @@ std::string CommandProcessor::processQuery(const std::string& input) {
             return finalResponse;
         }
 
+        if (Thoth::isGreetingSkipQuery(input)) {
+            Thoth::ConversationPromptMetrics promptMetrics;
+            PromptFactory::ConversationBuildOptions options;
+            options.grounded = false;
+            options.includeTools = config && config->enable_tools && Thoth::looksLikeToolIntent(input);
+            const std::string finalPrompt =
+                promptFactory.buildChatPrompt(input, "", false, options, &promptMetrics);
+            std::string llmModel = llm.getSelectedModel();
+            if (llmModel.empty() && config) {
+                llmModel = config->llm_model;
+            }
+
+            Thoth::ChatRagContextRecord contextRecord = buildChatRagContextRecord(
+                trace.requestId,
+                input,
+                DEFAULT_RAG_TOP_K,
+                "",
+                finalPrompt,
+                {},
+                GragDiagnostics{},
+                promptMetrics,
+                llmModel,
+                "no_retrieval_hits");
+            contextRecord.retrieval_ran = false;
+            contextRecord.retrieval_skip_reason = "greeting";
+            contextRecord.candidates_found = 0;
+            contextRecord.candidates_passed_gate = 0;
+            contextRecord.grounding_decision_reason = "greeting_skip";
+            contextRecord.grounded = false;
+            emitChatRagContext(contextRecord);
+            traceLogger.addStage(
+                trace,
+                "chat_rag_context",
+                true,
+                "Chat RAG context metrics recorded (greeting skip)",
+                Thoth::ChatRagLogger::contextToJson(contextRecord));
+
+            if (rag.eventCallback) {
+                ControllerEvent ev;
+                ev.type = EventType::RETRIEVAL_DIAGNOSTICS;
+                ev.metadata = {
+                    {"scoring_type", "greeting_skip"},
+                    {"breakdowns", nlohmann::json::array()},
+                    {"alpha", 0.0},
+                    {"direction_magnitude", 0.0}
+                };
+                rag.eventCallback(ev);
+            }
+
+            const auto generationStartMs = nowMs();
+            std::string response = llm.query(
+                finalPrompt,
+                Thoth::ChatPrompt::kChatMaxTokens,
+                Thoth::ChatPrompt::chatStopSequences());
+            const auto generationLatencyMs = elapsedMs(generationStartMs);
+
+            traceLogger.addStage(
+                trace,
+                "generation",
+                true,
+                "LLM response generated (greeting skip)",
+                {{"backend", backendToString(llm.getBackend())},
+                 {"generation_latency_ms", generationLatencyMs}});
+
+            std::string finalResponse = processToolCall(response, trace);
+
+            Thoth::ChatRagResponseRecord responseRecord;
+            responseRecord.request_id = trace.requestId;
+            responseRecord.answer_chars = finalResponse.size();
+            responseRecord.retrieved_doc_count = 0;
+            responseRecord.grounding_mode = "no_retrieval_hits";
+            responseRecord.fallback_used = false;
+            emitChatRagResponse(responseRecord);
+            traceLogger.addStage(
+                trace,
+                "chat_rag_response",
+                true,
+                "Chat RAG response metrics recorded (greeting skip)",
+                Thoth::ChatRagLogger::responseToJson(responseRecord));
+
+            try {
+                memory.addMessage("user", input);
+                memory.addMessage("assistant", finalResponse);
+                memory.save();
+                memory.updateSummary(input, finalResponse);
+            } catch (...) {}
+
+            traceLogger.finishTrace(trace, true, "query_completed_greeting_skip");
+            traceLogger.writeTrace(trace);
+            return finalResponse;
+        }
+
         // 1. Retrieve context
         std::string activePlanId = "";
         std::string activeStepId = "";
@@ -478,14 +581,24 @@ std::string CommandProcessor::processQuery(const std::string& input) {
         std::vector<CodeChunk> contextChunks = rag.retrieveRelevant(
             input, {}, topK, trace.requestId, activePlanId, activeStepId, {}, {}, {}, &retrievalDiagnostics);
 
+        // Plan M G1 (R1): fail-closed grounding floor on post-boost final_score.
+        // grounded=true must mean chunks survived the floor, not merely that the
+        // nearest-neighbor list was non-empty.
+        Thoth::ChatRetrieval::GroundingFloorResult grounding =
+            Thoth::ChatRetrieval::applyGroundingFloor(
+                contextChunks, retrievalDiagnostics,
+                Thoth::ChatRetrieval::kMinGroundingFinalScore);
+
         std::ostringstream contextStream;
-        for (const auto& c : contextChunks) {
+        for (const auto& c : grounding.injectable) {
             contextStream << Thoth::ChatRetrieval::formatChunkForPrompt(c) << "\n---\n";
         }
         std::string ragContext = contextStream.str();
 
+        const bool grounded = !grounding.injectable.empty();
+
         PromptFactory::ConversationBuildOptions options;
-        options.grounded = !ragContext.empty();
+        options.grounded = grounded;
         options.includeTools =
             config && config->enable_tools && Thoth::looksLikeToolIntent(input);
 
@@ -497,18 +610,38 @@ std::string CommandProcessor::processQuery(const std::string& input) {
         if (llmModel.empty() && config) {
             llmModel = config->llm_model;
         }
-        const std::string groundingMode = ragContext.empty() ? "no_retrieval_hits" : "retrieved_context";
+        const std::string groundingMode = grounded ? "retrieved_context" : "no_retrieval_hits";
+
+        std::string groundingReason;
+        if (grounding.stats.candidates_found == 0) {
+            groundingReason = "no_candidates";
+        } else if (!grounded) {
+            groundingReason = "below_threshold";
+        } else {
+            groundingReason = "injected_meaningful_hits";
+        }
+
         Thoth::ChatRagContextRecord contextRecord = buildChatRagContextRecord(
             trace.requestId,
             input,
             topK,
             ragContext,
             finalPrompt,
-            contextChunks,
-            retrievalDiagnostics,
+            grounding.injectable,
+            grounding.diagnostics,
             promptMetrics,
             llmModel,
             groundingMode);
+        contextRecord.retrieval_ran = true;
+        contextRecord.retrieval_skip_reason = "none";
+        contextRecord.candidates_found = grounding.stats.candidates_found;
+        contextRecord.candidates_passed_gate = grounding.stats.candidates_passed_gate;
+        contextRecord.grounding_decision_reason = groundingReason;
+        contextRecord.grounded = grounded;
+        contextRecord.has_candidate_scores = grounding.stats.has_candidates;
+        contextRecord.max_score = grounding.stats.max_score;
+        contextRecord.has_injected_scores = grounding.stats.candidates_passed_gate > 0;
+        contextRecord.min_injected_score = grounding.stats.min_injected_score;
         emitChatRagContext(contextRecord);
         traceLogger.addStage(
             trace,
@@ -519,7 +652,10 @@ std::string CommandProcessor::processQuery(const std::string& input) {
 
         // 3. Query LLM
         const auto generationStartMs = nowMs();
-        std::string response = llm.query(finalPrompt);
+        std::string response = llm.query(
+            finalPrompt,
+            Thoth::ChatPrompt::kChatMaxTokens,
+            Thoth::ChatPrompt::chatStopSequences());
         const auto generationLatencyMs = elapsedMs(generationStartMs);
 
         traceLogger.addStage(
