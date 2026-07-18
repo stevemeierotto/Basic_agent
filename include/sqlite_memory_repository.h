@@ -32,6 +32,12 @@ public:
     // Pruning and Archival
     bool archiveMessages(const std::string& sessionId, int count, int summaryVersion) override;
     std::vector<ArchivedTurnRecord> getArchivedMessages(const std::string& sessionId) override;
+    std::vector<ArchivedTurnRecord> getArchivedMessages(
+        const std::string& sessionId,
+        const RestoreRange& range) override;
+    RehydrateBatchResult rehydrateArchivedMessages(
+        const std::string& sessionId,
+        const RestoreRange& range) override;
     int getHotMessageCount(const std::string& sessionId) override;
     std::vector<MessageRecord> getOldestMessages(const std::string& sessionId, int count) override;
     std::optional<int64_t> getOldestHotMessageTimestamp(const std::string& sessionId) override;

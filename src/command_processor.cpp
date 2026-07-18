@@ -1062,23 +1062,127 @@ std::string CommandProcessor::formatConsolidationResultLine(
     return oss.str();
 }
 
+namespace {
+
+std::string formatRestoreBound(const std::optional<int64_t>& bound) {
+    if (!bound.has_value()) {
+        return "*";
+    }
+    return std::to_string(*bound);
+}
+
+std::string truncateRestoreContent(const std::string& content, std::size_t maxChars) {
+    std::string oneLine;
+    oneLine.reserve(content.size());
+    for (char c : content) {
+        if (c == '\n' || c == '\r') {
+            oneLine.push_back(' ');
+        } else {
+            oneLine.push_back(c);
+        }
+    }
+    if (oneLine.size() <= maxChars) {
+        return oneLine;
+    }
+    return oneLine.substr(0, maxChars) + "…";
+}
+
+} // namespace
+
+std::string CommandProcessor::formatRestoreResultLine(
+    const Thoth::RestoreResult& result,
+    const std::string& sessionId,
+    const Thoth::RestoreRange& range) const {
+    if (result.blocked) {
+        return std::string("[Restore blocked] ") + result.block_reason;
+    }
+
+    const std::string startStr = formatRestoreBound(range.start_ms);
+    const std::string endStr = formatRestoreBound(range.end_ms);
+
+    if (result.mode == Thoth::RestoreMode::REHYDRATE) {
+        if (!result.block_reason.empty() && result.restored == 0
+            && result.block_reason.find("failed") != std::string::npos) {
+            return "[Restore rehydrate failed] session=" + sessionId
+                + " reason=" + result.block_reason + " (hot unchanged)";
+        }
+        std::ostringstream oss;
+        oss << "[Restore rehydrate] session=" << sessionId
+            << " matched=" << result.matched
+            << " restored=" << result.restored
+            << " skipped_dup=" << result.skipped_dup
+            << " start=" << startStr
+            << " end=" << endStr;
+        return oss.str();
+    }
+
+    // REPLAY
+    std::ostringstream oss;
+    oss << "[Restore replay] session=" << sessionId
+        << " matched=" << result.matched
+        << " start=" << startStr
+        << " end=" << endStr;
+    constexpr int kPreviewMax = 20;
+    constexpr std::size_t kContentMax = 120;
+    const int preview = std::min(result.matched, kPreviewMax);
+    for (int i = 0; i < preview; ++i) {
+        const auto& turn = result.turns[static_cast<std::size_t>(i)];
+        oss << '\n' << "  " << turn.original_timestamp_ms << ' ' << turn.role << ' '
+            << truncateRestoreContent(turn.content, kContentMax);
+    }
+    if (result.matched > kPreviewMax) {
+        oss << '\n' << "… and " << (result.matched - kPreviewMax) << " more";
+    }
+    return oss.str();
+}
+
 std::string CommandProcessor::handlePrune(const std::string& args) {
     std::string subcommand = "status";
     bool ignore_thresholds = false;
     bool allow_during_goal = false;
+    bool rehydrate = false;
+    bool have_start = false;
+    bool have_end = false;
+    int64_t start_ms = 0;
+    int64_t end_ms = 0;
     std::string session_id;
 
     std::istringstream iss(args);
     std::string token;
     while (iss >> token) {
-        token = toLower(trim(token));
-        if (token == "--ignore-thresholds") {
+        const std::string lower = toLower(trim(token));
+        if (lower == "--ignore-thresholds") {
             ignore_thresholds = true;
-        } else if (token == "--unsafe") {
+        } else if (lower == "--unsafe") {
             allow_during_goal = true;
-        } else if (token == "status" || token == "explain" || token == "batch" || token == "run") {
-            subcommand = token;
-        } else if (!token.empty() && token[0] != '-') {
+        } else if (lower == "--rehydrate") {
+            rehydrate = true;
+        } else if (lower == "--start") {
+            std::string value;
+            if (!(iss >> value)) {
+                return "Usage: /prune restore [--rehydrate] [--unsafe] [--start <ms>] [--end <ms>] [session]";
+            }
+            try {
+                start_ms = std::stoll(value);
+                have_start = true;
+            } catch (...) {
+                return "[Restore blocked] Invalid --start value.";
+            }
+        } else if (lower == "--end") {
+            std::string value;
+            if (!(iss >> value)) {
+                return "Usage: /prune restore [--rehydrate] [--unsafe] [--start <ms>] [--end <ms>] [session]";
+            }
+            try {
+                end_ms = std::stoll(value);
+                have_end = true;
+            } catch (...) {
+                return "[Restore blocked] Invalid --end value.";
+            }
+        } else if (lower == "status" || lower == "explain" || lower == "batch"
+                   || lower == "run" || lower == "restore") {
+            subcommand = lower;
+        } else if (!lower.empty() && lower[0] != '-') {
             session_id = token;
         }
     }
@@ -1093,10 +1197,52 @@ std::string CommandProcessor::handlePrune(const std::string& args) {
         {"session_id", session_id},
         {"ignore_thresholds", ignore_thresholds},
         {"allow_during_goal", allow_during_goal},
+        {"rehydrate", rehydrate},
         {"requested_by", "CLI"}
     });
 
     std::string response;
+    if (subcommand == "restore") {
+        Thoth::RestoreRequest request;
+        request.mode = rehydrate ? Thoth::RestoreMode::REHYDRATE : Thoth::RestoreMode::REPLAY;
+        request.allow_during_goal = allow_during_goal;
+        request.requested_by = "CLI";
+        if (have_start) {
+            request.range.start_ms = start_ms;
+        }
+        if (have_end) {
+            request.range.end_ms = end_ms;
+        }
+
+        const auto result = memory.runRestore(session_id, request);
+        response = formatRestoreResultLine(result, session_id, request.range);
+
+        const bool ok = !result.blocked
+            && (result.mode == Thoth::RestoreMode::REPLAY
+                || result.block_reason.empty()
+                || result.restored > 0
+                || (result.matched == 0 && result.restored == 0));
+        // Treat explicit rehydrate failure string as failure for admin_command stage.
+        const bool rehydrate_failed = result.mode == Thoth::RestoreMode::REHYDRATE
+            && !result.blocked
+            && !result.block_reason.empty()
+            && result.restored == 0
+            && result.matched > 0;
+
+        traceLogger.addStage(trace, "prune_completed", ok && !rehydrate_failed, response, {
+            {"session_id", session_id},
+            {"subcommand", "restore"},
+            {"mode", Thoth::restoreModeToString(result.mode)},
+            {"matched", result.matched},
+            {"restored", result.restored},
+            {"skipped_dup", result.skipped_dup},
+            {"blocked", result.blocked}
+        });
+        traceLogger.finishTrace(trace, ok && !rehydrate_failed, "prune restore completed");
+        traceLogger.writeTrace(trace);
+        return response;
+    }
+
     if (subcommand == "status") {
         const auto status = memory.getConsolidationStatus(session_id);
         response = formatConsolidationStatusLine(status);
@@ -1126,7 +1272,7 @@ std::string CommandProcessor::handlePrune(const std::string& args) {
             {"decision", Thoth::consolidationDecisionToJson(result.decision)}
         });
     } else {
-        response = "Unknown prune subcommand. Use: status, explain, batch, run";
+        response = "Unknown prune subcommand. Use: status, explain, batch, run, restore";
         traceLogger.finishTrace(trace, false, response);
         traceLogger.writeTrace(trace);
         return response;
@@ -1165,8 +1311,9 @@ void CommandProcessor::initializeCommands() {
                "  /benchmark ...      Run retrieval/index benchmarks\n"
                "  /config             Show config values\n"
                "  /set key value      Update config\n"
-               "  /prune [status|explain|batch|run] [--ignore-thresholds] [--unsafe] [session]\n"
-               "                      Memory consolidation (default: status)\n"
+               "  /prune [status|explain|batch|run|restore] [--ignore-thresholds] [--unsafe]\n"
+               "                      [--rehydrate] [--start <ms>] [--end <ms>] [session]\n"
+               "                      Memory consolidation / range restore (default: status)\n"
                "Also: type 'exit' or 'quit' to leave.\n";
     };
     commandHandlers["h"] = commandHandlers["help"];

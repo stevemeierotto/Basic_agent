@@ -23,6 +23,7 @@
 #include "executive_controller.h"
 #include "constraint_checker.h"
 #include "consolidation_api.h"
+#include "restore_api.h"
 #include "chat_generation_safety.h"
 #include "chat_rag_observability.h"
 
@@ -85,6 +86,9 @@ private:
     std::string formatConsolidationStatusLine(const Thoth::ConsolidationStatus& status) const;
     std::string formatConsolidationResultLine(const Thoth::ConsolidationResult& result,
                                               const std::string& sessionId) const;
+    std::string formatRestoreResultLine(const Thoth::RestoreResult& result,
+                                        const std::string& sessionId,
+                                        const Thoth::RestoreRange& range) const;
 
     using CommandHandler = std::function<std::string(const std::string&)>;
     std::unordered_map<std::string, CommandHandler> commandHandlers;

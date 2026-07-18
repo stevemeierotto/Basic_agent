@@ -24,6 +24,7 @@
 #include "plan_reuse_config.h"
 #include "consolidation_policy.h"
 #include "consolidation_api.h"
+#include "restore_api.h"
 #include "clock.h"
 #include <functional>
 
@@ -186,6 +187,9 @@ public:
     /** Manual or automatic consolidation entry (M3). */
     Thoth::ConsolidationResult runConsolidation(const std::string& sessionId,
                                                 const Thoth::ConsolidationRequest& request);
+    /** M4 ranged restore (replay / rehydrate). */
+    Thoth::RestoreResult runRestore(const std::string& sessionId,
+                                    const Thoth::RestoreRequest& request);
     void setGoalActiveChecker(std::function<bool()> checker);
     bool isSessionMarkedStale(const std::string& sessionId) const;
     std::vector<Thoth::MemoryRepository::ArchivedTurnRecord> getArchivedTurns() const;

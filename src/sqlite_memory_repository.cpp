@@ -23,6 +23,11 @@ static bool injectConsolidationFail(const char* stage) {
     return env && stage && std::string(env) == stage;
 }
 
+static bool injectRestoreFail(const char* stage) {
+    const char* env = std::getenv("THOTH_INJECT_RESTORE_FAIL");
+    return env && stage && std::string(env) == stage;
+}
+
 struct SQLiteMemoryRepository::DBHandle {
     sqlite3* handle = nullptr;
 };
@@ -1178,16 +1183,44 @@ bool SQLiteMemoryRepository::archiveMessages(const std::string& sessionId, int c
     }
 }
 
-std::vector<MemoryRepository::ArchivedTurnRecord> SQLiteMemoryRepository::getArchivedMessages(const std::string& sessionId) {
+std::vector<MemoryRepository::ArchivedTurnRecord> SQLiteMemoryRepository::getArchivedMessages(
+    const std::string& sessionId) {
+    return getArchivedMessages(sessionId, RestoreRange{});
+}
+
+std::vector<MemoryRepository::ArchivedTurnRecord> SQLiteMemoryRepository::getArchivedMessages(
+    const std::string& sessionId,
+    const RestoreRange& range) {
     std::vector<ArchivedTurnRecord> results;
+    if (range.isInvalid()) {
+        return results;
+    }
     try {
-        const char* sql = "SELECT archive_id, session_id, original_timestamp_ms, role, content, metadata_json, archived_at_ms, summary_version "
-                          "FROM archived_turns WHERE session_id = ? ORDER BY original_timestamp_ms ASC;";
-        sqlite3_stmt* stmt;
-        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return results;
-        
-        sqlite3_bind_text(stmt, 1, sessionId.c_str(), -1, SQLITE_STATIC);
-        
+        std::string sql =
+            "SELECT archive_id, session_id, original_timestamp_ms, role, content, metadata_json, "
+            "archived_at_ms, summary_version FROM archived_turns WHERE session_id = ?";
+        if (range.start_ms.has_value()) {
+            sql += " AND original_timestamp_ms >= ?";
+        }
+        if (range.end_ms.has_value()) {
+            sql += " AND original_timestamp_ms <= ?";
+        }
+        sql += " ORDER BY original_timestamp_ms ASC, archive_id ASC;";
+
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            return results;
+        }
+
+        int bind = 1;
+        sqlite3_bind_text(stmt, bind++, sessionId.c_str(), -1, SQLITE_STATIC);
+        if (range.start_ms.has_value()) {
+            sqlite3_bind_int64(stmt, bind++, *range.start_ms);
+        }
+        if (range.end_ms.has_value()) {
+            sqlite3_bind_int64(stmt, bind++, *range.end_ms);
+        }
+
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             ArchivedTurnRecord rec;
             rec.archive_id = safe_col_text(stmt, 0);
@@ -1201,8 +1234,134 @@ std::vector<MemoryRepository::ArchivedTurnRecord> SQLiteMemoryRepository::getArc
             results.push_back(std::move(rec));
         }
         sqlite3_finalize(stmt);
-    } catch (...) {}
+    } catch (...) {
+    }
     return results;
+}
+
+RehydrateBatchResult SQLiteMemoryRepository::rehydrateArchivedMessages(
+    const std::string& sessionId,
+    const RestoreRange& range) {
+    RehydrateBatchResult outcome;
+    if (range.isInvalid()) {
+        outcome.ok = false;
+        return outcome;
+    }
+
+    const auto matched = getArchivedMessages(sessionId, range);
+    outcome.matched = static_cast<int>(matched.size());
+    if (matched.empty()) {
+        return outcome;
+    }
+
+    try {
+        if (!beginTransaction()) {
+            outcome.ok = false;
+            return outcome;
+        }
+
+        // Load hot messages for duplicate checks inside this transaction.
+        const char* hot_sql =
+            "SELECT role, content, timestamp_ms FROM messages WHERE session_id = ?;";
+        sqlite3_stmt* hot_stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, hot_sql, -1, &hot_stmt, nullptr) != SQLITE_OK) {
+            rollback();
+            outcome.ok = false;
+            return outcome;
+        }
+        sqlite3_bind_text(hot_stmt, 1, sessionId.c_str(), -1, SQLITE_STATIC);
+
+        struct HotKey {
+            int64_t ts;
+            std::string role;
+            std::string content;
+        };
+        std::vector<HotKey> hot_keys;
+        while (sqlite3_step(hot_stmt) == SQLITE_ROW) {
+            hot_keys.push_back({
+                sqlite3_column_int64(hot_stmt, 2),
+                safe_col_text(hot_stmt, 0),
+                safe_col_text(hot_stmt, 1)
+            });
+        }
+        sqlite3_finalize(hot_stmt);
+
+        auto isDuplicate = [&](const ArchivedTurnRecord& a) {
+            for (const auto& h : hot_keys) {
+                if (h.ts == a.original_timestamp_ms && h.role == a.role && h.content == a.content) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const char* insert_sql =
+            "INSERT INTO messages (session_id, role, content, timestamp_ms) VALUES (?, ?, ?, ?);";
+        sqlite3_stmt* insert_stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, insert_sql, -1, &insert_stmt, nullptr) != SQLITE_OK) {
+            rollback();
+            outcome.ok = false;
+            return outcome;
+        }
+
+        for (const auto& rec : matched) {
+            if (isDuplicate(rec)) {
+                outcome.skipped_dup++;
+                continue;
+            }
+
+            if (injectRestoreFail("insert")) {
+                sqlite3_finalize(insert_stmt);
+                rollback();
+                outcome.ok = false;
+                outcome.restored = 0;
+                outcome.skipped_dup = 0;
+                return outcome;
+            }
+
+            sqlite3_bind_text(insert_stmt, 1, sessionId.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_stmt, 2, rec.role.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_text(insert_stmt, 3, rec.content.c_str(), -1, SQLITE_STATIC);
+            sqlite3_bind_int64(insert_stmt, 4, rec.original_timestamp_ms);
+
+            if (sqlite3_step(insert_stmt) != SQLITE_DONE) {
+                sqlite3_finalize(insert_stmt);
+                rollback();
+                outcome.ok = false;
+                outcome.restored = 0;
+                outcome.skipped_dup = 0;
+                return outcome;
+            }
+            sqlite3_reset(insert_stmt);
+
+            // Subsequent turns in this batch must see prior inserts as duplicates.
+            hot_keys.push_back({rec.original_timestamp_ms, rec.role, rec.content});
+            outcome.restored++;
+        }
+        sqlite3_finalize(insert_stmt);
+
+        if (injectRestoreFail("commit")) {
+            rollback();
+            outcome.ok = false;
+            outcome.restored = 0;
+            outcome.skipped_dup = 0;
+            return outcome;
+        }
+
+        if (!commit()) {
+            outcome.ok = false;
+            outcome.restored = 0;
+            outcome.skipped_dup = 0;
+            return outcome;
+        }
+        return outcome;
+    } catch (...) {
+        rollback();
+        outcome.ok = false;
+        outcome.restored = 0;
+        outcome.skipped_dup = 0;
+        return outcome;
+    }
 }
 
 int SQLiteMemoryRepository::getHotMessageCount(const std::string& sessionId) {

@@ -65,6 +65,7 @@ set(BASIC_AGENT_SOURCES
     src/memory_consolidation_metrics.cpp
     src/consolidation_policy.cpp
     src/consolidation_api.cpp
+    src/restore_api.cpp
     src/clock.cpp
     src/episodic_memory.cpp
     src/summary_generator.cpp

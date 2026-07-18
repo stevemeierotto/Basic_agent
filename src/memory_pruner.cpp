@@ -15,6 +15,7 @@
 #include "../include/embedding_engine.h"
 #include "../include/episodic_memory.h"
 #include "../include/memory.h"
+#include <json.hpp>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
@@ -468,8 +469,112 @@ int MemoryPruner::prune(const std::string& sessionId) {
     return consolidateIfNeeded(sessionId).archived;
 }
 
+RestoreResult MemoryPruner::restore(const std::string& sessionId, const RestoreRequest& request) {
+    RestoreResult result;
+    result.mode = request.mode;
+
+    const bool invalid_range = request.range.isInvalid();
+    DecisionTraceLogger logger;
+    const char* trace_type = (request.mode == RestoreMode::REHYDRATE)
+        ? "memory_restore_rehydrate"
+        : "memory_restore_replay";
+    DecisionTrace trace = logger.startTrace(trace_type, static_cast<int>(sessionId.size()));
+
+    nlohmann::json range_meta = {
+        {"session_id", sessionId},
+        {"requested_by", request.requested_by},
+        {"mode", restoreModeToString(request.mode)},
+        {"allow_during_goal", request.allow_during_goal}
+    };
+    if (request.range.start_ms.has_value()) {
+        range_meta["start_ms"] = *request.range.start_ms;
+    } else {
+        range_meta["start_ms"] = nullptr;
+    }
+    if (request.range.end_ms.has_value()) {
+        range_meta["end_ms"] = *request.range.end_ms;
+    } else {
+        range_meta["end_ms"] = nullptr;
+    }
+
+    logger.addStage(trace, "restore_requested", true, "Restore requested", range_meta);
+
+    if (invalid_range) {
+        result.blocked = true;
+        result.block_reason = "Invalid range: start_ms > end_ms.";
+        logger.addStage(trace, "restore_completed", false, result.block_reason, {
+            {"session_id", sessionId},
+            {"blocked", true},
+            {"matched", 0},
+            {"restored", 0},
+            {"skipped_dup", 0}
+        });
+        logger.finishTrace(trace, false, result.block_reason);
+        logger.writeTrace(trace);
+        return result;
+    }
+
+    if (request.mode == RestoreMode::REPLAY) {
+        result.turns = repo_.getArchivedMessages(sessionId, request.range);
+        result.matched = static_cast<int>(result.turns.size());
+        logger.addStage(trace, "restore_completed", true, "Replay completed", {
+            {"session_id", sessionId},
+            {"blocked", false},
+            {"matched", result.matched},
+            {"restored", 0},
+            {"skipped_dup", 0},
+            {"start_ms", request.range.start_ms.has_value()
+                ? nlohmann::json(*request.range.start_ms) : nlohmann::json(nullptr)},
+            {"end_ms", request.range.end_ms.has_value()
+                ? nlohmann::json(*request.range.end_ms) : nlohmann::json(nullptr)}
+        });
+        logger.finishTrace(trace, true, "Replay completed");
+        logger.writeTrace(trace);
+        return result;
+    }
+
+    // REHYDRATE
+    const auto batch = repo_.rehydrateArchivedMessages(sessionId, request.range);
+    result.matched = batch.matched;
+    if (!batch.ok) {
+        result.restored = 0;
+        result.skipped_dup = 0;
+        result.block_reason = "Rehydrate transaction failed (hot unchanged).";
+        logger.addStage(trace, "restore_completed", false, result.block_reason, {
+            {"session_id", sessionId},
+            {"blocked", false},
+            {"matched", result.matched},
+            {"restored", 0},
+            {"skipped_dup", 0},
+            {"failed", true}
+        });
+        logger.finishTrace(trace, false, result.block_reason);
+        logger.writeTrace(trace);
+        return result;
+    }
+
+    result.restored = batch.restored;
+    result.skipped_dup = batch.skipped_dup;
+    // turns remain empty for rehydrate
+    logger.addStage(trace, "restore_completed", true, "Rehydrate completed", {
+        {"session_id", sessionId},
+        {"blocked", false},
+        {"matched", result.matched},
+        {"restored", result.restored},
+        {"skipped_dup", result.skipped_dup},
+        {"start_ms", request.range.start_ms.has_value()
+            ? nlohmann::json(*request.range.start_ms) : nlohmann::json(nullptr)},
+        {"end_ms", request.range.end_ms.has_value()
+            ? nlohmann::json(*request.range.end_ms) : nlohmann::json(nullptr)}
+    });
+    logger.finishTrace(trace, true, "Rehydrate completed");
+    logger.writeTrace(trace);
+    return result;
+}
+
 std::vector<MemoryRepository::ArchivedTurnRecord> MemoryPruner::restore(const std::string& sessionId) {
-    return repo_.getArchivedMessages(sessionId);
+    // Legacy silent full-session REPLAY — no DecisionTrace (M4 protocol).
+    return repo_.getArchivedMessages(sessionId, RestoreRange{});
 }
 
 } // namespace Thoth

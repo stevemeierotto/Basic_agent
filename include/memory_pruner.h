@@ -12,6 +12,7 @@
 #include "consolidation_policy.h"
 #include "memory_repository.h"
 #include "memory_pruning_config.h"
+#include "restore_api.h"
 #include "summary_generator.h"
 #include <memory>
 #include <mutex>
@@ -67,6 +68,9 @@ public:
     ConsolidationResult runConsolidation(const std::string& sessionId,
                                          const ConsolidationRequest& request);
 
+    /** M4 ranged restore (replay or rehydrate). Emits DecisionTrace on this path. */
+    RestoreResult restore(const std::string& sessionId, const RestoreRequest& request);
+
     /** Consolidate one batch if policy allows. Returns turns removed from hot. */
     int consolidateOneBatch(const std::string& sessionId);
 
@@ -76,6 +80,10 @@ public:
     /** Back-compat alias for consolidateIfNeeded (returns total archived). */
     int prune(const std::string& sessionId);
 
+    /**
+     * Legacy full-session REPLAY alias (M4).
+     * Equivalent to restore(sessionId, {REPLAY, empty range}) but silent (no DecisionTrace).
+     */
     std::vector<MemoryRepository::ArchivedTurnRecord> restore(const std::string& sessionId);
 
     bool isEmbedReady() const { return embeddingEngine_ != nullptr; }

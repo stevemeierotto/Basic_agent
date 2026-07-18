@@ -7,6 +7,25 @@
 
 namespace Thoth {
 
+/** Timestamp range for cold-archive query / rehydrate (M4). */
+struct RestoreRange {
+    std::optional<int64_t> start_ms;
+    std::optional<int64_t> end_ms;
+
+    /** True when both bounds set and start_ms > end_ms. */
+    bool isInvalid() const {
+        return start_ms.has_value() && end_ms.has_value() && *start_ms > *end_ms;
+    }
+};
+
+/** Outcome of a rehydrate batch transaction (M4). */
+struct RehydrateBatchResult {
+    int matched = 0;
+    int restored = 0;
+    int skipped_dup = 0;
+    bool ok = true;
+};
+
 struct MessageRecord {
     std::string role;
     std::string content;
@@ -56,6 +75,17 @@ public:
 
     virtual bool archiveMessages(const std::string& sessionId, int count, int summaryVersion) = 0;
     virtual std::vector<ArchivedTurnRecord> getArchivedMessages(const std::string& sessionId) = 0;
+    /** Ranged cold query; empty bounds = full session. Stable order: ts ASC, archive_id ASC. */
+    virtual std::vector<ArchivedTurnRecord> getArchivedMessages(
+        const std::string& sessionId,
+        const RestoreRange& range) = 0;
+    /**
+     * Copy matched cold turns into hot messages (transactional). Cold unchanged.
+     * Duplicate invariant: (timestamp_ms, role, content).
+     */
+    virtual RehydrateBatchResult rehydrateArchivedMessages(
+        const std::string& sessionId,
+        const RestoreRange& range) = 0;
     virtual int getHotMessageCount(const std::string& sessionId) = 0;
     virtual std::vector<MessageRecord> getOldestMessages(const std::string& sessionId, int count) = 0;
     virtual std::optional<int64_t> getOldestHotMessageTimestamp(const std::string& sessionId) = 0;

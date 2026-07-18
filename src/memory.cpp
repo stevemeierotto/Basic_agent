@@ -456,6 +456,34 @@ Thoth::ConsolidationResult Memory::runConsolidation(const std::string& sessionId
     return result;
 }
 
+Thoth::RestoreResult Memory::runRestore(const std::string& sessionId,
+                                        const Thoth::RestoreRequest& request) {
+    std::unique_lock lock(mtx);
+    if (!pruner) {
+        Thoth::RestoreResult result;
+        result.mode = request.mode;
+        result.blocked = true;
+        result.block_reason = "Restore not configured.";
+        return result;
+    }
+
+    const std::string resolved = sessionId.empty() ? activeSessionId : sessionId;
+    const bool goal_active = goal_active_checker_ ? goal_active_checker_() : false;
+
+    if (request.mode == Thoth::RestoreMode::REHYDRATE
+        && goal_active
+        && !request.allow_during_goal) {
+        Thoth::RestoreResult result;
+        result.mode = request.mode;
+        result.blocked = true;
+        result.block_reason =
+            "Goal in progress. Rehydrate blocked until goal completes. Use --unsafe to override.";
+        return result;
+    }
+
+    return pruner->restore(resolved, request);
+}
+
 void Memory::runStartupConsolidationDiscovery() {
     if (!pruner || !repo) {
         return;
