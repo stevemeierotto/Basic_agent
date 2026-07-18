@@ -46,7 +46,10 @@ inline constexpr int kChatMaxTokens = 512;
 /** Plan M G3 cue B — user turn prefix; full block is prefix + input + "\\n". */
 inline constexpr const char* kUserTurnPrefix = "[User] ";
 
-/** Plan M G3 — smallest safe stop set (chat generate only). */
+/**
+ * Plan M G3 stop literals — retained for explicit / non-chat callers and tests.
+ * Plan N N3: conversational chat does **not** send these via chatStopSequences().
+ */
 inline constexpr const char* kChatStopUser = "\n[User]";
 inline constexpr const char* kChatStopAgent = "\n[Agent]";
 
@@ -54,8 +57,9 @@ inline std::string formatUserBlock(const std::string& user_input) {
     return std::string(kUserTurnPrefix) + user_input + "\n";
 }
 
+/** Plan N N3 / L6 — conversational chat sends an empty transcript stop list. */
 inline std::vector<std::string> chatStopSequences() {
-    return {kChatStopUser, kChatStopAgent};
+    return {};
 }
 
 } // namespace ChatPrompt

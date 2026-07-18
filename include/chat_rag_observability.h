@@ -85,6 +85,15 @@ struct ChatRagResponseRecord {
     int retrieved_doc_count = 0;
     std::string grounding_mode;
     bool fallback_used = false;
+
+    // Plan N N6 — generation diagnostics (flags / reasons / counts only; no raw text).
+    std::size_t raw_answer_chars = 0;
+    std::size_t sanitized_answer_chars = 0;
+    std::string sanitize_reason;
+    bool retried_without_stops = false;
+    bool used_stops = false;
+    bool provider_ok = false;
+    std::string finish_reason;
 };
 
 class ChatRagLogger {

@@ -260,26 +260,35 @@ std::string LLMInterface::query(const std::string& prompt,
                                 int num_predict_override,
                                 const std::vector<std::string>& stop_sequences) {
     try {
-        if (auto scripted = Thoth::RobustnessMockResponses::pop()) {
-            const std::string response = *scripted;
-            recordTokenUsage(estimateTokenUsage(prompt, response));
-            return response;
-        }
-        if (envTruthy("THOTH_MOCK_LLM_UNAVAILABLE")) {
-            const std::string response = "Assistant: [Error] LLM service unavailable (mock).";
-            recordTokenUsage(estimateTokenUsage(prompt, response));
-            return response;
-        }
-        if (Thoth::testSuiteDevTierEnabled()) {
-            const std::string response = Thoth::mockTestSuiteLlmResponse(prompt);
-            recordTokenUsage(estimateTokenUsage(prompt, response));
-            return response;
-        }
-        if (backend == LLMBackend::Ollama) {
-            return askOllama(prompt, num_predict_override, stop_sequences);
-        } else {
+        // Preserve legacy OpenAI string path (queryDetailed is llama/ollama structured only).
+        if (backend == LLMBackend::OpenAI) {
+            if (auto scripted = Thoth::RobustnessMockResponses::pop()) {
+                const std::string response = *scripted;
+                recordTokenUsage(estimateTokenUsage(prompt, response));
+                return response;
+            }
+            if (envTruthy("THOTH_MOCK_LLM_UNAVAILABLE")) {
+                const std::string response = "Assistant: [Error] LLM service unavailable (mock).";
+                recordTokenUsage(estimateTokenUsage(prompt, response));
+                return response;
+            }
+            if (Thoth::testSuiteDevTierEnabled()) {
+                const std::string response = Thoth::mockTestSuiteLlmResponse(prompt);
+                recordTokenUsage(estimateTokenUsage(prompt, response));
+                return response;
+            }
             return askOpenAI(prompt);
         }
+
+        const Thoth::InferenceGenerateResult detailed =
+            queryDetailed(prompt, num_predict_override, stop_sequences);
+        if (!detailed.ok) {
+            if (inference_client_) {
+                return formatInferenceGenerateError(*inference_client_, config, detailed.error);
+            }
+            return std::string("Assistant: [Error] ") + detailed.error;
+        }
+        return detailed.text;
     } catch (const std::exception& e) {
         DecisionTraceLogger traceLogger;
         DecisionTrace trace = traceLogger.startTrace("llm_query_exception", prompt.size());
@@ -289,6 +298,129 @@ std::string LLMInterface::query(const std::string& prompt,
     } catch (...) {
         return "Assistant: [Error] LLM query failed with an unknown error.";
     }
+}
+
+Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
+    const std::string& prompt,
+    int num_predict_override,
+    const std::vector<std::string>& stop_sequences) {
+    Thoth::InferenceGenerateResult result;
+    try {
+        if (auto fail = Thoth::RobustnessMockResponses::popFailure()) {
+            result.ok = false;
+            result.error = *fail;
+            recordTokenUsage(estimateTokenUsage(prompt, ""));
+            return result;
+        }
+        if (auto scripted = Thoth::RobustnessMockResponses::pop()) {
+            result.ok = true;
+            result.text = *scripted;
+            recordTokenUsage(estimateTokenUsage(prompt, result.text));
+            return result;
+        }
+        if (envTruthy("THOTH_MOCK_LLM_UNAVAILABLE")) {
+            result.ok = false;
+            result.error = "LLM service unavailable (mock).";
+            recordTokenUsage(estimateTokenUsage(prompt, ""));
+            return result;
+        }
+        if (Thoth::testSuiteDevTierEnabled()) {
+            result.ok = true;
+            result.text = Thoth::mockTestSuiteLlmResponse(prompt);
+            recordTokenUsage(estimateTokenUsage(prompt, result.text));
+            return result;
+        }
+        if (backend != LLMBackend::Ollama) {
+            result.ok = false;
+            result.error = "OpenAI backend not supported for queryDetailed";
+            return result;
+        }
+
+        std::lock_guard<std::recursive_mutex> lock(llmMutex);
+        try {
+            ensureInferenceClient();
+        } catch (const std::exception& e) {
+            result.error = std::string("Inference client unavailable: ") + e.what();
+            return result;
+        }
+        if (!inference_client_) {
+            result.error = "Inference client not initialized.";
+            return result;
+        }
+
+        double temperature = config ? config->temperature : 0.7;
+        double topP = config ? config->top_p : 1.0;
+        int maxTokens = config ? config->max_tokens : 2048;
+        if (num_predict_override >= 0) {
+            maxTokens = num_predict_override;
+        }
+        std::string model = resolveOllamaModel();
+        if (model.empty()) {
+            result.error =
+                "No inference model configured. Set llm_model, OLLAMA_MODEL, or ensure the "
+                "inference service is reachable.";
+            return result;
+        }
+
+        Thoth::InferenceGenerateRequest request;
+        request.model = model;
+        request.prompt = prompt;
+        request.temperature = temperature;
+        request.top_p = topP;
+        request.max_tokens = maxTokens;
+        request.stop_sequences = stop_sequences;
+
+        result = inference_client_->generate(request);
+        if (!result.ok && result.error.find("not found") != std::string::npos) {
+            const std::string detected = detectOllamaModel();
+            if (!detected.empty() && detected != model) {
+                selectedModel = detected;
+                request.model = selectedModel;
+                result = inference_client_->generate(request);
+            }
+        }
+
+        if (!result.ok) {
+            DecisionTraceLogger traceLogger;
+            DecisionTrace trace = traceLogger.startTrace("inference_error", prompt.size());
+            traceLogger.finishTrace(trace, false, std::string("Inference failure: ") + result.error);
+            traceLogger.writeTrace(trace);
+            return result;
+        }
+
+        LlmTokenUsage usage = result.token_usage;
+        if (!result.raw_json.empty() && usage.total_tokens <= 0) {
+            usage = parseOllamaTokenUsage(result.raw_json);
+        }
+        if (usage.total_tokens <= 0) {
+            usage = parseOpenAiTokenUsage(result.raw_json);
+        }
+        if (usage.total_tokens <= 0) {
+            usage = estimateTokenUsage(prompt, result.text);
+        }
+        result.token_usage = usage;
+        recordTokenUsage(usage);
+        return result;
+    } catch (const std::exception& e) {
+        result.ok = false;
+        result.error = std::string("Inference request failed: ") + e.what();
+        return result;
+    } catch (...) {
+        result.ok = false;
+        result.error = "Inference request failed with an unknown error.";
+        return result;
+    }
+}
+
+std::string LLMInterface::formatProviderError(const std::string& detail) {
+    try {
+        ensureInferenceClient();
+    } catch (...) {
+    }
+    if (inference_client_) {
+        return formatInferenceGenerateError(*inference_client_, config, detail);
+    }
+    return std::string("Assistant: [Error] ") + redactSensitiveText(detail);
 }
 
 std::string LLMInterface::askOllama(const std::string& prompt) {
@@ -302,71 +434,7 @@ std::string LLMInterface::askOllama(const std::string& prompt, int num_predict_o
 std::string LLMInterface::askOllama(const std::string& prompt,
                                     int num_predict_override,
                                     const std::vector<std::string>& stop_sequences) {
-    std::lock_guard<std::recursive_mutex> lock(llmMutex);
-    try {
-        ensureInferenceClient();
-    } catch (const std::exception& e) {
-        return std::string("Assistant: [Error] Inference client unavailable: ") + e.what();
-    }
-    if (!inference_client_) {
-        return "Assistant: [Error] Inference client not initialized.";
-    }
-
-    try {
-        double temperature = config ? config->temperature : 0.7;
-        double topP        = config ? config->top_p : 1.0;
-        int maxTokens      = config ? config->max_tokens : 2048;
-        if (num_predict_override >= 0) {
-            maxTokens = num_predict_override;
-        }
-        std::string model = resolveOllamaModel();
-
-        if (model.empty()) {
-            return "Assistant: [Error] No inference model configured. Set llm_model, OLLAMA_MODEL, or ensure the inference service is reachable.";
-        }
-
-        Thoth::InferenceGenerateRequest request;
-        request.model = model;
-        request.prompt = prompt;
-        request.temperature = temperature;
-        request.top_p = topP;
-        request.max_tokens = maxTokens;
-        request.stop_sequences = stop_sequences;
-
-        auto generated = inference_client_->generate(request);
-        if (!generated.ok && generated.error.find("not found") != std::string::npos) {
-            const std::string detected = detectOllamaModel();
-            if (!detected.empty() && detected != model) {
-                selectedModel = detected;
-                request.model = selectedModel;
-                generated = inference_client_->generate(request);
-            }
-        }
-
-        if (!generated.ok) {
-            DecisionTraceLogger traceLogger;
-            DecisionTrace trace = traceLogger.startTrace("inference_error", prompt.size());
-            traceLogger.finishTrace(trace, false, std::string("Inference failure: ") + generated.error);
-            traceLogger.writeTrace(trace);
-            return formatInferenceGenerateError(*inference_client_, config, generated.error);
-        }
-
-        LlmTokenUsage usage = generated.token_usage;
-        if (!generated.raw_json.empty() && usage.total_tokens <= 0) {
-            usage = parseOllamaTokenUsage(generated.raw_json);
-        }
-        if (usage.total_tokens <= 0) {
-            usage = parseOpenAiTokenUsage(generated.raw_json);
-        }
-        if (usage.total_tokens <= 0) {
-            usage = estimateTokenUsage(prompt, generated.text);
-        }
-        recordTokenUsage(usage);
-        return generated.text;
-
-    } catch (const std::exception& e) {
-        return std::string("Assistant: [Error] Inference request failed: ") + e.what();
-    }
+    return query(prompt, num_predict_override, stop_sequences);
 }
 
 std::string LLMInterface::askOpenAI(const std::string& prompt) {

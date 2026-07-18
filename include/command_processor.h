@@ -23,6 +23,8 @@
 #include "executive_controller.h"
 #include "constraint_checker.h"
 #include "consolidation_api.h"
+#include "chat_generation_safety.h"
+#include "chat_rag_observability.h"
 
 class CommandProcessor {
 public:
@@ -47,6 +49,10 @@ public:
     void syncPromptConfig();
 
     std::string processToolCall(const std::string& response, DecisionTrace& trace);
+
+    /** Plan N N6 — test probe: processToolCall invocations since last reset. */
+    static void resetProcessToolCallProbeForTest();
+    static int processToolCallProbeCountForTest();
 
 private:
     std::string session_id;
@@ -90,6 +96,21 @@ private:
     bool isCommandAllowed(const std::string& cmd, const std::string& args, std::string& reason) const;
     bool isQueryAllowed(std::string& reason) const;
     bool hasDangerousArgPattern(const std::string& args) const;
+
+    /**
+     * Plan N N6 — single conversational generation boundary for all three chat arms.
+     * Calls generateAndSanitizeChat; Class A skips tools; otherwise processToolCall(sanitized).
+     */
+    struct ConversationalTurnResult {
+        std::string final_response;
+        Thoth::ChatGeneration::ChatGenerationResult gen;
+    };
+    ConversationalTurnResult runConversationalGenerate(const std::string& prompt,
+                                                       bool use_greeting_fallback,
+                                                       DecisionTrace& trace,
+                                                       const std::string& generation_stage_message);
+    static void applyGenerationDiagnostics(Thoth::ChatRagResponseRecord& record,
+                                           const Thoth::ChatGeneration::ChatGenerationResult& gen);
 
     // helpers
     static std::string trim(const std::string& s);

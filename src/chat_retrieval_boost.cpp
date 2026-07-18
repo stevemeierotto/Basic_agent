@@ -329,8 +329,9 @@ GroundingFloorResult applyGroundingFloor(
 std::string formatChunkForPrompt(const CodeChunk& chunk) {
     std::ostringstream oss;
     oss << "Document: " << fileBasename(chunk.fileName) << '\n';
+    // Plan N N4 / L7 — LLM-facing span label (not "Lines:", which primed numbered answers).
     if (chunk.startLine > 0) {
-        oss << "Lines: " << chunk.startLine;
+        oss << "source_span=" << chunk.startLine;
         if (chunk.endLine > chunk.startLine) {
             oss << '-' << chunk.endLine;
         }

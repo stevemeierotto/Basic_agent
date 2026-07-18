@@ -73,11 +73,12 @@ InferenceGenerateResult LlamaServerClient::parseCompletionResponse(const std::st
                        && choice["message"]["content"].is_string()) {
                 result.text = choice["message"]["content"].get<std::string>();
             }
-            result.token_usage = parseOpenAiCompletionUsage(j);
-            result.ok = !result.text.empty();
-            if (!result.ok) {
-                result.error = "Empty completion text";
+            if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
+                result.finish_reason = choice["finish_reason"].get<std::string>();
             }
+            result.token_usage = parseOpenAiCompletionUsage(j);
+            // Plan N N2: empty text with a valid choices payload is provider-ok (soft-empty).
+            result.ok = true;
             return result;
         }
         if (j.contains("error") && j["error"].is_object() && j["error"].contains("message")) {

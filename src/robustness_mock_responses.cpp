@@ -15,12 +15,16 @@ namespace Thoth {
 namespace {
 std::mutex g_mutex;
 std::queue<std::string> g_responses;
+std::queue<std::string> g_failures;
 } // namespace
 
 void RobustnessMockResponses::reset() {
     std::lock_guard<std::mutex> lock(g_mutex);
     while (!g_responses.empty()) {
         g_responses.pop();
+    }
+    while (!g_failures.empty()) {
+        g_failures.pop();
     }
 }
 
@@ -36,6 +40,11 @@ void RobustnessMockResponses::pushAll(const std::vector<std::string>& responses)
     }
 }
 
+void RobustnessMockResponses::pushFailure(std::string error) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_failures.push(std::move(error));
+}
+
 std::optional<std::string> RobustnessMockResponses::pop() {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_responses.empty()) {
@@ -43,6 +52,16 @@ std::optional<std::string> RobustnessMockResponses::pop() {
     }
     std::string front = std::move(g_responses.front());
     g_responses.pop();
+    return front;
+}
+
+std::optional<std::string> RobustnessMockResponses::popFailure() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_failures.empty()) {
+        return std::nullopt;
+    }
+    std::string front = std::move(g_failures.front());
+    g_failures.pop();
     return front;
 }
 

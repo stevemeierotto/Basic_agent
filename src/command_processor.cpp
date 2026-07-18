@@ -11,8 +11,10 @@
 #include "chat_retrieval_config.h"
 #include "chat_query_utils.h"
 #include "chat_prompt_config.h"
+#include "chat_generation_safety.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <iostream>
@@ -31,6 +33,8 @@
 namespace fs = std::filesystem;
 
 namespace {
+std::atomic<int> g_processToolCallProbe{0};
+
 std::int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -262,6 +266,68 @@ void CommandProcessor::handleSimilarityCommand(const std::string& args) {
 }
 
 
+void CommandProcessor::resetProcessToolCallProbeForTest() {
+    g_processToolCallProbe.store(0);
+}
+
+int CommandProcessor::processToolCallProbeCountForTest() {
+    return g_processToolCallProbe.load();
+}
+
+void CommandProcessor::applyGenerationDiagnostics(
+    Thoth::ChatRagResponseRecord& record,
+    const Thoth::ChatGeneration::ChatGenerationResult& gen) {
+    record.fallback_used = gen.fallback_used;
+    record.raw_answer_chars = gen.raw_text.size();
+    record.sanitized_answer_chars = gen.sanitized_text.size();
+    record.sanitize_reason = gen.sanitize_reason;
+    record.retried_without_stops = gen.retried_without_stops;
+    record.used_stops = gen.used_stops;
+    record.provider_ok = gen.provider_ok;
+    record.finish_reason = gen.finish_reason;
+}
+
+CommandProcessor::ConversationalTurnResult CommandProcessor::runConversationalGenerate(
+    const std::string& prompt,
+    bool use_greeting_fallback,
+    DecisionTrace& trace,
+    const std::string& generation_stage_message) {
+    ConversationalTurnResult turn;
+
+    Thoth::ChatGeneration::ChatGenerateOptions opts;
+    opts.max_tokens = Thoth::ChatPrompt::kChatMaxTokens;
+    opts.stop_sequences = Thoth::ChatPrompt::chatStopSequences();
+    opts.use_greeting_fallback = use_greeting_fallback;
+
+    const auto generationStartMs = nowMs();
+    turn.gen = Thoth::ChatGeneration::generateAndSanitizeChat(llm, prompt, opts);
+    const auto generationLatencyMs = elapsedMs(generationStartMs);
+
+    if (!turn.gen.provider_ok) {
+        turn.final_response = llm.formatProviderError(turn.gen.provider_error);
+    } else {
+        turn.final_response = processToolCall(turn.gen.sanitized_text, trace);
+    }
+
+    traceLogger.addStage(
+        trace,
+        "generation",
+        turn.gen.provider_ok,
+        generation_stage_message,
+        {{"backend", backendToString(llm.getBackend())},
+         {"generation_latency_ms", generationLatencyMs},
+         {"provider_ok", turn.gen.provider_ok},
+         {"fallback_used", turn.gen.fallback_used},
+         {"retried_without_stops", turn.gen.retried_without_stops},
+         {"used_stops", turn.gen.used_stops},
+         {"sanitize_reason", turn.gen.sanitize_reason},
+         {"raw_answer_chars", turn.gen.raw_text.size()},
+         {"sanitized_answer_chars", turn.gen.sanitized_text.size()},
+         {"finish_reason", turn.gen.finish_reason}});
+
+    return turn;
+}
+
 std::string CommandProcessor::processQuery(const std::string& input) {
     auto trace = traceLogger.startTrace("query", input.size());
     
@@ -403,21 +469,6 @@ std::string CommandProcessor::processQuery(const std::string& input) {
                 "Chat RAG context metrics recorded (no index)",
                 Thoth::ChatRagLogger::contextToJson(contextRecord));
 
-            const auto generationStartMs = nowMs();
-            std::string response = llm.query(
-                finalPrompt,
-                Thoth::ChatPrompt::kChatMaxTokens,
-                Thoth::ChatPrompt::chatStopSequences());
-            const auto generationLatencyMs = elapsedMs(generationStartMs);
-
-            traceLogger.addStage(
-                trace,
-                "generation",
-                true,
-                "LLM response generated (no RAG)",
-                {{"backend", backendToString(llm.getBackend())},
-                 {"generation_latency_ms", generationLatencyMs}});
-
             // Emit empty diagnostics to clear UI
             if (rag.eventCallback) {
                 ControllerEvent ev;
@@ -431,14 +482,16 @@ std::string CommandProcessor::processQuery(const std::string& input) {
                 rag.eventCallback(ev);
             }
 
-            std::string finalResponse = processToolCall(response, trace);
+            const auto turn = runConversationalGenerate(
+                finalPrompt, false, trace, "LLM response generated (no RAG)");
+            const std::string& finalResponse = turn.final_response;
 
             Thoth::ChatRagResponseRecord responseRecord;
             responseRecord.request_id = trace.requestId;
             responseRecord.answer_chars = finalResponse.size();
             responseRecord.retrieved_doc_count = 0;
             responseRecord.grounding_mode = "no_index";
-            responseRecord.fallback_used = false;
+            applyGenerationDiagnostics(responseRecord, turn.gen);
             emitChatRagResponse(responseRecord);
             traceLogger.addStage(
                 trace,
@@ -508,29 +561,16 @@ std::string CommandProcessor::processQuery(const std::string& input) {
                 rag.eventCallback(ev);
             }
 
-            const auto generationStartMs = nowMs();
-            std::string response = llm.query(
-                finalPrompt,
-                Thoth::ChatPrompt::kChatMaxTokens,
-                Thoth::ChatPrompt::chatStopSequences());
-            const auto generationLatencyMs = elapsedMs(generationStartMs);
-
-            traceLogger.addStage(
-                trace,
-                "generation",
-                true,
-                "LLM response generated (greeting skip)",
-                {{"backend", backendToString(llm.getBackend())},
-                 {"generation_latency_ms", generationLatencyMs}});
-
-            std::string finalResponse = processToolCall(response, trace);
+            const auto turn = runConversationalGenerate(
+                finalPrompt, true, trace, "LLM response generated (greeting skip)");
+            const std::string& finalResponse = turn.final_response;
 
             Thoth::ChatRagResponseRecord responseRecord;
             responseRecord.request_id = trace.requestId;
             responseRecord.answer_chars = finalResponse.size();
             responseRecord.retrieved_doc_count = 0;
             responseRecord.grounding_mode = "no_retrieval_hits";
-            responseRecord.fallback_used = false;
+            applyGenerationDiagnostics(responseRecord, turn.gen);
             emitChatRagResponse(responseRecord);
             traceLogger.addStage(
                 trace,
@@ -650,30 +690,17 @@ std::string CommandProcessor::processQuery(const std::string& input) {
             "Chat RAG context metrics recorded",
             Thoth::ChatRagLogger::contextToJson(contextRecord));
 
-        // 3. Query LLM
-        const auto generationStartMs = nowMs();
-        std::string response = llm.query(
-            finalPrompt,
-            Thoth::ChatPrompt::kChatMaxTokens,
-            Thoth::ChatPrompt::chatStopSequences());
-        const auto generationLatencyMs = elapsedMs(generationStartMs);
-
-        traceLogger.addStage(
-            trace,
-            "generation",
-            true,
-            "LLM response generated",
-            {{"backend", backendToString(llm.getBackend())},
-             {"generation_latency_ms", generationLatencyMs}});
-
-        std::string finalResponse = processToolCall(response, trace);
+        // 3. Query LLM (Plan N N6 — shared conversational boundary)
+        const auto turn =
+            runConversationalGenerate(finalPrompt, false, trace, "LLM response generated");
+        const std::string& finalResponse = turn.final_response;
 
         Thoth::ChatRagResponseRecord responseRecord;
         responseRecord.request_id = trace.requestId;
         responseRecord.answer_chars = finalResponse.size();
         responseRecord.retrieved_doc_count = countUniqueDocuments(contextRecord.documents);
         responseRecord.grounding_mode = groundingMode;
-        responseRecord.fallback_used = false;
+        applyGenerationDiagnostics(responseRecord, turn.gen);
         emitChatRagResponse(responseRecord);
         traceLogger.addStage(
             trace,
@@ -706,6 +733,7 @@ std::string CommandProcessor::processQuery(const std::string& input) {
 }
 
 std::string CommandProcessor::processToolCall(const std::string& response, DecisionTrace& trace) {
+    g_processToolCallProbe.fetch_add(1);
     try {
         nlohmann::json responseJson = nlohmann::json::parse(response);
         if (responseJson.contains("tool_call") && responseJson["tool_call"].is_object()) {

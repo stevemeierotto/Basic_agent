@@ -104,6 +104,7 @@ set(BASIC_AGENT_SOURCES
     src/benchmark_case_registry.cpp
     src/chat_rag_golden_cases.cpp
     src/chat_retrieval_boost.cpp
+    src/chat_generation_safety.cpp
     src/chat_query_utils.cpp
     src/reflection_utils.cpp
     src/reflection_ab_cases.cpp

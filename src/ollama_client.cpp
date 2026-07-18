@@ -60,6 +60,9 @@ InferenceGenerateResult OllamaClient::parseGenerateResponse(const std::string& r
     result.raw_json = raw_json;
     try {
         const auto j = json::parse(raw_json);
+        if (j.contains("done_reason") && j["done_reason"].is_string()) {
+            result.finish_reason = j["done_reason"].get<std::string>();
+        }
         if (j.contains("response") && j["response"].is_string()) {
             result.text = j["response"].get<std::string>();
             result.token_usage = parseOllamaTokenUsage(raw_json);

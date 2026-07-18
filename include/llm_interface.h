@@ -15,6 +15,7 @@
 #include <memory>
 #include <vector>
 #include "config.h"
+#include "inference_types.h"
 
 namespace Thoth {
 class InferenceClient;
@@ -25,12 +26,8 @@ enum class LLMBackend {
     OpenAI
 };
 
-/** C6: token counts from the most recent LLM call and cumulative session totals. */
-struct LlmTokenUsage {
-    std::int64_t prompt_tokens = 0;
-    std::int64_t completion_tokens = 0;
-    std::int64_t total_tokens = 0;
-};
+/** @deprecated Prefer Thoth::LlmTokenUsage — kept as alias for existing call sites. */
+using LlmTokenUsage = Thoth::LlmTokenUsage;
 
 class LLMInterface {
 public:
@@ -52,6 +49,19 @@ public:
     std::string query(const std::string& prompt,
                       int num_predict_override,
                       const std::vector<std::string>& stop_sequences);
+
+    /**
+     * Plan N N2 — structured generate for chat safety.
+     * Shares mock / unavailable / test-suite gates with query().
+     */
+    Thoth::InferenceGenerateResult queryDetailed(
+        const std::string& prompt,
+        int num_predict_override,
+        const std::vector<std::string>& stop_sequences);
+
+    /** Plan N N6 — format Class A provider errors for the chat UI (no ChatGenerationResult UI strings). */
+    std::string formatProviderError(const std::string& detail);
+
     LLMBackend getBackend() const { return backend; }
     
     // Allow switching dynamically

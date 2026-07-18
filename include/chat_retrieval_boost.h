@@ -49,7 +49,8 @@ std::vector<std::pair<CodeChunk, float>> selectTopKForInjection(
     std::size_t minChunkChars,
     GragDiagnostics& diagnostics);
 
-/** Format a chunk with document metadata for LLM context (injection-time only). */
+/** Format a chunk with document metadata for LLM context (injection-time only).
+ *  Plan N N4 / L7: emit `source_span=` (not `Lines:`) so ranges do not resemble list cues. */
 std::string formatChunkForPrompt(const CodeChunk& chunk);
 
 /** Plan M G1 (R1) — stats from applying the fail-closed grounding floor. */

@@ -14,13 +14,16 @@
 
 namespace Thoth {
 
-/** Thread-safe FIFO queue consumed by LLMInterface::query() during robustness tests. */
+/** Thread-safe FIFO queue consumed by LLMInterface during robustness / Plan N tests. */
 class RobustnessMockResponses {
 public:
     static void reset();
     static void push(std::string response);
     static void pushAll(const std::vector<std::string>& responses);
+    /** Plan N N6 — next queryDetailed returns ok=false with this error (Class A). */
+    static void pushFailure(std::string error);
     static std::optional<std::string> pop();
+    static std::optional<std::string> popFailure();
     static std::size_t size();
 };
 

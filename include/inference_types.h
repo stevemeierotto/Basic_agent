@@ -7,12 +7,18 @@
  */
 #pragma once
 
-#include "llm_interface.h"
-
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace Thoth {
+
+/** C6 / Plan H: token counts from an inference call. */
+struct LlmTokenUsage {
+    std::int64_t prompt_tokens = 0;
+    std::int64_t completion_tokens = 0;
+    std::int64_t total_tokens = 0;
+};
 
 struct InferenceGenerateRequest {
     std::string model;
@@ -30,6 +36,8 @@ struct InferenceGenerateResult {
     std::string raw_json;
     bool ok = false;
     std::string error;
+    /** Plan N N2 — provider finish reason when present (e.g. stop, length). */
+    std::string finish_reason;
 };
 
 struct InferenceEmbedRequest {

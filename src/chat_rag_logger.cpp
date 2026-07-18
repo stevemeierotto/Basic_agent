@@ -112,6 +112,13 @@ nlohmann::json ChatRagLogger::responseToJson(const ChatRagResponseRecord& record
         {"retrieved_doc_count", record.retrieved_doc_count},
         {"grounding_mode", record.grounding_mode},
         {"fallback_used", record.fallback_used},
+        {"raw_answer_chars", record.raw_answer_chars},
+        {"sanitized_answer_chars", record.sanitized_answer_chars},
+        {"sanitize_reason", record.sanitize_reason},
+        {"retried_without_stops", record.retried_without_stops},
+        {"used_stops", record.used_stops},
+        {"provider_ok", record.provider_ok},
+        {"finish_reason", record.finish_reason},
     };
 }
 
