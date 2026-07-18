@@ -54,6 +54,19 @@ std::string g1dDecisionToString(G1dDecision decision) {
     return "PENDING";
 }
 
+bool isTrajectoryAblationTuneWt(float wt) {
+    return std::fabs(wt - 0.05f) < 1e-6f || std::fabs(wt - 0.1f) < 1e-6f;
+}
+
+bool isTrajectoryAblationG1eWt(float wt) {
+    return std::fabs(wt - (-0.05f)) < 1e-6f || std::fabs(wt - (-0.10f)) < 1e-6f ||
+           std::fabs(wt - (-0.20f)) < 1e-6f;
+}
+
+bool isTrajectoryAblationCliWt(float wt) {
+    return isTrajectoryAblationTuneWt(wt) || isTrajectoryAblationG1eWt(wt);
+}
+
 std::vector<BenchmarkCase> filterTrajectoryDisambiguatesCases(
     const std::vector<BenchmarkCase>& cases) {
     std::vector<BenchmarkCase> filtered;
@@ -66,7 +79,7 @@ std::vector<BenchmarkCase> filterTrajectoryDisambiguatesCases(
     return filtered;
 }
 
-BenchmarkConfig trajectoryAblationArmConfig(TrajectoryAblationArm arm) {
+BenchmarkConfig trajectoryAblationArmConfig(TrajectoryAblationArm arm, float wt_bc) {
     BenchmarkConfig cfg;
     cfg.wq = 0.4f;
     cfg.wd = 0.4f;
@@ -78,11 +91,11 @@ BenchmarkConfig trajectoryAblationArmConfig(TrajectoryAblationArm arm) {
             cfg.force_empty_trajectory = false;
             break;
         case TrajectoryAblationArm::B:
-            cfg.wt = 0.2f;
+            cfg.wt = wt_bc;
             cfg.force_empty_trajectory = false;
             break;
         case TrajectoryAblationArm::C:
-            cfg.wt = 0.2f;
+            cfg.wt = wt_bc;
             cfg.force_empty_trajectory = true;
             break;
     }

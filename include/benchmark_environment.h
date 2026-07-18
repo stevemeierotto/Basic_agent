@@ -71,6 +71,14 @@ struct OllamaEnvironment {
     std::string models_digest_version;
 };
 
+/** G1d-CO A0 — resolved inference backend provenance (participates in env_hash). */
+struct InferenceEnvironment {
+    std::string backend_name;
+    std::string base_url;
+    std::string embed_base_url;
+    std::string diagnostic_digest;
+};
+
 struct BenchmarkEnvironment {
     EnvironmentProvenance prov;
     ModelEnvironment model;
@@ -78,6 +86,7 @@ struct BenchmarkEnvironment {
     CorpusEnvironment corpus;
     IndexEnvironment index;
     OllamaEnvironment ollama;
+    InferenceEnvironment inference;
 
     std::string environment_hash;
 };
@@ -133,6 +142,16 @@ struct BenchmarkEnvironmentInputs {
     bool include_hostname = false;
     /** Used by inferTier for FULL / OLLAMA classification. */
     bool ollama_reachable = false;
+
+    /**
+     * G1d-CO A0 — optional resolved inference snapshot for provenance / env_hash.
+     * When set, backend_name / endpoint URLs / diagnostic_digest enter the hash identity.
+     */
+    std::string inference_backend_name;
+    std::string inference_base_url;
+    std::string inference_embed_base_url;
+    nlohmann::json inference_diagnostics = nlohmann::json::object();
+    bool inference_reachable = false;
 };
 
 BenchmarkEnvironment assembleEnvironment(const BenchmarkEnvironmentInputs& inputs);

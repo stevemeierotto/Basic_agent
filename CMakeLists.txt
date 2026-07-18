@@ -66,6 +66,7 @@ set(BASIC_AGENT_SOURCES
     src/consolidation_policy.cpp
     src/consolidation_api.cpp
     src/restore_api.cpp
+    src/inference_backend_probe.cpp
     src/clock.cpp
     src/episodic_memory.cpp
     src/summary_generator.cpp

@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Steve Meierotto
  *
- * Thoth — G1d trajectory bucket ablation helpers
+ * Thoth — G1d / G1e trajectory bucket ablation helpers
  *
  * Licensed under the MIT License (see LICENSE in project root)
  */
@@ -17,6 +17,8 @@ namespace Thoth {
 
 /** Protocol v1.0 — see docs/trajectory_ablation_benchmark.md */
 constexpr float kTrajectoryAblationNdcgTieEpsilon = 0.001f;
+/** Default Arm B/C trajectory weight (methodology production arm). */
+constexpr float kTrajectoryAblationDefaultWt = 0.2f;
 
 enum class TrajectoryAblationArm { A, B, C };
 
@@ -31,12 +33,30 @@ enum class G1dDecision {
 std::string trajectoryAblationArmLabel(TrajectoryAblationArm arm);
 std::string g1dDecisionToString(G1dDecision decision);
 
+/** True for Phase C TUNE micro-run weights only (`0.05` or `0.1`). */
+bool isTrajectoryAblationTuneWt(float wt);
+
+/**
+ * True for G1e polarity weights only (`-0.05`, `-0.10`, `-0.20`).
+ * See docs/G1E_POLARITY_PROTOCOL.md v1.0.
+ */
+bool isTrajectoryAblationG1eWt(float wt);
+
+/** True if `--wt` is allowed for G1d TUNE or G1e polarity. */
+bool isTrajectoryAblationCliWt(float wt);
+
 /** Filter to TRAJECTORY_DISAMBIGUATES cases only. */
 std::vector<BenchmarkCase> filterTrajectoryDisambiguatesCases(
     const std::vector<BenchmarkCase>& cases);
 
-/** Fixed arm configs per docs/trajectory_ablation_benchmark.md v1.0 */
-BenchmarkConfig trajectoryAblationArmConfig(TrajectoryAblationArm arm);
+/**
+ * Fixed arm configs per docs/trajectory_ablation_benchmark.md v1.0.
+ * @param wt_bc Trajectory weight for arms B and C (A always uses 0).
+ *              Default 0.2; G1d TUNE / G1e pass scheduled override weights.
+ */
+BenchmarkConfig trajectoryAblationArmConfig(
+    TrajectoryAblationArm arm,
+    float wt_bc = kTrajectoryAblationDefaultWt);
 
 /** Winner among A/B/C by nDCG@5; returns A|B|C|TIE. */
 std::string computeTrajectoryAblationWinner(float ndcg_a, float ndcg_b, float ndcg_c);

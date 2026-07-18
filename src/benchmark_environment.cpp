@@ -167,6 +167,10 @@ nlohmann::json canonicalEnvironmentIdentityJson(const BenchmarkEnvironment& env)
         {"ollama_version", env.ollama.version},
         {"ollama_models_digest", env.ollama.models_digest},
         {"ollama_models_digest_version", env.ollama.models_digest_version},
+        {"inference_backend_name", env.inference.backend_name},
+        {"inference_base_url", env.inference.base_url},
+        {"inference_embed_base_url", env.inference.embed_base_url},
+        {"inference_diagnostic_digest", env.inference.diagnostic_digest},
     };
 }
 
@@ -473,6 +477,13 @@ BenchmarkEnvironment assembleEnvironment(const BenchmarkEnvironmentInputs& input
         }
     }
 
+    env.inference.backend_name = inputs.inference_backend_name;
+    env.inference.base_url = inputs.inference_base_url;
+    env.inference.embed_base_url = inputs.inference_embed_base_url;
+    if (!inputs.inference_diagnostics.is_null() && !inputs.inference_diagnostics.empty()) {
+        env.inference.diagnostic_digest = sha256Hex(inputs.inference_diagnostics.dump());
+    }
+
     env.environment_hash = computeEnvironmentHash(env);
     return env;
 }
@@ -525,6 +536,13 @@ nlohmann::json benchmarkEnvironmentToJson(const BenchmarkEnvironment& env) {
              {"version", env.ollama.version},
              {"models_digest", env.ollama.models_digest},
              {"models_digest_version", env.ollama.models_digest_version},
+         }},
+        {"inference",
+         {
+             {"backend_name", env.inference.backend_name},
+             {"base_url", env.inference.base_url},
+             {"embed_base_url", env.inference.embed_base_url},
+             {"diagnostic_digest", env.inference.diagnostic_digest},
          }},
         {"environment_hash", env.environment_hash},
     };
@@ -587,6 +605,13 @@ BenchmarkEnvironment benchmarkEnvironmentFromJson(const nlohmann::json& json) {
         env.ollama.version = ollama.value("version", "");
         env.ollama.models_digest = ollama.value("models_digest", "");
         env.ollama.models_digest_version = ollama.value("models_digest_version", "");
+    }
+    if (json.contains("inference") && json["inference"].is_object()) {
+        const auto& inference = json["inference"];
+        env.inference.backend_name = inference.value("backend_name", "");
+        env.inference.base_url = inference.value("base_url", "");
+        env.inference.embed_base_url = inference.value("embed_base_url", "");
+        env.inference.diagnostic_digest = inference.value("diagnostic_digest", "");
     }
     env.environment_hash = json.value("environment_hash", "");
     if (env.environment_hash.empty()) {
