@@ -37,8 +37,8 @@ std::string g1dDecisionToString(G1dDecision decision);
 bool isTrajectoryAblationTuneWt(float wt);
 
 /**
- * True for G1e polarity weights only (`-0.05`, `-0.10`, `-0.20`).
- * See docs/G1E_POLARITY_PROTOCOL.md v1.0.
+ * True for G1e polarity weights (`-0.05`, `-0.10`, `-0.20`, and Phase 3b `-0.30`).
+ * See docs/G1E_POLARITY_PROTOCOL.md v1.2.
  */
 bool isTrajectoryAblationG1eWt(float wt);
 

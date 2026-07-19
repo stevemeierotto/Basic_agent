@@ -47,7 +47,7 @@ public:
     // Phase 5.1: Retrieval Weights
     float wq = 0.4f;
     float wd = 0.4f;
-    float wt = 0.0f;
+    float wt = -0.05f;
     float keyword_weight = 0.3f;
     float graph_weight = 0.3f;
 

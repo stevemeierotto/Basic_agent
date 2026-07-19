@@ -1401,7 +1401,7 @@ void ExecutiveController::update_trajectory_embedding_unlocked() {
         } else {
             // Restore from global config if it was zeroed
             if (rag_->config) rag_->getRetrievalConfig().wt = rag_->config->wt;
-            else rag_->getRetrievalConfig().wt = 0.2f;
+            else rag_->getRetrievalConfig().wt = -0.05f;
         }
 
         rag_->setTrajectoryEmbedding(trajectory_embedding_);

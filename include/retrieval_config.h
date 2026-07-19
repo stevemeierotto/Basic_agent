@@ -36,7 +36,7 @@ struct RetrievalConfig {
     // Weights for rescoring (Phase 13 control)
     float wq = 0.4f; // Query weight
     float wd = 0.4f; // Directional (goal) weight
-    float wt = 0.2f; // Trajectory weight
+    float wt = -0.05f; // Trajectory weight (G1e KEEP 2026-07-19)
 
     // Phase 3.1: Hybrid Reranking
     float keyword_weight = 0.3f; // Weight for TF-IDF keyword boost

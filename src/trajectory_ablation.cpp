@@ -60,7 +60,7 @@ bool isTrajectoryAblationTuneWt(float wt) {
 
 bool isTrajectoryAblationG1eWt(float wt) {
     return std::fabs(wt - (-0.05f)) < 1e-6f || std::fabs(wt - (-0.10f)) < 1e-6f ||
-           std::fabs(wt - (-0.20f)) < 1e-6f;
+           std::fabs(wt - (-0.20f)) < 1e-6f || std::fabs(wt - (-0.30f)) < 1e-6f;
 }
 
 bool isTrajectoryAblationCliWt(float wt) {

@@ -224,13 +224,13 @@ int main(int argc, char** argv) {
         } else if (arg == "--wt") {
             if (i + 1 >= argc) {
                 std::cerr << "[FAIL] --wt requires a value (G1d TUNE: 0.05|0.1; "
-                             "G1e: -0.05|-0.10|-0.20).\n";
+                             "G1e: -0.05|-0.10|-0.20|-0.30).\n";
                 return 1;
             }
             tuneWt = static_cast<float>(std::atof(argv[++i]));
             if (!Thoth::isTrajectoryAblationCliWt(*tuneWt)) {
                 std::cerr << "[FAIL] --wt must be G1d TUNE (0.05|0.1) or G1e "
-                             "(-0.05|-0.10|-0.20). Got: "
+                             "(-0.05|-0.10|-0.20|-0.30). Got: "
                           << argv[i] << '\n';
                 return 1;
             }
