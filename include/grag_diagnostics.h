@@ -69,11 +69,13 @@ struct GragDiagnostics {
     float graph_max_contribution = 0.0f;  // Highest graph_score contribution in this retrieval
 
     // For benchmark logging
+    nlohmann::json retrieval_trace = nlohmann::json::object();
+
     nlohmann::json to_json() const {
         nlohmann::json j_breakdowns = nlohmann::json::array();
         for (const auto& b : breakdowns) j_breakdowns.push_back(b.to_json());
 
-        return {
+        nlohmann::json j = {
             {"scoring_type", scoring_type},
             {"routing_mode", routing_mode},
             {"indexes_used", indexes_used},
@@ -92,5 +94,9 @@ struct GragDiagnostics {
             {"graph_activations", graph_activations},
             {"graph_max_contribution", graph_max_contribution}
         };
+        if (!retrieval_trace.is_null() && !retrieval_trace.empty()) {
+            j["retrieval_trace"] = retrieval_trace;
+        }
+        return j;
     }
 };

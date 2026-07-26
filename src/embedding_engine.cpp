@@ -6,6 +6,31 @@
 #include <cmath>
 #include <numeric>
 #include <algorithm>
+#include <cstdlib>
+#include <stdexcept>
+
+namespace {
+
+bool embedStrictModeEnabled() {
+    const char* strict = std::getenv("THOTH_EMBED_STRICT");
+    return strict && (std::string(strict) == "1" || std::string(strict) == "true");
+}
+
+void logEmbedFailure(const Thoth::InferenceClient* client,
+                     const std::string& context,
+                     const std::string& error) {
+    std::cerr << "[EmbeddingEngine] ";
+    if (client) {
+        std::cerr << client->backendName() << ' ';
+    }
+    std::cerr << "embed failed (" << context << ')';
+    if (!error.empty()) {
+        std::cerr << ": " << error;
+    }
+    std::cerr << '\n';
+}
+
+} // namespace
 
 void EmbeddingEngine::ensureInferenceClient() {
     if (inference_client_) {
@@ -123,6 +148,9 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
             std::cerr << ": " << embedded.error;
         }
         std::cerr << ". Falling back micro-batch items to TfIdf.\n";
+        if (embedStrictModeEnabled()) {
+            throw std::runtime_error("External embedding failed (THOTH_EMBED_STRICT=1)");
+        }
         for (const auto& text : microBatch) {
             finalResults.push_back(normalizeVector(embedTfIdf(text)));
         }
@@ -166,10 +194,18 @@ std::vector<float> EmbeddingEngine::embedWordHash(const std::string& text) {
 std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
     try {
         ensureInferenceClient();
-    } catch (...) {
+    } catch (const std::exception& e) {
+        logEmbedFailure(nullptr, "client_unavailable", e.what());
+        if (embedStrictModeEnabled()) {
+            return {};
+        }
         return embedTfIdf(text);
     }
     if (!inference_client_) {
+        logEmbedFailure(nullptr, "client_unavailable", "inference client not initialized");
+        if (embedStrictModeEnabled()) {
+            return {};
+        }
         return embedTfIdf(text);
     }
 
@@ -186,9 +222,24 @@ std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
 
     const auto embedded = inference_client_->embed(request);
     if (embedded.ok && !embedded.embeddings.empty()) {
+        const auto& vec = embedded.embeddings.front();
+        if (static_cast<int>(vec.size()) != getDimension()) {
+            logEmbedFailure(inference_client_.get(),
+                            "dimension_mismatch",
+                            "got " + std::to_string(vec.size()) + " expected "
+                                + std::to_string(getDimension()));
+            if (embedStrictModeEnabled()) {
+                return {};
+            }
+            return embedTfIdf(text);
+        }
         return embedded.embeddings.front();
     }
 
+    logEmbedFailure(inference_client_.get(), "embed_request", embedded.error);
+    if (embedStrictModeEnabled()) {
+        return {};
+    }
     return embedTfIdf(text);
 }
 

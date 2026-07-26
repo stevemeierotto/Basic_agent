@@ -1,5 +1,11 @@
 #include "../include/basic_agent_plugin.h"
+#include "../include/conversation_authority.h"
+#include "../include/corpus_create.h"
+#include "../include/corpus_documents.h"
+#include "../include/engine_error.h"
 #include "../include/file_handler.h"
+#include "../include/research_resources.h"
+#include "../include/graph_statistics.h"
 #include "../include/runtime_bootstrap.h"
 #include "logger.h"
 #include "../include/similarity.h"
@@ -18,7 +24,10 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <random>
+#include <sstream>
 
 BasicAgentPlugin::BasicAgentPlugin()
     : config(),
@@ -80,8 +89,10 @@ BasicAgentPlugin::BasicAgentPlugin()
             std::cerr << "[BasicAgentPlugin] Error parsing config.json\n";
         }
     }
+    config.applyEnvironmentOverrides();
 
     Thoth::logResolvedRuntimeConfig(&config);
+    Thoth::logEmbeddingStartupProbe(&config);
 
     // --- Load retrieval_config.json (Phase 5.1) ---
     std::string retConfigPath = fileHandler.getAgentWorkspacePath("retrieval_config.json");
@@ -304,6 +315,70 @@ std::vector<Memory::EpisodeStepRecord> BasicAgentPlugin::getAllEpisodeSteps() co
     return memory.getAllEpisodeSteps();
 }
 
+nlohmann::json BasicAgentPlugin::listStrategies() const {
+    nlohmann::json items = nlohmann::json::array();
+    for (const auto& s : getAllStrategies()) {
+        nlohmann::json stepPattern = nlohmann::json::array();
+        try {
+            stepPattern = nlohmann::json::parse(s.step_pattern_json);
+        } catch (...) {
+        }
+        items.push_back({
+            {"strategy_id", s.strategy_id},
+            {"description", s.description},
+            {"step_pattern", stepPattern},
+            {"success_rate", s.success_rate},
+            {"created_at", s.created_at},
+        });
+    }
+    return Thoth::ResearchResources::makeCollection(items);
+}
+
+nlohmann::json BasicAgentPlugin::listTrajectories() const {
+    auto trajs = getAllTrajectories();
+    std::sort(trajs.begin(), trajs.end(), [](const auto& a, const auto& b) {
+        return a.created_at > b.created_at;
+    });
+    if (trajs.size() > 20) {
+        trajs.resize(20);
+    }
+
+    nlohmann::json items = nlohmann::json::array();
+    for (const auto& t : trajs) {
+        nlohmann::json trajectory = nlohmann::json::object();
+        try {
+            trajectory = nlohmann::json::parse(t.trajectory_json);
+        } catch (...) {
+        }
+        items.push_back({
+            {"trajectory_id", t.trajectory_id},
+            {"goal", t.goal},
+            {"trajectory", trajectory},
+            {"success_score", t.success_score},
+            {"created_at", t.created_at},
+            {"usage_count", t.usage_count},
+            {"tier", t.tier},
+        });
+    }
+    return Thoth::ResearchResources::makeCollection(items);
+}
+
+nlohmann::json BasicAgentPlugin::listEpisodes() const {
+    nlohmann::json items = nlohmann::json::array();
+    for (const auto& s : getAllEpisodeSteps()) {
+        items.push_back({
+            {"episode_id", s.episode_id},
+            {"goal_id", s.goal_id},
+            {"step_index", s.step_index},
+            {"state_summary", s.state_summary},
+            {"action_taken", s.action_taken},
+            {"result_status", s.result_status},
+            {"timestamp_ms", s.timestamp_ms},
+        });
+    }
+    return Thoth::ResearchResources::makeCollection(items);
+}
+
 std::vector<Memory::CognateExperimentRecord> BasicAgentPlugin::getAllExperiments() const {
     return memory.getAllExperiments();
 }
@@ -314,6 +389,133 @@ bool BasicAgentPlugin::saveExperiment(const Memory::CognateExperimentRecord& rec
 
 Memory::GraphStatistics BasicAgentPlugin::getGraphStatistics() const {
     return memory.getGraphStatistics();
+}
+
+nlohmann::json BasicAgentPlugin::getGraphStatisticsResource() const {
+    const auto stats = getGraphStatistics();
+    const int64_t generated_at =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    nlohmann::json session_id = nullptr;
+    if (controller) {
+        const std::string sid = controller->get_session_id();
+        if (!sid.empty()) {
+            session_id = sid;
+        }
+    }
+    return Thoth::GraphStatistics::makeResponse(
+        Thoth::GraphStatistics::makeStatisticsPayload(stats.total_nodes,
+                                                    stats.total_edges,
+                                                    stats.avg_edge_weight,
+                                                    stats.max_edge_weight,
+                                                    stats.min_edge_weight,
+                                                    stats.total_success_count,
+                                                    stats.total_failure_count),
+        generated_at,
+        session_id);
+}
+
+nlohmann::json BasicAgentPlugin::listCorpusDocuments() const {
+    if (!indexManager) {
+        return Thoth::CorpusDocuments::emptyV1List();
+    }
+    FileHandler fh;
+    return indexManager->listCorpusDocuments(fh.getRagDirectory());
+}
+
+std::string BasicAgentPlugin::getActiveSessionId() const {
+    return memory.getActiveSessionId();
+}
+
+nlohmann::json BasicAgentPlugin::createCorpusDocument(const std::string& suggested_name,
+                                                      const std::string& content,
+                                                      const std::string& owner_context_id) {
+    if (!indexManager) {
+        throw Thoth::EngineException(
+            Thoth::EngineError::engineBusy("Index manager not initialized."));
+    }
+    FileHandler fh;
+    const auto outcome = indexManager->createCorpusDocument(
+        fh.getRagDirectory(), suggested_name, content, owner_context_id);
+    if (!outcome.ok) {
+        throw Thoth::EngineException(
+            Thoth::EngineError::invalidRequest(outcome.error));
+    }
+    return Thoth::CorpusCreate::makeAcceptedResponse(outcome.document_id, outcome.document_name);
+}
+
+namespace {
+
+std::string newConversationSessionId() {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    std::random_device rd;
+    std::uniform_int_distribution<std::uint32_t> dist;
+    std::ostringstream out;
+    out << "session-" << ms << "-" << std::hex << dist(rd);
+    return out.str();
+}
+
+} // namespace
+
+nlohmann::json BasicAgentPlugin::createConversationSession() {
+    return Thoth::ConversationAuthority::makeCreateSessionResponse(newConversationSessionId());
+}
+
+nlohmann::json BasicAgentPlugin::appendUserTurn(const std::string& session_id,
+                                                const std::string& content) {
+    if (session_id.empty()) {
+        throw Thoth::EngineException(
+            Thoth::EngineError::invalidRequest("session_id must not be empty."));
+    }
+    if (content.empty()) {
+        throw Thoth::EngineException(
+            Thoth::EngineError::invalidRequest("content must not be empty."));
+    }
+
+    setSessionId(session_id);
+    const std::string assistant_text = processInput(content);
+
+    const auto messages = memory.getTimedMessages(session_id);
+    if (messages.empty()) {
+        throw Thoth::EngineException(
+            Thoth::EngineError::internalError("Conversation store missing assistant turn."));
+    }
+
+    const Memory::TimedMessage& last = messages.back();
+    if (last.role != "assistant") {
+        throw Thoth::EngineException(
+            Thoth::EngineError::internalError("Expected assistant turn after append."));
+    }
+
+    return Thoth::ConversationAuthority::makeAppendTurnResponse(
+        session_id,
+        Thoth::ConversationAuthority::makeMessage(last.role, last.content, last.timestamp_ms));
+}
+
+nlohmann::json BasicAgentPlugin::getConversationForSession(const std::string& session_id) const {
+    if (session_id.empty()) {
+        throw Thoth::EngineException(
+            Thoth::EngineError::invalidRequest("session_id must not be empty."));
+    }
+    nlohmann::json messages = nlohmann::json::array();
+    for (const auto& msg : memory.getTimedMessages(session_id)) {
+        messages.push_back(
+            Thoth::ConversationAuthority::makeMessage(msg.role, msg.content, msg.timestamp_ms));
+    }
+    return Thoth::ConversationAuthority::makeConversationResponse(session_id, messages);
+}
+
+nlohmann::json BasicAgentPlugin::getConversationSummaryForSession(
+    const std::string& session_id) const {
+    if (session_id.empty()) {
+        throw Thoth::EngineException(
+            Thoth::EngineError::invalidRequest("session_id must not be empty."));
+    }
+    return Thoth::ConversationAuthority::makeSummaryResponse(
+        session_id, memory.getSummaryForSession(session_id));
 }
 
 void BasicAgentPlugin::syncPlannerPromptConfig() {

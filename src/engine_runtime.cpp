@@ -9,6 +9,12 @@
 #include "../include/engine_runtime.h"
 
 #include "../include/basic_agent_plugin.h"
+#include "../include/decision_summary.h"
+#include "../include/conversation_authority.h"
+#include "../include/research_resources.h"
+#include "../include/graph_statistics.h"
+#include "../include/corpus_documents.h"
+#include "../include/corpus_create.h"
 #include "../include/engine_error.h"
 #include "../include/file_handler.h"
 
@@ -16,6 +22,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <queue>
@@ -424,7 +431,163 @@ bool EngineRuntime::isReady() const {
 }
 
 std::vector<std::string> EngineRuntime::capabilities() const {
-    return {"chat", "goals", "control", "events"};
+    return {"chat", "goals", "control", "events", "diagnostics", "corpus", "ingest",
+            "conversation", "strategies", "trajectories", "episodes", "graph_stats"};
+}
+
+nlohmann::json EngineRuntime::getLatestDecisionSummary() const {
+    FileHandler fh;
+    const std::string path = fh.getAgentWorkspacePath("decision_trace.jsonl");
+    return DecisionSummary::loadLatestFromDecisionTraceFile(path);
+}
+
+nlohmann::json EngineRuntime::listCorpusDocuments() const {
+    if (!impl_ || !impl_->plugin) {
+        return CorpusDocuments::emptyV1List();
+    }
+    return impl_->plugin->listCorpusDocuments();
+}
+
+nlohmann::json EngineRuntime::createCorpusDocument(const std::string& suggested_name,
+                                                   const std::string& content,
+                                                   const std::string& owner_context_id) {
+    if (!isReady()) {
+        throw EngineException(EngineError::engineBusy("Engine is not ready."));
+    }
+    if (!impl_ || !impl_->plugin) {
+        throw EngineException(EngineError::engineBusy("Engine plugin not initialized."));
+    }
+    return impl_->plugin->createCorpusDocument(suggested_name, content, owner_context_id);
+}
+
+nlohmann::json EngineRuntime::createConversationSession() {
+    if (!isReady()) {
+        throw EngineException(EngineError::engineBusy("Engine is not ready."));
+    }
+    if (!impl_ || !impl_->plugin) {
+        throw EngineException(EngineError::engineBusy("Engine plugin not initialized."));
+    }
+    auto promise = std::make_shared<std::promise<nlohmann::json>>();
+    std::future<nlohmann::json> future = promise->get_future();
+    impl_->enqueue([this, promise]() {
+        try {
+            nlohmann::json body = impl_->plugin->createConversationSession();
+            impl_->known_sessions.insert(body["session_id"].get<std::string>());
+            promise->set_value(std::move(body));
+        } catch (...) {
+            promise->set_exception(std::current_exception());
+        }
+    });
+    try {
+        return future.get();
+    } catch (const EngineException&) {
+        throw;
+    } catch (const std::exception& ex) {
+        throw EngineException(EngineError::internalError(ex.what()));
+    }
+}
+
+nlohmann::json EngineRuntime::appendUserTurn(const std::string& session_id,
+                                             const std::string& content) {
+    if (!isReady()) {
+        throw EngineException(EngineError::engineBusy("Engine is not ready."));
+    }
+    if (!impl_ || !impl_->plugin) {
+        throw EngineException(EngineError::engineBusy("Engine plugin not initialized."));
+    }
+    const std::string resolved = normalizeEngineSessionId(session_id);
+    auto promise = std::make_shared<std::promise<nlohmann::json>>();
+    std::future<nlohmann::json> future = promise->get_future();
+    impl_->enqueue([this, promise, resolved, content]() {
+        try {
+            impl_->ensureSessionOnWorker(resolved);
+            promise->set_value(impl_->plugin->appendUserTurn(resolved, content));
+        } catch (...) {
+            promise->set_exception(std::current_exception());
+        }
+    });
+    try {
+        return future.get();
+    } catch (const EngineException&) {
+        throw;
+    } catch (const std::exception& ex) {
+        throw EngineException(EngineError::internalError(ex.what()));
+    }
+}
+
+nlohmann::json EngineRuntime::getConversationForSession(const std::string& session_id) const {
+    if (!impl_ || !impl_->plugin) {
+        return ConversationAuthority::emptyConversation(session_id);
+    }
+    const std::string resolved = normalizeEngineSessionId(session_id);
+    auto promise = std::make_shared<std::promise<nlohmann::json>>();
+    std::future<nlohmann::json> future = promise->get_future();
+    const_cast<EngineRuntime*>(this)->impl_->enqueue([this, promise, resolved]() {
+        try {
+            promise->set_value(impl_->plugin->getConversationForSession(resolved));
+        } catch (...) {
+            promise->set_exception(std::current_exception());
+        }
+    });
+    try {
+        return future.get();
+    } catch (const EngineException&) {
+        throw;
+    } catch (const std::exception& ex) {
+        throw EngineException(EngineError::internalError(ex.what()));
+    }
+}
+
+nlohmann::json EngineRuntime::getConversationSummaryForSession(
+    const std::string& session_id) const {
+    if (!impl_ || !impl_->plugin) {
+        return ConversationAuthority::makeSummaryResponse(session_id, "");
+    }
+    const std::string resolved = normalizeEngineSessionId(session_id);
+    auto promise = std::make_shared<std::promise<nlohmann::json>>();
+    std::future<nlohmann::json> future = promise->get_future();
+    const_cast<EngineRuntime*>(this)->impl_->enqueue([this, promise, resolved]() {
+        try {
+            promise->set_value(impl_->plugin->getConversationSummaryForSession(resolved));
+        } catch (...) {
+            promise->set_exception(std::current_exception());
+        }
+    });
+    try {
+        return future.get();
+    } catch (const EngineException&) {
+        throw;
+    } catch (const std::exception& ex) {
+        throw EngineException(EngineError::internalError(ex.what()));
+    }
+}
+
+nlohmann::json EngineRuntime::listStrategies() const {
+    if (!impl_ || !impl_->plugin) {
+        return ResearchResources::emptyCollection();
+    }
+    return impl_->plugin->listStrategies();
+}
+
+nlohmann::json EngineRuntime::listTrajectories() const {
+    if (!impl_ || !impl_->plugin) {
+        return ResearchResources::emptyCollection();
+    }
+    return impl_->plugin->listTrajectories();
+}
+
+nlohmann::json EngineRuntime::listEpisodes() const {
+    if (!impl_ || !impl_->plugin) {
+        return ResearchResources::emptyCollection();
+    }
+    return impl_->plugin->listEpisodes();
+}
+
+nlohmann::json EngineRuntime::getGraphStatisticsResource() const {
+    if (!impl_ || !impl_->plugin) {
+        return GraphStatistics::emptyResponse(0);
+    }
+    return impl_->plugin->getGraphStatisticsResource();
 }
 
 } // namespace Thoth

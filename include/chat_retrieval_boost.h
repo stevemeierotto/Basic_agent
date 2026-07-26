@@ -10,6 +10,7 @@
 
 #include "chunkers/code_chunk.h"
 #include "grag_diagnostics.h"
+#include "agent_context_retrieval.h"
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,7 +36,8 @@ void ensureFilenameCoverage(IndexManager* indexManager,
                             const std::vector<std::string>& tokens,
                             const std::string& query,
                             std::vector<std::pair<CodeChunk, float>>& ragResults,
-                            int minPerFile = 2);
+                            int minPerFile = 2,
+                            const Thoth::RetrievalScope* retrievalScope = nullptr);
 
 /** Re-score and re-sort conversational retrieval candidates (no goal embedding). */
 void applyConversationalBoosts(std::vector<std::pair<CodeChunk, float>>& ranked,

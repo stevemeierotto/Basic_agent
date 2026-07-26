@@ -7,6 +7,7 @@
  */
 
 #include "../include/workflow_engine.h"
+#include "../include/agent_context_retrieval.h"
 #include "../include/tools.h"
 #include "../include/rag.h"
 #include "../include/e2_strict_retrieval.h"
@@ -576,10 +577,12 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
         }
 
         GragDiagnostics diagnostics;
+        Thoth::RetrievalScope retrievalScope = Thoth::resolveAgentContextRetrievalScope(
+            memory_ ? memory_->getActiveSessionId() : std::string{}, ragPipeline_->indexManager);
         auto chunks = ragPipeline_->retrieveRelevant(
             query, {}, topK, "", planId, step.step_id,
             context.goal_embedding, context.current_embedding, context.trajectory_embedding,
-            &diagnostics);
+            &diagnostics, &retrievalScope, nullptr);
         
         nlohmann::json chunksJson = nlohmann::json::array();
         for (const auto& chunk : chunks) {

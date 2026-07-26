@@ -77,6 +77,7 @@ struct ChatRagContextRecord {
     float max_score = 0.0f;                        // max finite candidate score
     bool has_injected_scores = false;             // true when min_injected_score is meaningful
     float min_injected_score = 0.0f;               // min injected score
+    nlohmann::json retrieval_trace = nlohmann::json::object();
 };
 
 struct ChatRagResponseRecord {

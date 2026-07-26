@@ -11,6 +11,11 @@
 #include "../include/engine_error.h"
 #include "../include/engine_runtime.h"
 #include "../include/engine_sse_session.h"
+#include "../include/conversation_authority.h"
+#include "../include/research_resources.h"
+#include "../include/graph_statistics.h"
+#include "../include/corpus_create.h"
+#include "../include/corpus_documents.h"
 
 #include <httplib.h>
 #include <json.hpp>
@@ -275,6 +280,248 @@ struct EngineHttpTransport::Impl {
                             [this, &res]() { return rejectIfShuttingDown(res); },
                             [this]() { runtime.abort(); });
                     });
+
+        server.Get("/v1/diagnostics/latest-decision",
+                   [this](const httplib::Request&, httplib::Response& res) {
+                       if (rejectIfShuttingDown(res)) {
+                           return;
+                       }
+                       if (!runtime.isReady()) {
+                           setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                           return;
+                       }
+                       setJsonResponse(res, 200, runtime.getLatestDecisionSummary());
+                   });
+
+        server.Get("/v1/rag/corpus",
+                   [this](const httplib::Request&, httplib::Response& res) {
+                       if (rejectIfShuttingDown(res)) {
+                           return;
+                       }
+                       if (!runtime.isReady()) {
+                           setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                           return;
+                       }
+                       setJsonResponse(res, 200, runtime.listCorpusDocuments());
+                   });
+
+        server.Post("/v1/rag/documents",
+                    [this](const httplib::Request& req, httplib::Response& res) {
+                        if (rejectIfShuttingDown(res)) {
+                            return;
+                        }
+                        if (!runtime.isReady()) {
+                            setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                            return;
+                        }
+
+                        nlohmann::json body;
+                        if (!parseJsonBody(req.body, body, res)) {
+                            return;
+                        }
+                        if (!body.contains("content") || !body["content"].is_string()) {
+                            setErrorResponse(res,
+                                             EngineError::invalidRequest(
+                                                 "Field \"content\" is required."));
+                            return;
+                        }
+                        std::string suggested_name;
+                        if (body.contains("name")) {
+                            if (!body["name"].is_string()) {
+                                setErrorResponse(res,
+                                                 EngineError::invalidRequest(
+                                                     "Field \"name\" must be a string."));
+                                return;
+                            }
+                            suggested_name = body["name"].get<std::string>();
+                        }
+                        const std::string content = body["content"].get<std::string>();
+
+                        std::string owner_context_id;
+                        if (body.contains("session_id")) {
+                            if (!body["session_id"].is_string()) {
+                                setErrorResponse(res,
+                                                 EngineError::invalidRequest(
+                                                     "Field \"session_id\" must be a string."));
+                                return;
+                            }
+                            owner_context_id = body["session_id"].get<std::string>();
+                            const auto trim_bounds = [&owner_context_id]() {
+                                const auto start = owner_context_id.find_first_not_of(" \t\r\n");
+                                if (start == std::string::npos) {
+                                    owner_context_id.clear();
+                                    return;
+                                }
+                                const auto end = owner_context_id.find_last_not_of(" \t\r\n");
+                                owner_context_id =
+                                    owner_context_id.substr(start, end - start + 1);
+                            };
+                            trim_bounds();
+                        }
+
+                        try {
+                            setJsonResponse(res,
+                                            200,
+                                            runtime.createCorpusDocument(suggested_name,
+                                                                         content,
+                                                                         owner_context_id));
+                        } catch (const EngineException& ex) {
+                            setErrorResponse(res, ex.error());
+                        } catch (const std::exception& ex) {
+                            setErrorResponse(res, EngineError::internalError(ex.what()));
+                        } catch (...) {
+                            setErrorResponse(res,
+                                             EngineError::internalError("Unknown engine error."));
+                        }
+                    });
+
+        server.Post("/v1/conversation/sessions",
+                    [this](const httplib::Request&, httplib::Response& res) {
+                        if (rejectIfShuttingDown(res)) {
+                            return;
+                        }
+                        if (!runtime.isReady()) {
+                            setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                            return;
+                        }
+                        try {
+                            setJsonResponse(res, 200, runtime.createConversationSession());
+                        } catch (const EngineException& ex) {
+                            setErrorResponse(res, ex.error());
+                        } catch (const std::exception& ex) {
+                            setErrorResponse(res, EngineError::internalError(ex.what()));
+                        } catch (...) {
+                            setErrorResponse(res,
+                                             EngineError::internalError("Unknown engine error."));
+                        }
+                    });
+
+        server.Post("/v1/conversation/turns",
+                    [this](const httplib::Request& req, httplib::Response& res) {
+                        if (rejectIfShuttingDown(res)) {
+                            return;
+                        }
+                        if (!runtime.isReady()) {
+                            setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                            return;
+                        }
+                        nlohmann::json body;
+                        if (!parseJsonBody(req.body, body, res)) {
+                            return;
+                        }
+                        if (!body.contains("session_id") || !body["session_id"].is_string()) {
+                            setErrorResponse(res,
+                                             EngineError::invalidRequest(
+                                                 "Field \"session_id\" is required."));
+                            return;
+                        }
+                        if (!body.contains("content") || !body["content"].is_string()) {
+                            setErrorResponse(res,
+                                             EngineError::invalidRequest(
+                                                 "Field \"content\" is required."));
+                            return;
+                        }
+                        const std::string session_id = body["session_id"].get<std::string>();
+                        const std::string content = body["content"].get<std::string>();
+                        try {
+                            setJsonResponse(res, 200, runtime.appendUserTurn(session_id, content));
+                        } catch (const EngineException& ex) {
+                            setErrorResponse(res, ex.error());
+                        } catch (const std::exception& ex) {
+                            setErrorResponse(res, EngineError::internalError(ex.what()));
+                        } catch (...) {
+                            setErrorResponse(res,
+                                             EngineError::internalError("Unknown engine error."));
+                        }
+                    });
+
+        server.Get(R"(/v1/conversation/sessions/([A-Za-z0-9._-]+)/summary)",
+                   [this](const httplib::Request& req, httplib::Response& res) {
+                       if (rejectIfShuttingDown(res)) {
+                           return;
+                       }
+                       if (!runtime.isReady()) {
+                           setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                           return;
+                       }
+                       const std::string session_id = req.matches[1];
+                       try {
+                           setJsonResponse(res, 200,
+                                           runtime.getConversationSummaryForSession(session_id));
+                       } catch (const EngineException& ex) {
+                           setErrorResponse(res, ex.error());
+                       } catch (const std::exception& ex) {
+                           setErrorResponse(res, EngineError::internalError(ex.what()));
+                       }
+                   });
+
+        server.Get(R"(/v1/conversation/sessions/([A-Za-z0-9._-]+))",
+                   [this](const httplib::Request& req, httplib::Response& res) {
+                       if (rejectIfShuttingDown(res)) {
+                           return;
+                       }
+                       if (!runtime.isReady()) {
+                           setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                           return;
+                       }
+                       const std::string session_id = req.matches[1];
+                       try {
+                           setJsonResponse(res, 200,
+                                           runtime.getConversationForSession(session_id));
+                       } catch (const EngineException& ex) {
+                           setErrorResponse(res, ex.error());
+                       } catch (const std::exception& ex) {
+                           setErrorResponse(res, EngineError::internalError(ex.what()));
+                       }
+                   });
+
+        server.Get("/v1/research/strategies",
+                   [this](const httplib::Request&, httplib::Response& res) {
+                       if (rejectIfShuttingDown(res)) {
+                           return;
+                       }
+                       if (!runtime.isReady()) {
+                           setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                           return;
+                       }
+                       setJsonResponse(res, 200, runtime.listStrategies());
+                   });
+
+        server.Get("/v1/research/trajectories",
+                   [this](const httplib::Request&, httplib::Response& res) {
+                       if (rejectIfShuttingDown(res)) {
+                           return;
+                       }
+                       if (!runtime.isReady()) {
+                           setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                           return;
+                       }
+                       setJsonResponse(res, 200, runtime.listTrajectories());
+                   });
+
+        server.Get("/v1/research/episodes",
+                   [this](const httplib::Request&, httplib::Response& res) {
+                       if (rejectIfShuttingDown(res)) {
+                           return;
+                       }
+                       if (!runtime.isReady()) {
+                           setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                           return;
+                       }
+                       setJsonResponse(res, 200, runtime.listEpisodes());
+                   });
+
+        server.Get("/v1/graph/stats",
+                   [this](const httplib::Request&, httplib::Response& res) {
+                       if (rejectIfShuttingDown(res)) {
+                           return;
+                       }
+                       if (!runtime.isReady()) {
+                           setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                           return;
+                       }
+                       setJsonResponse(res, 200, runtime.getGraphStatisticsResource());
+                   });
 
         server.Get("/v1/events", [this](const httplib::Request& req, httplib::Response& res) {
             if (rejectIfShuttingDown(res)) {

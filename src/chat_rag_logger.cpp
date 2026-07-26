@@ -65,7 +65,7 @@ nlohmann::json ChatRagLogger::contextToJson(const ChatRagContextRecord& record) 
         });
     }
 
-    return {
+    nlohmann::json j = {
         {"event", "CHAT_RAG_CONTEXT"},
         {"request_id", record.request_id},
         {"query", record.query},
@@ -102,6 +102,10 @@ nlohmann::json ChatRagLogger::contextToJson(const ChatRagContextRecord& record) 
                                    ? nlohmann::json(record.min_injected_score)
                                    : nlohmann::json(nullptr)},
     };
+    if (!record.retrieval_trace.is_null() && !record.retrieval_trace.empty()) {
+        j["retrieval_trace"] = record.retrieval_trace;
+    }
+    return j;
 }
 
 nlohmann::json ChatRagLogger::responseToJson(const ChatRagResponseRecord& record) {

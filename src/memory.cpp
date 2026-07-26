@@ -168,6 +168,27 @@ std::vector<json> Memory::getConversation() const {
     return result;
 }
 
+std::vector<Memory::TimedMessage> Memory::getTimedMessages(const std::string& sessionId) const {
+    std::shared_lock lock(mtx);
+    if (!repo) {
+        return {};
+    }
+    std::vector<TimedMessage> result;
+    for (const auto& record : repo->getMessages(sessionId)) {
+        result.push_back({record.role, record.content, record.timestamp_ms});
+    }
+    return result;
+}
+
+std::string Memory::getSummaryForSession(const std::string& sessionId,
+                                         bool useExtended) const {
+    std::shared_lock lock(mtx);
+    if (!repo) {
+        return {};
+    }
+    return repo->getSummary(sessionId, useExtended ? "extended" : "short");
+}
+
 void Memory::clear() {
     std::unique_lock lock(mtx);
     if (repo) repo->clearMessages(activeSessionId);

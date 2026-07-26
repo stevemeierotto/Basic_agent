@@ -9,6 +9,7 @@
 
 #include "controller_event.h"
 #include "engine_event.h"
+#include "json.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -58,6 +59,37 @@ public:
     std::string workspacePath() const;
     bool isReady() const;
     std::vector<std::string> capabilities() const;
+
+    /**
+     * Phase 4 — structured decision summary for Explain Plan.
+     * Assembled from Engine workspace traces (storage is an implementation detail).
+     */
+    nlohmann::json getLatestDecisionSummary() const;
+
+    /**
+     * Phase 8 — Engine-owned corpus document list.
+     * Storage format is an implementation detail — never part of the GUI API.
+     */
+    nlohmann::json listCorpusDocuments() const;
+
+    /**
+     * Phase 9 — create corpus document (acceptance JSON).
+     * Indexing progress is emitted via INDEXING_* events after acceptance.
+     */
+    nlohmann::json createCorpusDocument(const std::string& suggested_name,
+                                        const std::string& content,
+                                        const std::string& owner_context_id = "");
+
+    nlohmann::json createConversationSession();
+    nlohmann::json appendUserTurn(const std::string& session_id, const std::string& content);
+    nlohmann::json getConversationForSession(const std::string& session_id) const;
+    nlohmann::json getConversationSummaryForSession(const std::string& session_id) const;
+
+    nlohmann::json listStrategies() const;
+    nlohmann::json listTrajectories() const;
+    nlohmann::json listEpisodes() const;
+
+    nlohmann::json getGraphStatisticsResource() const;
 
 private:
     EngineRuntime();

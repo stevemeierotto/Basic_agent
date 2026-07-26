@@ -92,6 +92,9 @@ public:
     bool loadFromJson(const std::string& path);
     bool saveToJson(const std::string& path) const;
 
+    /** Apply model-name overrides from environment (after loadFromJson). */
+    void applyEnvironmentOverrides();
+
     // Phase 5.1: Separate Retrieval Config
     bool loadRetrievalConfig(const std::string& path);
     bool saveRetrievalConfig(const std::string& path) const;

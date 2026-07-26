@@ -1,4 +1,5 @@
 #include "../include/rag.h"
+#include "../include/agent_context_retrieval.h"
 #include "../include/e2_strict_enforcement.h"
 #include "../include/decision_trace.h"
 #include "../include/file_handler.h"
@@ -41,11 +42,15 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
                                                    const std::vector<float>& g_emb,
                                                    const std::vector<float>& c_emb,
                                                    const std::vector<float>& t_emb,
-                                                   GragDiagnostics* outDiagnostics) {
+                                                   GragDiagnostics* outDiagnostics,
+                                                   const Thoth::RetrievalScope* retrievalScope,
+                                                   Thoth::RetrievalTrace* outTrace) {
     // A5.0b — runtime diagnostic fuse: STRICT eval context must not reach heuristics.
     Thoth::guardAgainstStrictHeuristicRetrieval(activeE2EvalConfig_);
 
     std::vector<CodeChunk> finalMatches;
+    GragDiagnostics diagnostics;
+
     if (!indexManager) {
         if (outDiagnostics) {
             *outDiagnostics = GragDiagnostics{};
@@ -53,12 +58,37 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
         return finalMatches;
     }
 
+    const Thoth::RetrievalScope localScope =
+        retrievalScope ? *retrievalScope
+                       : Thoth::resolveAgentContextRetrievalScope(indexManager->getSessionId(),
+                                                                  indexManager);
+    const Thoth::RetrievalScope* activeScope = retrievalScope ? retrievalScope : &localScope;
+
+    auto emitRetrievalTrace = [&](const nlohmann::json& groundingJson) {
+        Thoth::RetrievalTrace trace =
+            Thoth::buildRetrievalTrace(*activeScope, requestId, &diagnostics, groundingJson);
+        const nlohmann::json envelope = trace.toJson();
+        if (outTrace) {
+            *outTrace = std::move(trace);
+        }
+        diagnostics.retrieval_trace = envelope;
+        if (outDiagnostics) {
+            *outDiagnostics = diagnostics;
+            outDiagnostics->retrieval_trace = envelope;
+        }
+        if (eventCallback) {
+            ControllerEvent ev;
+            ev.type = EventType::RETRIEVAL_DIAGNOSTICS;
+            ev.session_id = activeScope->active_context_key;
+            ev.metadata = diagnostics.to_json();
+            eventCallback(ev);
+        }
+    };
+
     // Use passed embeddings if provided, otherwise fallback to internal state
     const std::vector<float>& activeGoal = g_emb.empty() ? goalEmbedding : g_emb;
     const std::vector<float>& activeCurrent = c_emb.empty() ? currentEmbedding : c_emb;
     const std::vector<float>& activeTraj = t_emb.empty() ? trajectoryEmbedding : t_emb;
-
-    GragDiagnostics diagnostics;
 
     // Sync weights
     if (config && retrievalConfig.mode == RetrievalMode::AUTO) {
@@ -77,7 +107,7 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
     
     // Note: indexManager->retrieveChunks usually handles its own locking for the search,
     // but we need the chunks themselves to stay valid while we rescore.
-    auto rawResults = indexManager->retrieveChunks(query, recallK);
+    auto rawResults = indexManager->retrieveChunks(query, recallK, activeScope);
 
     std::vector<std::pair<CodeChunk, float>> rag_results;
     for (const auto& [chunkCode, score] : rawResults) {
@@ -133,7 +163,8 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
     }
 
     if (rag_results.empty()) {
-        if (outDiagnostics) {
+        emitRetrievalTrace(nlohmann::json::object());
+        if (outDiagnostics && outDiagnostics->retrieval_trace.empty()) {
             *outDiagnostics = diagnostics;
         }
         return finalMatches;
@@ -146,8 +177,28 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
         }
         if (!filenameTokens.empty()) {
             Thoth::ChatRetrieval::ensureFilenameCoverage(
-                indexManager, filenameTokens, query, rag_results, 3);
+                indexManager, filenameTokens, query, rag_results, 3, activeScope);
         }
+    }
+
+    if (activeScope) {
+        std::vector<std::pair<CodeChunk, float>> scoped;
+        scoped.reserve(rag_results.size());
+        for (const auto& entry : rag_results) {
+            if (entry.first.fileName.rfind("warm_memory:", 0) == 0) {
+                scoped.push_back(entry);
+                continue;
+            }
+            if (Thoth::chunkPassesRetrievalScope(entry.first, *activeScope)) {
+                scoped.push_back(entry);
+            }
+        }
+        rag_results = std::move(scoped);
+    }
+
+    if (rag_results.empty()) {
+        emitRetrievalTrace(nlohmann::json::object());
+        return finalMatches;
     }
 
     try {
@@ -190,13 +241,7 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
         diagnostics.step_id = sId.empty() ? stepId : sId;
         diagnostics.goal_present = goalDirected;
 
-        if (eventCallback) {
-            ControllerEvent ev;
-            ev.type = EventType::RETRIEVAL_DIAGNOSTICS;
-            ev.metadata = diagnostics.to_json();
-            eventCallback(ev);
-        }
-
+        emitRetrievalTrace(nlohmann::json::object());
         logGragBenchmark(requestId, query, diagnostics);
 
         if (outDiagnostics) {

@@ -21,6 +21,7 @@
 #include "grag_scorer.h"
 #include "controller_event.h"
 #include "grag_diagnostics.h"
+#include "agent_context_retrieval.h"
 
 class Memory;
 
@@ -45,7 +46,9 @@ public:
                                             const std::vector<float>& g_emb = {},
                                             const std::vector<float>& c_emb = {},
                                             const std::vector<float>& t_emb = {},
-                                            GragDiagnostics* outDiagnostics = nullptr);
+                                            GragDiagnostics* outDiagnostics = nullptr,
+                                            const Thoth::RetrievalScope* retrievalScope = nullptr,
+                                            Thoth::RetrievalTrace* outTrace = nullptr);
 
     // Simple textual query
     std::string query(const std::string& queryStr);

@@ -17,6 +17,12 @@ void bootstrapRuntimeEnvironment();
 /** Print resolved workspace/log/inference paths when diagnostics are enabled. */
 void logResolvedRuntimeConfig(const Config* config = nullptr);
 
+/**
+ * Probe the configured embedding endpoint once at startup.
+ * Always logs success or failure; verbose detail when diagnostics are enabled.
+ */
+void logEmbeddingStartupProbe(const Config* config = nullptr);
+
 /** Returns true when THOTH_LOG_CONFIG=1 or config verbosity >= 2. */
 bool runtimeConfigDiagnosticsEnabled(const Config* config = nullptr);
 

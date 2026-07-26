@@ -52,6 +52,18 @@ Config::Config()
         } catch (...) {
         }
     }
+    applyEnvironmentOverrides();
+}
+
+void Config::applyEnvironmentOverrides() {
+    if (const char* envModel = std::getenv("OLLAMA_MODEL"); envModel && *envModel) {
+        llm_model = envModel;
+    }
+    if (const char* envEmbed = std::getenv("THOTH_EMBEDDING_MODEL"); envEmbed && *envEmbed) {
+        embedding_model = envEmbed;
+    } else if (const char* envEmbed = std::getenv("OLLAMA_EMBED_MODEL"); envEmbed && *envEmbed) {
+        embedding_model = envEmbed;
+    }
 }
 
 bool Config::loadFromJson(const std::string& path) {
@@ -134,6 +146,7 @@ bool Config::loadFromJson(const std::string& path) {
         }
     }
 
+    applyEnvironmentOverrides();
     return true;
 }
 

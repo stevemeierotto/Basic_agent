@@ -3,6 +3,8 @@
 #include "embedding_engine.h"
 #include "chunkers/chunker.h"
 #include "controller_event.h"
+#include "json.hpp"
+#include "agent_context_retrieval.h"
 #include <vector>
 #include <string>
 #include <memory>
@@ -15,6 +17,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <functional>
+#include <optional>
 
 
 class IndexManager {
@@ -53,10 +56,41 @@ public:
     /** Limit retrieval to session RAG paths (files and directory roots). Empty = no filter. */
     void setActiveCorpusFiles(const std::vector<std::string>& filePaths);
 
+    /** Phase 8 — Engine-owned corpus document list (no paths in JSON). */
+    nlohmann::json listCorpusDocuments(const std::string& ragDirectory) const;
+
+    /** Phase 9 — atomic create + async indexing (acceptance ≠ INDEXING_*). */
+    struct CreateCorpusDocumentResult {
+        bool ok = false;
+        std::string error;
+        std::string document_id;
+        std::string document_name;
+    };
+
+    CreateCorpusDocumentResult createCorpusDocument(const std::string& ragDirectory,
+                                                    const std::string& suggested_name,
+                                                    const std::string& content,
+                                                    const std::string& owner_context_id = "");
+
+    /** R2 — record worker outcome for corpus `failed` (in-memory; Option A). */
+    void recordIndexingOutcome(const std::string& normalizedPath,
+                               bool success,
+                               int chunk_count,
+                               const std::string& reason);
+
+    const std::string& getSessionId() const { return session_id; }
+
     VectorStore store;
     std::string getCurrentCommitHash() const;
     bool shouldReindexFile(const std::string& filePath);
-    std::vector<std::pair<std::string,float>> retrieveChunks(const std::string& query, int topK);
+    std::vector<std::pair<std::string,float>> retrieveChunks(const std::string& query, int topK,
+                                                             const Thoth::RetrievalScope* scope = nullptr);
+
+    /** TCB2 / TCB3 — bind ingested document to Agent Context (v1: owner = session_id). */
+    void registerAttachmentOwner(const std::string& normalizedPath,
+                                 const std::string& owner_context_id);
+
+    void classifyAllChunksMetadata();
 
     EmbeddingEngine* getTfIdfEngine() const { return localTfIdfEngine.get(); }
 
@@ -70,7 +104,7 @@ private:
     static constexpr size_t MAX_CHUNKS = 10000;
     static constexpr size_t MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
 
-    bool isSupportedExtension(const std::string& ext) {
+    bool isSupportedExtension(const std::string& ext) const {
         return SUPPORTED_EXTENSIONS.find(ext) != SUPPORTED_EXTENSIONS.end();
     }
 
@@ -108,11 +142,26 @@ private:
     void removeChunksFromPath(const std::string& rootPath);
     void removeChunksForFile(const std::string& filePath);
     size_t getCurrentMemoryUsage() const;
+    int countStoredChunksForFile(const std::string& normalizedPath) const;
 
     std::unordered_map<std::string, std::uint64_t> indexedFileFingerprints;
+    /** R2 — terminal indexing failures (normalized absolute path → reason). */
+    mutable std::shared_mutex outcomesMutex_;
+    std::unordered_map<std::string, std::string> indexingFailureReasons_;
 
     std::set<std::string> activeCorpusFiles_;
     std::vector<std::string> activeCorpusRoots_;
+    std::unordered_map<std::string, std::string> attachmentOwners_;
     bool chunkInActiveCorpus(const CodeChunk& chunk) const;
+    bool chunkPassesScopeFilter(const CodeChunk& chunk, const Thoth::RetrievalScope& scope) const;
+    void classifyChunkInPlace(CodeChunk& chunk) const;
+    void classifyAllChunksMetadataUnlocked();
+    void loadAttachmentRegistry();
+    void saveAttachmentRegistry() const;
+
+    /** Session-scoped ingest: existing attachment with same filename for this owner. */
+    std::optional<std::string> findSessionOwnedAttachmentPath(
+        const std::string& owner_context_id,
+        const std::string& base_name) const;
 };
 

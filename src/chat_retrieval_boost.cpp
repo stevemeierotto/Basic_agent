@@ -9,6 +9,7 @@
 #include "../include/chat_retrieval_boost.h"
 #include "../include/chat_retrieval_config.h"
 #include "../include/index_manager.h"
+#include "../include/agent_context_retrieval.h"
 
 #include <algorithm>
 #include <cctype>
@@ -141,7 +142,8 @@ void ensureFilenameCoverage(IndexManager* indexManager,
                             const std::vector<std::string>& tokens,
                             const std::string& query,
                             std::vector<std::pair<CodeChunk, float>>& ragResults,
-                            int minPerFile) {
+                            int minPerFile,
+                            const Thoth::RetrievalScope* retrievalScope) {
     if (!indexManager || tokens.empty() || minPerFile <= 0) {
         return;
     }
@@ -151,6 +153,9 @@ void ensureFilenameCoverage(IndexManager* indexManager,
     std::unordered_map<std::string, std::vector<const CodeChunk*>> matchedByStem;
 
     for (const auto& chunk : allChunks) {
+        if (retrievalScope && !Thoth::chunkPassesRetrievalScope(chunk, *retrievalScope)) {
+            continue;
+        }
         for (const auto& token : tokens) {
             if (filenameMatchesToken(chunk.fileName, token)) {
                 matchedByStem[lowerCopy(stemBasename(chunk.fileName))].push_back(&chunk);

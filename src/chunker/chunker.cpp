@@ -11,6 +11,16 @@ namespace fs = std::filesystem;
 
 namespace Chunker {
 
+namespace {
+std::string normalizedChunkPath(const std::string& filePath) {
+    try {
+        return fs::absolute(filePath).lexically_normal().string();
+    } catch (...) {
+        return filePath;
+    }
+}
+} // namespace
+
 std::vector<CodeChunk> createSmartChunks(const std::string& filePath,
                                                       const std::string& content) {
     std::vector<CodeChunk> chunks;
@@ -64,7 +74,7 @@ std::vector<CodeChunk> chunkByParagraphs(
         if (paragraph.empty()) {
             if (!currentChunk.empty()) {
                 CodeChunk chunk;
-                chunk.fileName = fs::absolute(filePath).string();
+                chunk.fileName = normalizedChunkPath(filePath);
                 chunk.symbolName = "";
                 chunk.startLine = chunkStart;
                 chunk.endLine = lineNum - 1;
@@ -83,7 +93,7 @@ std::vector<CodeChunk> chunkByParagraphs(
     // Add final chunk if exists
     if (!currentChunk.empty()) {
         CodeChunk chunk;
-        chunk.fileName = fs::absolute(filePath).string();
+        chunk.fileName = normalizedChunkPath(filePath);
         chunk.symbolName = "";
         chunk.startLine = chunkStart;
         chunk.endLine = lineNum;
@@ -112,7 +122,7 @@ std::vector<CodeChunk> chunkByFunctions(
         if (std::regex_match(line, functionRegex) || (lineNum - chunkStart) > 50) {
             if (!currentChunk.empty()) {
                 CodeChunk chunk;
-                chunk.fileName = fs::absolute(filePath).string();
+                chunk.fileName = normalizedChunkPath(filePath);
                 chunk.symbolName = "";
                 chunk.startLine = chunkStart;
                 chunk.endLine = lineNum;
@@ -128,7 +138,7 @@ std::vector<CodeChunk> chunkByFunctions(
 
     if (!currentChunk.empty()) {
         CodeChunk chunk;
-        chunk.fileName = fs::absolute(filePath).string();
+        chunk.fileName = normalizedChunkPath(filePath);
         chunk.symbolName = "";
         chunk.startLine = chunkStart;
         chunk.endLine = lineNum;
@@ -175,7 +185,7 @@ std::vector<CodeChunk> chunkBySize(
             }
 
             CodeChunk chunk;
-            chunk.fileName = fs::absolute(filePath).lexically_normal().string();
+            chunk.fileName = normalizedChunkPath(filePath);
             chunk.symbolName = "";
             chunk.startLine = 0; // not tracked for plain text
             chunk.endLine   = 0;

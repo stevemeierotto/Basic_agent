@@ -12,6 +12,7 @@
 #include "chat_query_utils.h"
 #include "chat_prompt_config.h"
 #include "chat_generation_safety.h"
+#include "agent_context_retrieval.h"
 
 #include <algorithm>
 #include <atomic>
@@ -164,6 +165,23 @@ Thoth::ChatRagContextRecord buildChatRagContextRecord(
     record.history_ratio = safeRatio(record.conversation_history_chars, record.final_prompt_chars);
     record.memory_ratio = safeRatio(record.memory_context_chars, record.final_prompt_chars);
     return record;
+}
+
+nlohmann::json buildTraceGroundingJson(
+    bool grounded,
+    const std::string& groundingMode,
+    const std::string& groundingReason,
+    const std::vector<Thoth::ChatRagDocumentMetric>& documents) {
+    nlohmann::json docNames = nlohmann::json::array();
+    for (const auto& doc : documents) {
+        if (!doc.file.empty()) {
+            docNames.push_back(doc.file);
+        }
+    }
+    return {{"grounded", grounded},
+            {"grounding_mode", groundingMode},
+            {"grounding_decision_reason", groundingReason},
+            {"documents", docNames}};
 }
 
 void emitChatRagContext(const Thoth::ChatRagContextRecord& record) {
@@ -473,11 +491,13 @@ std::string CommandProcessor::processQuery(const std::string& input) {
             if (rag.eventCallback) {
                 ControllerEvent ev;
                 ev.type = EventType::RETRIEVAL_DIAGNOSTICS;
+                ev.session_id = session_id.empty() ? memory.getActiveSessionId() : session_id;
                 ev.metadata = {
                     {"scoring_type", "no_index"},
                     {"breakdowns", nlohmann::json::array()},
                     {"alpha", 0.0},
-                    {"direction_magnitude", 0.0}
+                    {"direction_magnitude", 0.0},
+                    {"request_id", trace.requestId},
                 };
                 rag.eventCallback(ev);
             }
@@ -552,11 +572,13 @@ std::string CommandProcessor::processQuery(const std::string& input) {
             if (rag.eventCallback) {
                 ControllerEvent ev;
                 ev.type = EventType::RETRIEVAL_DIAGNOSTICS;
+                ev.session_id = session_id.empty() ? memory.getActiveSessionId() : session_id;
                 ev.metadata = {
                     {"scoring_type", "greeting_skip"},
                     {"breakdowns", nlohmann::json::array()},
                     {"alpha", 0.0},
-                    {"direction_magnitude", 0.0}
+                    {"direction_magnitude", 0.0},
+                    {"request_id", trace.requestId},
                 };
                 rag.eventCallback(ev);
             }
@@ -618,8 +640,14 @@ std::string CommandProcessor::processQuery(const std::string& input) {
 
         GragDiagnostics retrievalDiagnostics;
         const int topK = static_cast<int>(DEFAULT_RAG_TOP_K);
+        const std::string activeContextKey =
+            session_id.empty() ? memory.getActiveSessionId() : session_id;
+        Thoth::RetrievalScope retrievalScope =
+            Thoth::resolveAgentContextRetrievalScope(activeContextKey, rag.getIndexManager());
+        Thoth::RetrievalTrace retrievalTrace;
         std::vector<CodeChunk> contextChunks = rag.retrieveRelevant(
-            input, {}, topK, trace.requestId, activePlanId, activeStepId, {}, {}, {}, &retrievalDiagnostics);
+            input, {}, topK, trace.requestId, activePlanId, activeStepId, {}, {}, {},
+            &retrievalDiagnostics, &retrievalScope, &retrievalTrace);
 
         // Plan M G1 (R1): fail-closed grounding floor on post-boost final_score.
         // grounded=true must mean chunks survived the floor, not merely that the
@@ -682,6 +710,16 @@ std::string CommandProcessor::processQuery(const std::string& input) {
         contextRecord.max_score = grounding.stats.max_score;
         contextRecord.has_injected_scores = grounding.stats.candidates_passed_gate > 0;
         contextRecord.min_injected_score = grounding.stats.min_injected_score;
+        if (!retrievalDiagnostics.retrieval_trace.is_null()) {
+            contextRecord.retrieval_trace = retrievalDiagnostics.retrieval_trace;
+        } else {
+            contextRecord.retrieval_trace = retrievalTrace.toJson();
+        }
+        const nlohmann::json groundingJson = buildTraceGroundingJson(
+            grounded, groundingMode, groundingReason, contextRecord.documents);
+        if (contextRecord.retrieval_trace.is_object()) {
+            contextRecord.retrieval_trace["grounding"] = groundingJson;
+        }
         emitChatRagContext(contextRecord);
         traceLogger.addStage(
             trace,
@@ -689,6 +727,17 @@ std::string CommandProcessor::processQuery(const std::string& input) {
             true,
             "Chat RAG context metrics recorded",
             Thoth::ChatRagLogger::contextToJson(contextRecord));
+
+        if (rag.eventCallback) {
+            GragDiagnostics enriched = grounding.diagnostics;
+            enriched.retrieval_trace = contextRecord.retrieval_trace;
+            ControllerEvent ev;
+            ev.type = EventType::RETRIEVAL_DIAGNOSTICS;
+            ev.session_id = activeContextKey;
+            ev.metadata = enriched.to_json();
+            ev.metadata["request_id"] = trace.requestId;
+            rag.eventCallback(ev);
+        }
 
         // 3. Query LLM (Plan N N6 — shared conversational boundary)
         const auto turn =

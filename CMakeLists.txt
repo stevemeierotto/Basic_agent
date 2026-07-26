@@ -58,6 +58,7 @@ set(BASIC_AGENT_SOURCES
     src/grag_scorer.cpp
     src/grag_metrics.cpp
     src/index_manager.cpp
+    src/agent_context_retrieval.cpp
     src/llm_interface.cpp
     src/logger.cpp
     src/memory.cpp

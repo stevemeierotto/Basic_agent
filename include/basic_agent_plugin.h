@@ -18,6 +18,7 @@
 #include "prompt_factory.h"
 #include "benchmark_environment.h"
 #include "episode_event_channel.h"
+#include "json.hpp"
 
 //#include "Plugin.h"  // Plugin interface
 
@@ -70,6 +71,31 @@ public:
     std::vector<Memory::CognateExperimentRecord> getAllExperiments() const;
     bool saveExperiment(const Memory::CognateExperimentRecord& record);
     Memory::GraphStatistics getGraphStatistics() const;
+
+    /** Phase 12A — Engine-owned graph statistics singleton resource. */
+    nlohmann::json getGraphStatisticsResource() const;
+
+    /** Phase 8 — Engine-owned corpus document list. */
+    nlohmann::json listCorpusDocuments() const;
+
+    /** Phase 9 — create corpus document (acceptance); indexing via INDEXING_* events. */
+    nlohmann::json createCorpusDocument(const std::string& suggested_name,
+                                        const std::string& content,
+                                        const std::string& owner_context_id = "");
+
+    /** TCB3 / §3.0 — active session for local ingest bind (v1 context key source). */
+    std::string getActiveSessionId() const;
+
+    /** Phase 10 — Engine-owned conversation authority. */
+    nlohmann::json createConversationSession();
+    nlohmann::json appendUserTurn(const std::string& session_id, const std::string& content);
+    nlohmann::json getConversationForSession(const std::string& session_id) const;
+    nlohmann::json getConversationSummaryForSession(const std::string& session_id) const;
+
+    /** Phase 11 — Engine-owned research resource collections. */
+    nlohmann::json listStrategies() const;
+    nlohmann::json listTrajectories() const;
+    nlohmann::json listEpisodes() const;
 
     // --- Implement Plugin interface ---
     bool initialize()  {

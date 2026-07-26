@@ -82,6 +82,9 @@ public:
     void loadConversation(const std::vector<TimedMessage>& messages,
                           const std::string& summary = "");
     std::vector<json> getConversation() const;
+    std::vector<TimedMessage> getTimedMessages(const std::string& sessionId) const;
+    std::string getSummaryForSession(const std::string& sessionId,
+                                     bool useExtended = false) const;
     void clear();
 
     // Summaries
