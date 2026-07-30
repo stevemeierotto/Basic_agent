@@ -7,6 +7,8 @@
  */
 #pragma once
 
+#include "json.hpp"
+
 #include <stdexcept>
 #include <string>
 
@@ -16,6 +18,7 @@ enum class EngineErrorCode {
     INVALID_REQUEST,
     NOT_FOUND,
     ENGINE_BUSY,
+    CONFLICT,
     INTERNAL_ERROR
 };
 
@@ -25,11 +28,17 @@ int engineErrorHttpStatus(EngineErrorCode code);
 struct EngineError {
     EngineErrorCode code{EngineErrorCode::INTERNAL_ERROR};
     std::string message;
+    /** ALP-C machine code: revision_in_flight, content_conflict, alp_misconfigured, … */
+    std::string machine_code;
+    nlohmann::json details = nlohmann::json::object();
 
     static EngineError invalidRequest(const std::string& message);
     static EngineError notFound(const std::string& message);
     static EngineError engineBusy(const std::string& message);
     static EngineError internalError(const std::string& message);
+    static EngineError conflict(const std::string& machine_code,
+                                const std::string& message,
+                                nlohmann::json details = nlohmann::json::object());
 
     std::string toJson() const;
 };

@@ -359,12 +359,39 @@ struct EngineHttpTransport::Impl {
                             trim_bounds();
                         }
 
+                        Thoth::CorpusCreate::CreateDocumentRequest request;
+                        request.suggested_name = suggested_name;
+                        request.content = content;
+                        request.owner_context_id = owner_context_id;
+
+                        if (body.contains("content_hash") && body["content_hash"].is_string()) {
+                            request.content_hash = body["content_hash"].get<std::string>();
+                        }
+                        if (body.contains("local_source_mtime")) {
+                            if (body["local_source_mtime"].is_number_integer()) {
+                                request.local_source_mtime_sec =
+                                    body["local_source_mtime"].get<std::int64_t>();
+                            } else if (body["local_source_mtime"].is_number_unsigned()) {
+                                request.local_source_mtime_sec = static_cast<std::int64_t>(
+                                    body["local_source_mtime"].get<std::uint64_t>());
+                            }
+                        }
+                        if (body.contains("local_source_path")
+                            && body["local_source_path"].is_string()) {
+                            request.local_source_path =
+                                body["local_source_path"].get<std::string>();
+                        }
+                        if (body.contains("force_replace") && body["force_replace"].is_boolean()) {
+                            request.force_replace = body["force_replace"].get<bool>();
+                        }
+                        if (body.contains("dry_run") && body["dry_run"].is_boolean()) {
+                            request.dry_run = body["dry_run"].get<bool>();
+                        }
+
                         try {
                             setJsonResponse(res,
                                             200,
-                                            runtime.createCorpusDocument(suggested_name,
-                                                                         content,
-                                                                         owner_context_id));
+                                            runtime.createCorpusDocument(request));
                         } catch (const EngineException& ex) {
                             setErrorResponse(res, ex.error());
                         } catch (const std::exception& ex) {

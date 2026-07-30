@@ -6,7 +6,10 @@
  * Licensed under the MIT License (see LICENSE in project root)
  */
 #include "../include/agent_context_retrieval.h"
+#include "../include/alp_feature_flags.h"
+#include "../include/alp_storage_paths.h"
 #include "../include/chunkers/code_chunk.h"
+#include "../include/document_registry.h"
 #include "../include/grag_diagnostics.h"
 #include "../include/index_manager.h"
 
@@ -14,6 +17,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <iostream>
 
 namespace fs = std::filesystem;
 
@@ -66,6 +70,33 @@ void appendUnique(std::vector<std::string>& docs, const std::string& doc) {
     }
 }
 
+bool isOperatorAttachmentPath(const std::string& filePath) {
+    if (filePath.empty()) {
+        return false;
+    }
+    const std::string attachments_root =
+        DocumentRegistry::normalizeStoragePath(AlpStoragePaths::operatorAttachmentsDir());
+    const std::string normalized = DocumentRegistry::normalizeStoragePath(filePath);
+    if (attachments_root.empty()) {
+        return false;
+    }
+    if (normalized.size() < attachments_root.size()) {
+        return false;
+    }
+    if (normalized.compare(0, attachments_root.size(), attachments_root) != 0) {
+        return false;
+    }
+    if (normalized.size() == attachments_root.size()) {
+        return false;
+    }
+    const char next = normalized[attachments_root.size()];
+    return next == '/' || next == '\\';
+}
+
+bool vectorContains(const std::vector<std::string>& values, const std::string& needle) {
+    return std::find(values.begin(), values.end(), needle) != values.end();
+}
+
 } // namespace
 
 std::string makeRetrievalScopeId(const std::string& active_context_key, int policyVersion) {
@@ -75,13 +106,17 @@ std::string makeRetrievalScopeId(const std::string& active_context_key, int poli
 }
 
 nlohmann::json RetrievalScope::toJson() const {
-    return {{"retrieval_scope_id", retrieval_scope_id},
-            {"context_policy_version", context_policy_version},
-            {"active_context_key", active_context_key},
-            {"scope_type", scope_type},
-            {"allowed_tiers", allowed_tiers},
-            {"selected_documents", selected_documents},
-            {"excluded_documents", excluded_documents}};
+    nlohmann::json out{{"retrieval_scope_id", retrieval_scope_id},
+                       {"context_policy_version", context_policy_version},
+                       {"active_context_key", active_context_key},
+                       {"scope_type", scope_type},
+                       {"allowed_tiers", allowed_tiers},
+                       {"selected_documents", selected_documents},
+                       {"excluded_documents", excluded_documents}};
+    if (alp_session_link_filter && !linked_document_ids.empty()) {
+        out["linked_document_ids"] = linked_document_ids;
+    }
+    return out;
 }
 
 nlohmann::json RetrievalTrace::toJson() const {
@@ -95,13 +130,31 @@ nlohmann::json RetrievalTrace::toRetrievalTraceEnvelope() const {
     return {{"retrieval_trace", toJson()}};
 }
 
-void classifyChunkMetadata(CodeChunk& chunk, const std::string& attachmentOwnerContextId) {
+void classifyChunkMetadata(CodeChunk& chunk, const ChunkClassificationContext& ctx) {
+    const std::string preserved_revision_id = chunk.revision_id;
     const std::string base = lowerBasename(chunk.fileName);
     chunk.owner_context_id.clear();
+    chunk.document_id.clear();
+    chunk.revision_id.clear();
 
-    if (!attachmentOwnerContextId.empty()) {
+    if (ctx.alp_enabled && isOperatorAttachmentPath(chunk.fileName)) {
+        if (ctx.registry) {
+            if (auto doc_id = ctx.registry->findDocumentIdByStoragePath(chunk.fileName)) {
+                chunk.corpus_tier = "session_attachment";
+                chunk.document_id = *doc_id;
+                chunk.revision_id = preserved_revision_id;
+                return;
+            }
+        }
+        chunk.corpus_tier = "legacy_orphan";
+        std::cerr << "[ALP-F] orphan attachment chunk (no registry row): " << chunk.fileName
+                  << "\n";
+        return;
+    }
+
+    if (!ctx.attachment_owner_context_id.empty()) {
         chunk.corpus_tier = "session_attachment";
-        chunk.owner_context_id = attachmentOwnerContextId;
+        chunk.owner_context_id = ctx.attachment_owner_context_id;
         return;
     }
 
@@ -133,6 +186,23 @@ bool chunkPassesRetrievalScope(const CodeChunk& chunk, const RetrievalScope& sco
         if (!tierAllowed("session_attachment")) {
             return false;
         }
+
+        if (scope.alp_session_link_filter) {
+            if (chunk.document_id.empty()) {
+                return false;
+            }
+            if (!vectorContains(scope.linked_document_ids, chunk.document_id)) {
+                return false;
+            }
+            const auto storage_it =
+                scope.alp_committed_storage_by_document_id.find(chunk.document_id);
+            if (storage_it == scope.alp_committed_storage_by_document_id.end()) {
+                return false;
+            }
+            return DocumentRegistry::normalizeStoragePath(chunk.fileName) ==
+                   DocumentRegistry::normalizeStoragePath(storage_it->second);
+        }
+
         return !scope.active_context_key.empty() &&
                chunk.owner_context_id == scope.active_context_key;
     }
@@ -161,6 +231,22 @@ RetrievalScope resolveAgentContextRetrievalScope(const std::string& active_conte
     scope.scope_type = "default_agent_context";
     scope.allowed_tiers = {"session_attachment"};
     scope.retrieval_scope_id = makeRetrievalScopeId(active_context_key, scope.context_policy_version);
+
+    if (indexManager && AlpFeatureFlags::alpEnabled()) {
+        scope.alp_session_link_filter = true;
+        const auto& reg = indexManager->getDocumentRegistry();
+        scope.linked_document_ids = reg.listLinkedDocumentIds(active_context_key);
+        for (const auto& doc_id : scope.linked_document_ids) {
+            if (auto storage = reg.currentCommittedStoragePath(doc_id)) {
+                scope.alp_committed_storage_by_document_id[doc_id] =
+                    DocumentRegistry::normalizeStoragePath(*storage);
+            }
+            if (auto name = reg.findCanonicalName(doc_id)) {
+                appendUnique(scope.selected_documents, *name);
+            }
+        }
+        return scope;
+    }
 
     if (indexManager) {
         for (const auto& chunk : indexManager->getChunks()) {

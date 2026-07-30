@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Steve Meierotto
  *
- * Thoth — Phase 9 create corpus document resource (Engine-authored; pure helpers)
+ * Thoth — Phase 9 / ALP-C create corpus document resource (Engine-authored; pure helpers)
  *
  * Contract: GUI initiates create; Engine owns id, filename, storage, chunking,
  * embedding, and atomicity. Acceptance JSON is separate from SSE INDEXING_*.
@@ -13,12 +13,14 @@
 
 #include "corpus_documents.h"
 
+#include <cstdint>
 #include <string>
 
 namespace Thoth {
 namespace CorpusCreate {
 
 inline constexpr int kSchemaVersion = 1;
+inline constexpr int kAlpSchemaVersion = 2;
 
 /** Locked HTTP path (resource-oriented — not upload/multipart contract). */
 inline constexpr const char* kHttpPath = "/v1/rag/documents";
@@ -31,6 +33,17 @@ inline constexpr const char* kAcceptedStatus = "accepted";
 /** GUI Phase 9 — OperationResult operation token. */
 inline constexpr const char* kOperationName = "create_document";
 
+struct CreateDocumentRequest {
+    std::string suggested_name;
+    std::string content;
+    std::string owner_context_id;
+    std::string content_hash;
+    std::int64_t local_source_mtime_sec = 0;
+    std::string local_source_path;
+    bool force_replace = false;
+    bool dry_run = false;
+};
+
 inline nlohmann::json makeAcceptedResponse(const std::string& document_id,
                                            const std::string& document_name) {
     return nlohmann::json{
@@ -39,6 +52,37 @@ inline nlohmann::json makeAcceptedResponse(const std::string& document_id,
         {"document",
          nlohmann::json{{"id", document_id}, {"name", document_name}}},
     };
+}
+
+inline nlohmann::json makeAlpAcceptedResponse(const std::string& document_id,
+                                              const std::string& document_name,
+                                              const std::string& revision_id,
+                                              const std::string& action) {
+    return nlohmann::json{
+        {"schema_version", kAlpSchemaVersion},
+        {"status", kAcceptedStatus},
+        {"action", action},
+        {"document",
+         nlohmann::json{{"id", document_id},
+                        {"name", document_name},
+                        {"revision_id", revision_id}}},
+    };
+}
+
+inline nlohmann::json makeDryRunResponse(const std::string& action,
+                                         const std::string& document_id,
+                                         const std::string& document_name,
+                                         const std::string& reason) {
+    nlohmann::json body{
+        {"schema_version", kAlpSchemaVersion},
+        {"dry_run", true},
+        {"action", action},
+        {"reason", reason},
+    };
+    if (!document_id.empty()) {
+        body["document"] = {{"id", document_id}, {"name", document_name}};
+    }
+    return body;
 }
 
 inline bool hasRequiredAcceptedFields(const nlohmann::json& body, std::string& error_out) {
@@ -50,9 +94,17 @@ inline bool hasRequiredAcceptedFields(const nlohmann::json& body, std::string& e
         error_out = "schema_version missing or not an integer";
         return false;
     }
-    if (body["schema_version"].get<int>() < 1) {
+    const int schema = body["schema_version"].get<int>();
+    if (schema < 1) {
         error_out = "schema_version must be >= 1";
         return false;
+    }
+    if (body.value("dry_run", false) == true) {
+        if (!body.contains("action") || !body["action"].is_string()) {
+            error_out = "dry_run response requires action";
+            return false;
+        }
+        return true;
     }
     if (!body.contains("status") || !body["status"].is_string()
         || body["status"].get<std::string>() != kAcceptedStatus) {
@@ -71,6 +123,17 @@ inline bool hasRequiredAcceptedFields(const nlohmann::json& body, std::string& e
     if (!doc.contains("name") || !doc["name"].is_string() || doc["name"].get<std::string>().empty()) {
         error_out = "document.name required";
         return false;
+    }
+    if (schema >= kAlpSchemaVersion) {
+        if (!body.contains("action") || !body["action"].is_string()) {
+            error_out = "action required for schema_version >= 2";
+            return false;
+        }
+        if (!doc.contains("revision_id") || !doc["revision_id"].is_string()
+            || doc["revision_id"].get<std::string>().empty()) {
+            error_out = "document.revision_id required for schema_version >= 2";
+            return false;
+        }
     }
     return true;
 }
@@ -122,6 +185,28 @@ inline nlohmann::json makeCreateDocumentRequestBody(const std::string& name,
     }
     if (!sid.empty()) {
         req["session_id"] = sid;
+    }
+    return req;
+}
+
+inline nlohmann::json makeCreateDocumentRequestBodyAlp(
+    const CreateDocumentRequest& request) {
+    nlohmann::json req = makeCreateDocumentRequestBody(
+        request.suggested_name, request.content, request.owner_context_id);
+    if (!request.content_hash.empty()) {
+        req["content_hash"] = request.content_hash;
+    }
+    if (request.local_source_mtime_sec > 0) {
+        req["local_source_mtime"] = request.local_source_mtime_sec;
+    }
+    if (!request.local_source_path.empty()) {
+        req["local_source_path"] = request.local_source_path;
+    }
+    if (request.force_replace) {
+        req["force_replace"] = true;
+    }
+    if (request.dry_run) {
+        req["dry_run"] = true;
     }
     return req;
 }

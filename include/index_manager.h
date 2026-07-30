@@ -5,6 +5,7 @@
 #include "controller_event.h"
 #include "json.hpp"
 #include "agent_context_retrieval.h"
+#include "document_registry.h"
 #include <vector>
 #include <string>
 #include <memory>
@@ -22,6 +23,13 @@
 
 class IndexManager {
 public:
+    /** ALP-B — optional identity for revision registry / events (ALP-C sets before async index). */
+    struct AlpIndexContext {
+        std::string document_id;
+        std::string revision_id;
+        std::string canonical_name;
+    };
+
     explicit IndexManager(EmbeddingEngine* eng);
     ~IndexManager();
 
@@ -30,6 +38,7 @@ public:
     // Index a single file
     void indexFile(const std::string& filePath);
     void indexFileAsync(const std::string& filePath);
+    void indexFileAsync(const std::string& filePath, std::optional<AlpIndexContext> alp_ctx);
 
     // Index all files in a directory recursively
     void indexProject(const std::string& rootPath);
@@ -45,8 +54,8 @@ public:
     const CodeChunk* getChunkByCode(const std::string& codeText) const;
 
     // Save/load the index
-    void saveIndex() const;
-    void saveIndex(const std::string& dbPath) const;
+    bool saveIndex() const;
+    bool saveIndex(const std::string& dbPath) const;
     void loadIndex();
     void loadIndex(const std::string& dbPath);
 
@@ -60,17 +69,34 @@ public:
     nlohmann::json listCorpusDocuments(const std::string& ragDirectory) const;
 
     /** Phase 9 — atomic create + async indexing (acceptance ≠ INDEXING_*). */
+    struct CreateCorpusDocumentOptions {
+        std::string content_hash;
+        std::int64_t local_source_mtime_sec = 0;
+        bool force_replace = false;
+        bool dry_run = false;
+    };
+
     struct CreateCorpusDocumentResult {
         bool ok = false;
         std::string error;
+        /** ALP-C machine code for EngineError mapping. */
+        std::string machine_code;
         std::string document_id;
         std::string document_name;
+        std::string revision_id;
+        std::string action;
     };
 
     CreateCorpusDocumentResult createCorpusDocument(const std::string& ragDirectory,
                                                     const std::string& suggested_name,
                                                     const std::string& content,
                                                     const std::string& owner_context_id = "");
+
+    CreateCorpusDocumentResult createCorpusDocument(const std::string& ragDirectory,
+                                                    const std::string& suggested_name,
+                                                    const std::string& content,
+                                                    const std::string& owner_context_id,
+                                                    const CreateCorpusDocumentOptions& options);
 
     /** R2 — record worker outcome for corpus `failed` (in-memory; Option A). */
     void recordIndexingOutcome(const std::string& normalizedPath,
@@ -79,6 +105,9 @@ public:
                                const std::string& reason);
 
     const std::string& getSessionId() const { return session_id; }
+
+    /** ALP-A — engine document registry (loaded at init; write path gated by THOTH_ALP_ENABLED). */
+    const Thoth::DocumentRegistry& getDocumentRegistry() const { return documentRegistry_; }
 
     VectorStore store;
     std::string getCurrentCommitHash() const;
@@ -96,6 +125,9 @@ public:
 
     void setEventCallback(EventCallback cb) { eventCallback = cb; }
     void setSessionId(const std::string& id) { session_id = id; }
+
+    void setAlpIndexContext(AlpIndexContext ctx);
+    void clearAlpIndexContext();
 
 private:
         // Constants
@@ -152,6 +184,21 @@ private:
     std::set<std::string> activeCorpusFiles_;
     std::vector<std::string> activeCorpusRoots_;
     std::unordered_map<std::string, std::string> attachmentOwners_;
+    Thoth::DocumentRegistry documentRegistry_;
+    std::optional<AlpIndexContext> alpIndexContext_;
+    mutable std::mutex alpContextMutex_;
+
+    /** ALP-B6 — serialized in-flight index keys (path or document_id). */
+    std::set<std::string> inFlightIndexKeys_;
+    std::mutex inFlightMutex_;
+
+    std::string resolveInFlightKey(const std::string& normalizedPath) const;
+    std::optional<AlpIndexContext> copyAlpIndexContext() const;
+    void persistRegistryRevisionState(bool success,
+                                      const AlpIndexContext& ctx,
+                                      int chunk_count,
+                                      const std::string& reason);
+
     bool chunkInActiveCorpus(const CodeChunk& chunk) const;
     bool chunkPassesScopeFilter(const CodeChunk& chunk, const Thoth::RetrievalScope& scope) const;
     void classifyChunkInPlace(CodeChunk& chunk) const;
@@ -159,9 +206,25 @@ private:
     void loadAttachmentRegistry();
     void saveAttachmentRegistry() const;
 
+    /** ALP-B — replace live chunks for path only after candidate validate passes. */
+    bool commitCandidateChunksForFile(const std::string& normalizedPath,
+                                      std::vector<CodeChunk>&& candidates);
+
     /** Session-scoped ingest: existing attachment with same filename for this owner. */
     std::optional<std::string> findSessionOwnedAttachmentPath(
         const std::string& owner_context_id,
         const std::string& base_name) const;
+
+    CreateCorpusDocumentResult createCorpusDocumentLegacy(
+        const std::string& ragDirectory,
+        const std::string& suggested_name,
+        const std::string& content,
+        const std::string& owner_context_id);
+
+    CreateCorpusDocumentResult createCorpusDocumentAlp(
+        const std::string& suggested_name,
+        const std::string& content,
+        const std::string& owner_context_id,
+        const CreateCorpusDocumentOptions& options);
 };
 

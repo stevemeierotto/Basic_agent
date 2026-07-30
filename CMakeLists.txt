@@ -38,6 +38,8 @@ set(BASIC_AGENT_SOURCES
     src/config.cpp
     src/decision_trace.cpp
     src/default_planner.cpp
+    src/document_registry.cpp
+    src/revision_storage.cpp
     src/llm_planner.cpp
     src/embedding_engine.cpp
     src/inference_endpoint.cpp
@@ -206,6 +208,21 @@ if(THOTH_BUILD_ENGINE)
         THOTH_ENGINE_VERSION="${THOTH_ENGINE_VERSION}")
     set_target_properties(thoth-engine PROPERTIES FOLDER "apps")
 endif()
+
+# ALP-D0 — read-only migration dry-run (no basic_agent / IndexManager link)
+add_library(alp_migration STATIC
+    src/alp_sha256.cpp
+    src/alp_index_reader.cpp
+    src/alp_index_mutator.cpp
+    src/alp_migration_analyzer.cpp
+    src/alp_migration_apply.cpp
+)
+target_include_directories(alp_migration PUBLIC include)
+
+add_executable(thoth-migrate-alp src/thoth_migrate_alp_main.cpp src/file_handler.cpp)
+target_link_libraries(thoth-migrate-alp PRIVATE alp_migration)
+target_include_directories(thoth-migrate-alp PRIVATE include)
+set_target_properties(thoth-migrate-alp PROPERTIES FOLDER "apps")
 
 # CLI executable for debugging or standalone use
 # Only build CLI tool if we're building standalone

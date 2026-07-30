@@ -1,6 +1,7 @@
 #include "../include/basic_agent_plugin.h"
 #include "../include/conversation_authority.h"
 #include "../include/corpus_create.h"
+#include "../include/alp_feature_flags.h"
 #include "../include/corpus_documents.h"
 #include "../include/engine_error.h"
 #include "../include/file_handler.h"
@@ -431,16 +432,60 @@ std::string BasicAgentPlugin::getActiveSessionId() const {
 nlohmann::json BasicAgentPlugin::createCorpusDocument(const std::string& suggested_name,
                                                       const std::string& content,
                                                       const std::string& owner_context_id) {
+    Thoth::CorpusCreate::CreateDocumentRequest request;
+    request.suggested_name = suggested_name;
+    request.content = content;
+    request.owner_context_id = owner_context_id;
+    return createCorpusDocument(request);
+}
+
+nlohmann::json BasicAgentPlugin::createCorpusDocument(
+    const Thoth::CorpusCreate::CreateDocumentRequest& request) {
     if (!indexManager) {
         throw Thoth::EngineException(
             Thoth::EngineError::engineBusy("Index manager not initialized."));
     }
+
+    IndexManager::CreateCorpusDocumentOptions options;
+    options.content_hash = request.content_hash;
+    options.local_source_mtime_sec = request.local_source_mtime_sec;
+    options.force_replace = request.force_replace;
+    options.dry_run = request.dry_run;
+
     FileHandler fh;
-    const auto outcome = indexManager->createCorpusDocument(
-        fh.getRagDirectory(), suggested_name, content, owner_context_id);
+    const auto outcome = indexManager->createCorpusDocument(fh.getRagDirectory(),
+                                                            request.suggested_name,
+                                                            request.content,
+                                                            request.owner_context_id,
+                                                            options);
     if (!outcome.ok) {
-        throw Thoth::EngineException(
-            Thoth::EngineError::invalidRequest(outcome.error));
+        if (outcome.machine_code == "revision_in_flight") {
+            nlohmann::json details{{"document_id", outcome.document_id}};
+            throw Thoth::EngineException(Thoth::EngineError::conflict(
+                "revision_in_flight", outcome.error, std::move(details)));
+        }
+        if (outcome.machine_code == "content_conflict") {
+            nlohmann::json details{{"document_id", outcome.document_id}};
+            throw Thoth::EngineException(Thoth::EngineError::conflict(
+                "content_conflict", outcome.error, std::move(details)));
+        }
+        if (outcome.machine_code == "alp_misconfigured") {
+            throw Thoth::EngineException(
+                Thoth::EngineError::engineBusy(outcome.error));
+        }
+        throw Thoth::EngineException(Thoth::EngineError::invalidRequest(outcome.error));
+    }
+
+    if (request.dry_run) {
+        return Thoth::CorpusCreate::makeDryRunResponse(
+            outcome.action, outcome.document_id, outcome.document_name, outcome.action);
+    }
+
+    if (Thoth::AlpFeatureFlags::alpCreateAllowed()) {
+        return Thoth::CorpusCreate::makeAlpAcceptedResponse(outcome.document_id,
+                                                            outcome.document_name,
+                                                            outcome.revision_id,
+                                                            outcome.action);
     }
     return Thoth::CorpusCreate::makeAcceptedResponse(outcome.document_id, outcome.document_name);
 }

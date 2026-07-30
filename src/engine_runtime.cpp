@@ -451,13 +451,22 @@ nlohmann::json EngineRuntime::listCorpusDocuments() const {
 nlohmann::json EngineRuntime::createCorpusDocument(const std::string& suggested_name,
                                                    const std::string& content,
                                                    const std::string& owner_context_id) {
+    CorpusCreate::CreateDocumentRequest request;
+    request.suggested_name = suggested_name;
+    request.content = content;
+    request.owner_context_id = owner_context_id;
+    return createCorpusDocument(request);
+}
+
+nlohmann::json EngineRuntime::createCorpusDocument(
+    const CorpusCreate::CreateDocumentRequest& request) {
     if (!isReady()) {
         throw EngineException(EngineError::engineBusy("Engine is not ready."));
     }
     if (!impl_ || !impl_->plugin) {
         throw EngineException(EngineError::engineBusy("Engine plugin not initialized."));
     }
-    return impl_->plugin->createCorpusDocument(suggested_name, content, owner_context_id);
+    return impl_->plugin->createCorpusDocument(request);
 }
 
 nlohmann::json EngineRuntime::createConversationSession() {

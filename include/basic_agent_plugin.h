@@ -18,6 +18,7 @@
 #include "prompt_factory.h"
 #include "benchmark_environment.h"
 #include "episode_event_channel.h"
+#include "corpus_create.h"
 #include "json.hpp"
 
 //#include "Plugin.h"  // Plugin interface
@@ -82,6 +83,9 @@ public:
     nlohmann::json createCorpusDocument(const std::string& suggested_name,
                                         const std::string& content,
                                         const std::string& owner_context_id = "");
+
+    /** ALP-C — extended create with hash/mtime/force_replace/dry_run. */
+    nlohmann::json createCorpusDocument(const Thoth::CorpusCreate::CreateDocumentRequest& request);
 
     /** TCB3 / §3.0 — active session for local ingest bind (v1 context key source). */
     std::string getActiveSessionId() const;

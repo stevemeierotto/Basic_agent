@@ -20,7 +20,11 @@ struct CodeChunk {
     // Phase 3.1: Hybrid Reranking
     float keyword_score = 0.0f; // TF-IDF keyword relevance
 
-    // TCB2 — runtime classification (not persisted in rag_index.bin v1)
+    // TCB2 / ALP-F — runtime classification (not persisted in rag_index.bin v1)
     std::string corpus_tier;
     std::string owner_context_id;
+    /** ALP-F — operator attachment UUID (registry-authoritative when ALP enabled). */
+    std::string document_id;
+    /** ALP-F — revision UUID stamped at index commit (filter uses registry current). */
+    std::string revision_id;
 };

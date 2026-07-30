@@ -9,6 +9,7 @@
 
 #include "controller_event.h"
 #include "engine_event.h"
+#include "corpus_create.h"
 #include "json.hpp"
 
 #include <chrono>
@@ -79,6 +80,9 @@ public:
     nlohmann::json createCorpusDocument(const std::string& suggested_name,
                                         const std::string& content,
                                         const std::string& owner_context_id = "");
+
+    /** ALP-C — extended create request. */
+    nlohmann::json createCorpusDocument(const CorpusCreate::CreateDocumentRequest& request);
 
     nlohmann::json createConversationSession();
     nlohmann::json appendUserTurn(const std::string& session_id, const std::string& content);

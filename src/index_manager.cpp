@@ -2,6 +2,13 @@
 #include "../include/corpus_create.h"
 #include "../include/corpus_documents.h"
 #include "../include/file_handler.h"
+#include "../include/alp_storage_paths.h"
+#include "../include/alp_feature_flags.h"
+#include "../include/alp_index_test_hooks.h"
+#include "../include/alp_sha256.h"
+#include "../include/alp_uuid.h"
+#include "../include/attachment_send_policy.h"
+#include "../include/revision_storage.h"
 #include <iostream>
 #include <algorithm>
 #include <cctype>
@@ -12,6 +19,7 @@
 #include <fstream>
 #include <cstdint>
 #include <sstream>
+#include <stdexcept>
 #include <unistd.h>
 #include <../include/json.hpp>
 
@@ -56,12 +64,19 @@ struct IndexingCompletionGuard {
     bool success = false;
     int chunk_count = 0;
     std::string reason;
+    std::string document_id;
+    std::string revision_id;
 
     IndexingCompletionGuard(IndexManager* mgr,
                             EventCallback& cb,
                             std::string sid,
                             std::string path)
         : manager(mgr), callback(cb), session_id(std::move(sid)), file_path(std::move(path)) {}
+
+    void setAlpIds(std::string doc_id, std::string rev_id) {
+        document_id = std::move(doc_id);
+        revision_id = std::move(rev_id);
+    }
 
     void arm() { armed = true; }
 
@@ -99,6 +114,12 @@ struct IndexingCompletionGuard {
             {"success", success},
             {"chunk_count", chunk_count},
         };
+        if (!document_id.empty()) {
+            meta["document_id"] = document_id;
+        }
+        if (!revision_id.empty()) {
+            meta["revision_id"] = revision_id;
+        }
         if (!success && !reason.empty()) {
             meta["reason"] = reason;
         }
@@ -134,6 +155,36 @@ struct IndexingPathDiagnostics {
     std::string fallback = "none";
     int final_stored = 0;
 };
+
+/** ALP-B validate gate: ≥1 chunk and ≥95% embed success among non-skipped candidates. */
+bool passesAlpIndexValidateGate(const IndexingPathDiagnostics& diag, size_t committed_count) {
+    if (committed_count < 1) {
+        return false;
+    }
+    const size_t skipped = diag.chunks_skipped_empty + diag.chunks_skipped_short;
+    if (diag.chunks_generated <= skipped) {
+        return true;
+    }
+    const size_t embed_attempts = diag.chunks_generated - skipped;
+    const size_t embed_ok =
+        embed_attempts > diag.chunks_skipped_embed ? embed_attempts - diag.chunks_skipped_embed : 0;
+    if (embed_ok < 1) {
+        return false;
+    }
+    return embed_ok * 100 >= embed_attempts * 95;
+}
+
+bool chunkHasRetrievalSignal(const CodeChunk& chunk) {
+    if (chunk.code.empty()) {
+        return false;
+    }
+    const bool has_semantic =
+        !chunk.embedding.empty()
+        && !std::all_of(chunk.embedding.begin(), chunk.embedding.end(),
+                        [](float v) { return v == 0.0f; });
+    const bool has_keyword = chunk.keyword_score > 0.001f;
+    return has_semantic || has_keyword;
+}
 
 size_t countMarkdownParagraphBlocks(const std::string& content) {
     size_t blocks = 0;
@@ -225,9 +276,52 @@ void IndexManager::workerLoop() {
 }
 
 void IndexManager::indexFileAsync(const std::string& filePath) {
+    indexFileAsync(filePath, std::nullopt);
+}
+
+void IndexManager::indexFileAsync(const std::string& filePath,
+                                  std::optional<AlpIndexContext> alp_ctx) {
+    std::string normalizedPath = filePath;
+    try {
+        normalizedPath = fs::absolute(filePath).lexically_normal().string();
+    } catch (...) {
+    }
+    const std::string inflight_key =
+        alp_ctx && !alp_ctx->document_id.empty() ? alp_ctx->document_id : normalizedPath;
+
     std::lock_guard<std::mutex> lock(m_queueMutex);
-    m_taskQueue.push([this, filePath]() {
+    m_taskQueue.push([this, filePath, inflight_key, alp_ctx]() {
+        if (alp_ctx) {
+            setAlpIndexContext(*alp_ctx);
+        }
+        {
+            std::lock_guard<std::mutex> inflight_lock(inFlightMutex_);
+            inFlightIndexKeys_.insert(inflight_key);
+        }
+        struct InFlightRelease {
+            IndexManager* self = nullptr;
+            std::string key;
+            ~InFlightRelease() {
+                if (!self || key.empty()) {
+                    return;
+                }
+                std::lock_guard<std::mutex> inflight_lock(self->inFlightMutex_);
+                self->inFlightIndexKeys_.erase(key);
+            }
+        } release{this, inflight_key};
+        if (alp_ctx && !alp_ctx->document_id.empty() && !alp_ctx->revision_id.empty()) {
+            if (!documentRegistry_.markRevisionIndexing(alp_ctx->document_id,
+                                                        alp_ctx->revision_id)) {
+                documentRegistry_.beginRevision(alp_ctx->document_id,
+                                                alp_ctx->revision_id,
+                                                filePath);
+            }
+            documentRegistry_.save(Thoth::DocumentRegistry::defaultRegistryPath());
+        }
         indexFile(filePath);
+        if (alp_ctx) {
+            clearAlpIndexContext();
+        }
     });
     m_isIndexing = true;
     m_queueCv.notify_one();
@@ -455,25 +549,33 @@ void IndexManager::saveAttachmentRegistry() const {
 }
 
 void IndexManager::classifyChunkInPlace(CodeChunk& chunk) const {
-    std::string ownerLookup;
-    {
+    Thoth::ChunkClassificationContext ctx;
+    ctx.alp_enabled = Thoth::AlpFeatureFlags::alpEnabled();
+    ctx.registry = ctx.alp_enabled ? &documentRegistry_ : nullptr;
+    if (!ctx.alp_enabled) {
         std::shared_lock lock(chunksMutex);
         auto it = attachmentOwners_.find(chunk.fileName);
         if (it != attachmentOwners_.end()) {
-            ownerLookup = it->second;
+            ctx.attachment_owner_context_id = it->second;
         }
     }
-    Thoth::classifyChunkMetadata(chunk, ownerLookup);
+    Thoth::classifyChunkMetadata(chunk, ctx);
 }
 
 void IndexManager::classifyAllChunksMetadataUnlocked() {
+    const bool alp_enabled = Thoth::AlpFeatureFlags::alpEnabled();
+    Thoth::ChunkClassificationContext ctx;
+    ctx.alp_enabled = alp_enabled;
+    ctx.registry = alp_enabled ? &documentRegistry_ : nullptr;
     for (auto& chunk : chunks) {
-        std::string ownerLookup;
-        auto it = attachmentOwners_.find(chunk.fileName);
-        if (it != attachmentOwners_.end()) {
-            ownerLookup = it->second;
+        if (!alp_enabled) {
+            ctx.attachment_owner_context_id.clear();
+            auto it = attachmentOwners_.find(chunk.fileName);
+            if (it != attachmentOwners_.end()) {
+                ctx.attachment_owner_context_id = it->second;
+            }
         }
-        Thoth::classifyChunkMetadata(chunk, ownerLookup);
+        Thoth::classifyChunkMetadata(chunk, ctx);
     }
 }
 
@@ -562,12 +664,16 @@ void IndexManager::addChunk(CodeChunk&& chunk) {
         chunks.push_back(std::move(chunk));
         store.addDocumentWithEmbedding(chunks.back().code, chunks.back().embedding);
         codeToChunkIndex[chunks.back().code] = index;
-        std::string ownerLookup;
-        auto ownerIt = attachmentOwners_.find(chunks.back().fileName);
-        if (ownerIt != attachmentOwners_.end()) {
-            ownerLookup = ownerIt->second;
+        Thoth::ChunkClassificationContext classify_ctx;
+        classify_ctx.alp_enabled = Thoth::AlpFeatureFlags::alpEnabled();
+        classify_ctx.registry = classify_ctx.alp_enabled ? &documentRegistry_ : nullptr;
+        if (!classify_ctx.alp_enabled) {
+            auto ownerIt = attachmentOwners_.find(chunks.back().fileName);
+            if (ownerIt != attachmentOwners_.end()) {
+                classify_ctx.attachment_owner_context_id = ownerIt->second;
+            }
         }
-        Thoth::classifyChunkMetadata(chunks.back(), ownerLookup);
+        Thoth::classifyChunkMetadata(chunks.back(), classify_ctx);
     }
 }
 
@@ -621,6 +727,18 @@ void IndexManager::removeChunksForFile(const std::string& filePath) {
     indexedFileFingerprints.erase(normalized);
 }
 
+bool IndexManager::commitCandidateChunksForFile(const std::string& normalizedPath,
+                                                std::vector<CodeChunk>&& candidates) {
+    if (candidates.empty()) {
+        return false;
+    }
+    removeChunksForFile(normalizedPath);
+    for (auto& chunk : candidates) {
+        addChunk(std::move(chunk));
+    }
+    return countStoredChunksForFile(normalizedPath) > 0;
+}
+
 void IndexManager::init(const std::string& indexPath) {
     FileHandler fh;
     if (!indexPath.empty()) {
@@ -633,9 +751,54 @@ void IndexManager::init(const std::string& indexPath) {
     } else {
         indexFilePath = fh.getRagPath("rag_index.bin");
     }
+    Thoth::AlpStoragePaths::ensureNamespaces();
+    if (!documentRegistry_.load(Thoth::DocumentRegistry::defaultRegistryPath())) {
+        std::cerr << "[ALP] document registry load failed; continuing with empty registry\n";
+        documentRegistry_.clear();
+    }
     loadAttachmentRegistry();
     loadIndex(indexFilePath);
     rebuildInternalStructures();
+}
+
+void IndexManager::setAlpIndexContext(AlpIndexContext ctx) {
+    std::lock_guard<std::mutex> lock(alpContextMutex_);
+    alpIndexContext_ = std::move(ctx);
+}
+
+void IndexManager::clearAlpIndexContext() {
+    std::lock_guard<std::mutex> lock(alpContextMutex_);
+    alpIndexContext_.reset();
+}
+
+std::optional<IndexManager::AlpIndexContext> IndexManager::copyAlpIndexContext() const {
+    std::lock_guard<std::mutex> lock(alpContextMutex_);
+    return alpIndexContext_;
+}
+
+std::string IndexManager::resolveInFlightKey(const std::string& normalizedPath) const {
+    if (auto ctx = copyAlpIndexContext()) {
+        if (!ctx->document_id.empty()) {
+            return ctx->document_id;
+        }
+    }
+    return normalizedPath;
+}
+
+void IndexManager::persistRegistryRevisionState(bool success,
+                                              const AlpIndexContext& ctx,
+                                              int chunk_count,
+                                              const std::string& reason) {
+    if (ctx.document_id.empty() || ctx.revision_id.empty()) {
+        return;
+    }
+    if (success) {
+        documentRegistry_.markRevisionCommitted(ctx.document_id, ctx.revision_id, chunk_count);
+        documentRegistry_.supersedePriorRevisions(ctx.document_id, ctx.revision_id);
+    } else {
+        documentRegistry_.markRevisionFailed(ctx.document_id, ctx.revision_id, reason);
+    }
+    documentRegistry_.save(Thoth::DocumentRegistry::defaultRegistryPath());
 }
 
 void IndexManager::indexFile(const std::string& filePath) {
@@ -654,7 +817,20 @@ void IndexManager::indexFile(const std::string& filePath) {
         return;
     }
 
+    Thoth::AlpIndexTestHooks::resetEmbedAttemptCounter();
+    const auto alp_ctx = copyAlpIndexContext();
+    if (alp_ctx && !alp_ctx->document_id.empty() && !alp_ctx->revision_id.empty()) {
+        if (!documentRegistry_.markRevisionIndexing(alp_ctx->document_id, alp_ctx->revision_id)) {
+            documentRegistry_.beginRevision(alp_ctx->document_id,
+                                            alp_ctx->revision_id,
+                                            normalizedPath);
+        }
+    }
+
     IndexingCompletionGuard completion(this, eventCallback, session_id, normalizedPath);
+    if (alp_ctx) {
+        completion.setAlpIds(alp_ctx->document_id, alp_ctx->revision_id);
+    }
     if (eventCallback) {
         ControllerEvent ev;
         ev.type = EventType::INDEXING_STARTED;
@@ -664,7 +840,11 @@ void IndexManager::indexFile(const std::string& filePath) {
         completion.arm();
     }
 
-    removeChunksForFile(normalizedPath);
+    const bool tx_index = Thoth::AlpFeatureFlags::transactionalIndexingEnabled();
+    if (!tx_index) {
+        removeChunksForFile(normalizedPath);
+    }
+    std::vector<CodeChunk> tx_candidates;
     
     std::ifstream in(normalizedPath, std::ios::binary);
     if (!in) {
@@ -698,6 +878,32 @@ void IndexManager::indexFile(const std::string& filePath) {
     diag.input_bytes = content.size();
     diag.paragraph_blocks = countMarkdownParagraphBlocks(content);
 
+    auto appendIndexedChunk = [&](CodeChunk&& chunk) {
+        if (alp_ctx) {
+            if (!alp_ctx->document_id.empty()) {
+                chunk.document_id = alp_ctx->document_id;
+            }
+            if (!alp_ctx->revision_id.empty()) {
+                chunk.revision_id = alp_ctx->revision_id;
+            }
+        }
+        if (!chunkHasRetrievalSignal(chunk)) {
+            return;
+        }
+        if (tx_index) {
+            tx_candidates.push_back(std::move(chunk));
+        } else {
+            addChunk(std::move(chunk));
+        }
+    };
+
+    auto storedCountForPath = [&]() -> int {
+        if (tx_index) {
+            return static_cast<int>(tx_candidates.size());
+        }
+        return countStoredChunksForFile(normalizedPath);
+    };
+
     auto storeSmallWholeFileChunk = [&]() -> int {
         CodeChunk fallbackChunk;
         fallbackChunk.fileName = normalizedPath;
@@ -714,6 +920,9 @@ void IndexManager::indexFile(const std::string& filePath) {
         fallbackChunk.code.erase(std::remove(fallbackChunk.code.begin(), fallbackChunk.code.end(), '\0'),
                                 fallbackChunk.code.end());
         try {
+            if (Thoth::AlpIndexTestHooks::shouldForceEmbedFailure()) {
+                throw std::runtime_error("alp_test_embed_fail");
+            }
             fallbackChunk.embedding = engine->embed(fallbackChunk.code);
             if (localTfIdfEngine) {
                 auto tfidf = localTfIdfEngine->embed(fallbackChunk.code);
@@ -725,8 +934,8 @@ void IndexManager::indexFile(const std::string& filePath) {
             }
         } catch (...) {
         }
-        addChunk(std::move(fallbackChunk));
-        return countStoredChunksForFile(normalizedPath);
+        appendIndexedChunk(std::move(fallbackChunk));
+        return storedCountForPath();
     };
 
     auto ingestChunkVector = [&](std::vector<CodeChunk>& vec) -> int {
@@ -762,6 +971,9 @@ void IndexManager::indexFile(const std::string& filePath) {
                 }
 
                 try {
+                    if (Thoth::AlpIndexTestHooks::shouldForceEmbedFailure()) {
+                        throw std::runtime_error("alp_test_embed_fail");
+                    }
                     if (j < embeddings.size()) {
                         chunkRef.embedding = embeddings[j];
                     } else {
@@ -789,18 +1001,93 @@ void IndexManager::indexFile(const std::string& filePath) {
                     ++diag.chunks_skipped_embed;
                     continue;
                 }
-                addChunk(std::move(chunkRef));
+                appendIndexedChunk(std::move(chunkRef));
             }
             if (i % 20 == 0) {
                 std::cout << "." << std::flush;
             }
         }
-        return countStoredChunksForFile(normalizedPath);
+        return storedCountForPath();
+    };
+
+    auto writeRevisionManifest = [&](const std::string& state,
+                                     int chunk_count,
+                                     const std::string& fail_reason) {
+        if (!alp_ctx || alp_ctx->document_id.empty() || alp_ctx->revision_id.empty()) {
+            return;
+        }
+        nlohmann::json manifest{
+            {"document_id", alp_ctx->document_id},
+            {"revision_id", alp_ctx->revision_id},
+            {"state", state},
+            {"file_path", normalizedPath},
+            {"chunk_count", chunk_count},
+        };
+        if (!alp_ctx->canonical_name.empty()) {
+            manifest["canonical_name"] = alp_ctx->canonical_name;
+        }
+        if (!fail_reason.empty()) {
+            manifest["reason"] = fail_reason;
+        }
+        Thoth::RevisionStorage::writeManifest(
+            alp_ctx->document_id, alp_ctx->revision_id, manifest);
     };
 
     auto finalizeIndexing = [&](int stored) {
         diag.final_stored = stored;
         logIndexingDiagnostics(normalizedPath, diag);
+        if (tx_index) {
+            const int prior_live = countStoredChunksForFile(normalizedPath);
+            const size_t candidate_count = tx_candidates.size();
+            if (!passesAlpIndexValidateGate(diag, candidate_count)) {
+                const std::string fail_reason =
+                    candidate_count == 0 && prior_live == 0 ? "no_chunks" : "validate_failed";
+                if (alp_ctx) {
+                    persistRegistryRevisionState(false, *alp_ctx, prior_live, fail_reason);
+                    writeRevisionManifest("failed", prior_live, fail_reason);
+                }
+                stored = prior_live;
+                completion.setFailure(fail_reason);
+                diag.final_stored = stored;
+                return;
+            }
+            if (!commitCandidateChunksForFile(normalizedPath, std::move(tx_candidates))) {
+                if (alp_ctx) {
+                    persistRegistryRevisionState(false, *alp_ctx, prior_live, "no_chunks");
+                    writeRevisionManifest("failed", prior_live, "no_chunks");
+                }
+                completion.setFailure("no_chunks");
+                diag.final_stored = prior_live;
+                return;
+            }
+            stored = countStoredChunksForFile(normalizedPath);
+            enforceMemoryLimits();
+            writeRevisionManifest("committing", stored, "");
+
+            const std::string persist_path =
+                indexFilePath.empty() ? FileHandler().getRagPath("rag_index.bin") : indexFilePath;
+            if (!saveIndex(persist_path)) {
+                if (alp_ctx) {
+                    persistRegistryRevisionState(false, *alp_ctx, stored, "persist_failed");
+                    writeRevisionManifest("failed", stored, "persist_failed");
+                }
+                completion.setFailure("persist_failed");
+                diag.final_stored = stored;
+                return;
+            }
+
+            {
+                std::unique_lock lock(chunksMutex);
+                indexedFileFingerprints[normalizedPath] = computeFileFingerprint(normalizedPath);
+            }
+            if (alp_ctx) {
+                persistRegistryRevisionState(true, *alp_ctx, stored, "");
+                writeRevisionManifest("committed", stored, "");
+            }
+            completion.setSuccess(stored);
+            diag.final_stored = stored;
+            return;
+        }
         {
             std::unique_lock lock(chunksMutex);
             indexedFileFingerprints[normalizedPath] = computeFileFingerprint(normalizedPath);
@@ -831,8 +1118,10 @@ void IndexManager::indexFile(const std::string& filePath) {
     int stored = ingestChunkVector(chunksVec);
     diag.chunks_stored_after_primary = static_cast<size_t>(stored);
 
-    enforceMemoryLimits();
-    stored = countStoredChunksForFile(normalizedPath);
+    if (!tx_index) {
+        enforceMemoryLimits();
+    }
+    stored = storedCountForPath();
 
     if (stored == 0) {
         if (content.size() <= kSmallDocumentSingleChunkMaxBytes) {
@@ -901,73 +1190,116 @@ void IndexManager::indexProject(const std::string& rootPath) {
     std::cout << "[RAG] Indexed " << rootAbs << " - Success: " << successCount << ", Skipped: " << skippedCount << ", Errors: " << errorCount << "\n";
 }
 
-void IndexManager::saveIndex() const {
+bool IndexManager::saveIndex() const {
     FileHandler fh;
-    saveIndex(fh.getRagPath("rag_index.bin"));
+    return saveIndex(fh.getRagPath("rag_index.bin"));
 }
 
-void IndexManager::saveIndex(const std::string& dbPath) const {
+bool IndexManager::saveIndex(const std::string& dbPath) const {
+    if (Thoth::AlpIndexTestHooks::forceSaveIndexFailure()) {
+        std::cerr << "[ALP] saveIndex suppressed by test hook\n";
+        return false;
+    }
+
     std::filesystem::create_directories(std::filesystem::path(dbPath).parent_path());
-    std::ofstream out(dbPath, std::ios::binary | std::ios::trunc);
-    if (!out) return;
+    const std::string temp_path = dbPath + ".tmp." + std::to_string(getpid());
 
-    json header;
-    header["magic"] = 0x54484F54;
-    header["model_name"] = engine->getModelName();
-    header["embedding_dimension"] = engine->getDimension();
-    header["embedding_version"] = engine->getInternalVersion();
-    std::string headerStr = header.dump();
-    size_t headerLen = headerStr.size();
-    out.write(reinterpret_cast<const char*>(&headerLen), sizeof(headerLen));
-    out.write(headerStr.data(), headerLen);
+    try {
+        std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return false;
+        }
 
-    size_t n = chunks.size();
-    out.write(reinterpret_cast<const char*>(&n), sizeof(n));
-    for (const auto& c : chunks) {
-        size_t len;
-        len = c.fileName.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len)); out.write(c.fileName.data(), len);
-        len = c.symbolName.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len)); out.write(c.symbolName.data(), len);
-        out.write(reinterpret_cast<const char*>(&c.startLine), sizeof(c.startLine));
-        out.write(reinterpret_cast<const char*>(&c.endLine), sizeof(c.endLine));
-        len = c.code.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len)); out.write(c.code.data(), len);
-        len = c.embedding.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        if (len > 0) out.write(reinterpret_cast<const char*>(c.embedding.data()), len * sizeof(float));
-        out.write(reinterpret_cast<const char*>(&c.last_modified), sizeof(c.last_modified));
-        len = c.commit_hash.size(); out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        if (len > 0) out.write(c.commit_hash.data(), len);
-        out.write(reinterpret_cast<const char*>(&c.embedding_version), sizeof(c.embedding_version));
-        out.write(reinterpret_cast<const char*>(&c.keyword_score), sizeof(c.keyword_score));
+        json header;
+        header["magic"] = 0x54484F54;
+        header["model_name"] = engine->getModelName();
+        header["embedding_dimension"] = engine->getDimension();
+        header["embedding_version"] = engine->getInternalVersion();
+        std::string headerStr = header.dump();
+        size_t headerLen = headerStr.size();
+        out.write(reinterpret_cast<const char*>(&headerLen), sizeof(headerLen));
+        out.write(headerStr.data(), headerLen);
+
+        size_t n = chunks.size();
+        out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+        for (const auto& c : chunks) {
+            size_t len;
+            len = c.fileName.size();
+            out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+            out.write(c.fileName.data(), len);
+            len = c.symbolName.size();
+            out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+            out.write(c.symbolName.data(), len);
+            out.write(reinterpret_cast<const char*>(&c.startLine), sizeof(c.startLine));
+            out.write(reinterpret_cast<const char*>(&c.endLine), sizeof(c.endLine));
+            len = c.code.size();
+            out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+            out.write(c.code.data(), len);
+            len = c.embedding.size();
+            out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+            if (len > 0) {
+                out.write(reinterpret_cast<const char*>(c.embedding.data()), len * sizeof(float));
+            }
+            out.write(reinterpret_cast<const char*>(&c.last_modified), sizeof(c.last_modified));
+            len = c.commit_hash.size();
+            out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+            if (len > 0) {
+                out.write(c.commit_hash.data(), len);
+            }
+            out.write(reinterpret_cast<const char*>(&c.embedding_version), sizeof(c.embedding_version));
+            out.write(reinterpret_cast<const char*>(&c.keyword_score), sizeof(c.keyword_score));
+        }
+
+        {
+            std::string tmpFile = temp_path + ".engine_tmp";
+            engine->saveState(tmpFile);
+            std::ifstream engIn(tmpFile, std::ios::binary);
+            std::string engData((std::istreambuf_iterator<char>(engIn)),
+                                std::istreambuf_iterator<char>());
+            size_t engSize = engData.size();
+            out.write(reinterpret_cast<const char*>(&engSize), sizeof(engSize));
+            out.write(engData.data(), engSize);
+            std::filesystem::remove(tmpFile);
+        }
+
+        if (localTfIdfEngine) {
+            std::string tmpFile = temp_path + ".tfidf_tmp";
+            localTfIdfEngine->saveState(tmpFile);
+            std::ifstream engIn(tmpFile, std::ios::binary);
+            std::string engData((std::istreambuf_iterator<char>(engIn)),
+                                std::istreambuf_iterator<char>());
+            size_t engSize = engData.size();
+            out.write(reinterpret_cast<const char*>(&engSize), sizeof(engSize));
+            out.write(engData.data(), engSize);
+            std::filesystem::remove(tmpFile);
+        } else {
+            size_t zero = 0;
+            out.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
+        }
+
+        if (!out) {
+            std::error_code ec;
+            fs::remove(temp_path, ec);
+            return false;
+        }
+        out.close();
+
+        std::error_code ec;
+        fs::rename(temp_path, dbPath, ec);
+        if (ec) {
+            fs::remove(temp_path, ec);
+            return false;
+        }
+
+        std::cout << "[basic_agent:RAG] Index saved to: " << dbPath << " (entries=" << n << ")\n";
+        return true;
+    } catch (const std::exception& ex) {
+        std::cerr << "[ALP] saveIndex failed: " << ex.what() << "\n";
+        std::error_code ec;
+        fs::remove(temp_path, ec);
+        return false;
     }
-    
-    // Save Primary Engine State
-    {
-        std::string tmpFile = dbPath + ".engine_tmp";
-        engine->saveState(tmpFile);
-        std::ifstream engIn(tmpFile, std::ios::binary);
-        std::string engData((std::istreambuf_iterator<char>(engIn)), std::istreambuf_iterator<char>());
-        size_t engSize = engData.size();
-        out.write(reinterpret_cast<const char*>(&engSize), sizeof(engSize));
-        out.write(engData.data(), engSize);
-        std::filesystem::remove(tmpFile);
-    }
-
-    // Phase 13 Fix: Save Local TF-IDF Engine State
-    if (localTfIdfEngine) {
-        std::string tmpFile = dbPath + ".tfidf_tmp";
-        localTfIdfEngine->saveState(tmpFile);
-        std::ifstream engIn(tmpFile, std::ios::binary);
-        std::string engData((std::istreambuf_iterator<char>(engIn)), std::istreambuf_iterator<char>());
-        size_t engSize = engData.size();
-        out.write(reinterpret_cast<const char*>(&engSize), sizeof(engSize));
-        out.write(engData.data(), engSize);
-        std::filesystem::remove(tmpFile);
-    } else {
-        size_t zero = 0;
-        out.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
-    }
-
-    std::cout << "[basic_agent:RAG] Index saved to: " << dbPath << " (entries=" << n << ")\n";
-} 
+}
 
 void IndexManager::loadIndex() {
     FileHandler fh;
@@ -1113,6 +1445,61 @@ void IndexManager::recordIndexingOutcome(const std::string& normalizedPath,
 nlohmann::json IndexManager::listCorpusDocuments(const std::string& ragDirectory) const {
     using namespace Thoth::CorpusDocuments;
 
+    if (Thoth::AlpFeatureFlags::alpEnabled()) {
+        nlohmann::json out = emptyV1List();
+        const auto& reg = documentRegistry_.body();
+        if (!reg.contains("documents") || !reg["documents"].is_array()) {
+            return out;
+        }
+        for (const auto& doc : reg["documents"]) {
+            const std::string doc_id = doc.value("document_id", "");
+            const std::string name = doc.value("canonical_name", "");
+            const std::string storage_path = doc.value("storage_path", "");
+            std::optional<Thoth::RegistryRevisionView> committed =
+                documentRegistry_.findCommittedRevision(doc_id);
+            std::optional<Thoth::RegistryRevisionView> inflight =
+                documentRegistry_.findInFlightRevision(doc_id);
+
+            std::string status = "pending";
+            std::optional<std::string> failure_reason;
+            std::optional<int> chunk_count;
+            std::optional<std::string> indexed_at;
+
+            if (inflight) {
+                status = "indexing";
+            } else if (committed) {
+                status = "indexed";
+                chunk_count = committed->chunk_count;
+                if (committed->indexed_at_ms > 0) {
+                    indexed_at = formatIndexedAtIso(committed->indexed_at_ms);
+                }
+            } else if (documentRegistry_.lastRevisionFailed(doc_id)) {
+                status = "failed";
+            }
+
+            if (status == "failed" && reg.contains("revisions")) {
+                for (const auto& row : reg["revisions"]) {
+                    if (row.value("document_id", "") == doc_id
+                        && row.value("state", "") == "failed") {
+                        failure_reason = row.value("reason", "");
+                        break;
+                    }
+                }
+            }
+
+            if (!storage_path.empty()) {
+                const int live = countStoredChunksForFile(storage_path);
+                if (live > 0 && status == "indexed") {
+                    chunk_count = live;
+                }
+            }
+
+            out["documents"].push_back(makeDocument(
+                doc_id, name, status, indexed_at, chunk_count, failure_reason));
+        }
+        return out;
+    }
+
     struct DocAgg {
         int chunk_count = 0;
         std::int64_t last_modified = 0;
@@ -1212,6 +1599,33 @@ nlohmann::json IndexManager::listCorpusDocuments(const std::string& ragDirectory
 }
 
 IndexManager::CreateCorpusDocumentResult IndexManager::createCorpusDocument(
+    const std::string& ragDirectory,
+    const std::string& suggested_name,
+    const std::string& content,
+    const std::string& owner_context_id) {
+    return createCorpusDocument(ragDirectory, suggested_name, content, owner_context_id,
+                                CreateCorpusDocumentOptions{});
+}
+
+IndexManager::CreateCorpusDocumentResult IndexManager::createCorpusDocument(
+    const std::string& ragDirectory,
+    const std::string& suggested_name,
+    const std::string& content,
+    const std::string& owner_context_id,
+    const CreateCorpusDocumentOptions& options) {
+    if (Thoth::AlpFeatureFlags::alpMisconfigured()) {
+        CreateCorpusDocumentResult result;
+        result.error = "THOTH_ALP_ENABLED requires THOTH_ALP_TX_INDEX=1";
+        result.machine_code = "alp_misconfigured";
+        return result;
+    }
+    if (Thoth::AlpFeatureFlags::alpCreateAllowed()) {
+        return createCorpusDocumentAlp(suggested_name, content, owner_context_id, options);
+    }
+    return createCorpusDocumentLegacy(ragDirectory, suggested_name, content, owner_context_id);
+}
+
+IndexManager::CreateCorpusDocumentResult IndexManager::createCorpusDocumentLegacy(
     const std::string& ragDirectory,
     const std::string& suggested_name,
     const std::string& content,
@@ -1353,5 +1767,195 @@ IndexManager::CreateCorpusDocumentResult IndexManager::createCorpusDocument(
     }
     m_queueCv.notify_one();
 
+    return result;
+}
+
+IndexManager::CreateCorpusDocumentResult IndexManager::createCorpusDocumentAlp(
+    const std::string& suggested_name,
+    const std::string& content,
+    const std::string& owner_context_id,
+    const CreateCorpusDocumentOptions& options) {
+    using namespace Thoth::AttachmentSendPolicy;
+    using namespace Thoth::CorpusCreate;
+
+    CreateCorpusDocumentResult result;
+    if (content.empty()) {
+        result.error = "content must not be empty";
+        return result;
+    }
+    if (content.size() > MAX_FILE_SIZE) {
+        result.error = "content exceeds maximum size";
+        return result;
+    }
+
+    const std::string canonical_name = sanitizeSuggestedFilename(suggested_name);
+    const fs::path ext_path(canonical_name);
+    const std::string ext = ext_path.extension().string();
+    if (!ext.empty() && !isSupportedExtension(ext)) {
+        result.error = "unsupported file extension";
+        return result;
+    }
+
+    const std::string computed_hash = Thoth::sha256Hex(content);
+    if (!options.content_hash.empty() && options.content_hash != computed_hash) {
+        result.error = "content_hash does not match content bytes";
+        return result;
+    }
+
+    Thoth::AlpStoragePaths::ensureNamespaces();
+    const std::string storage_path =
+        Thoth::AlpStoragePaths::operatorAttachmentPath(canonical_name);
+
+    std::optional<std::string> existing_id =
+        documentRegistry_.findDocumentIdByCanonicalName(canonical_name);
+    const bool document_exists = existing_id.has_value();
+
+    PolicyInput policy_in;
+    policy_in.document_exists = document_exists;
+    policy_in.content_hash = computed_hash;
+    policy_in.local_source_mtime_sec = options.local_source_mtime_sec;
+    policy_in.force_replace = options.force_replace;
+    if (existing_id) {
+        if (auto committed = documentRegistry_.findCommittedRevision(*existing_id)) {
+            CommittedRevision cr;
+            cr.revision_id = committed->revision_id;
+            cr.content_hash = committed->content_hash;
+            cr.indexed_at_ms = committed->indexed_at_ms;
+            policy_in.committed = cr;
+        }
+        if (auto inflight = documentRegistry_.findInFlightRevision(*existing_id)) {
+            InFlightRevision ir;
+            ir.revision_id = inflight->revision_id;
+            ir.content_hash = inflight->content_hash;
+            policy_in.in_flight = ir;
+        }
+        policy_in.last_revision_failed = documentRegistry_.lastRevisionFailed(*existing_id);
+    }
+
+    std::string document_id = existing_id.value_or("");
+
+    const PolicyResult policy = evaluate(policy_in);
+    result.action = actionToString(policy.action);
+
+    if (options.dry_run) {
+        if (document_id.empty()
+            && (policy.action == SendAction::Create || policy.action == SendAction::NewRevision
+                || policy.action == SendAction::Retry)) {
+            document_id = "dry-run-preview";
+        }
+        result.ok = true;
+        result.document_id = document_id;
+        result.document_name = canonical_name;
+        return result;
+    }
+
+    if (policy.action == SendAction::Conflict) {
+        result.error = "content conflict: local revision is older than committed";
+        result.machine_code = "content_conflict";
+        result.document_id = document_id;
+        return result;
+    }
+
+    if (policy.action == SendAction::NoOp || policy.action == SendAction::LinkOnly) {
+        if (!owner_context_id.empty() && !document_id.empty()) {
+            documentRegistry_.addSessionLink(document_id, owner_context_id);
+            documentRegistry_.save(Thoth::DocumentRegistry::defaultRegistryPath());
+        }
+        result.ok = true;
+        result.document_id = document_id;
+        result.document_name = canonical_name;
+        if (policy_in.committed) {
+            result.revision_id = policy_in.committed->revision_id;
+        }
+        return result;
+    }
+
+    if (document_id.empty()) {
+        document_id = Thoth::AlpUuid::generateV4();
+    }
+
+    {
+        std::lock_guard<std::mutex> inflight_lock(inFlightMutex_);
+        if (inFlightIndexKeys_.count(document_id) > 0) {
+            result.error = "revision already in flight for document";
+            result.machine_code = "revision_in_flight";
+            result.document_id = document_id;
+            return result;
+        }
+    }
+
+    const std::string revision_id = Thoth::AlpUuid::generateV4();
+
+    const std::string temp_path =
+        storage_path + ".tmp." + std::to_string(getpid());
+    try {
+        fs::create_directories(fs::path(storage_path).parent_path());
+        {
+            std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                result.error = "failed to write document";
+                return result;
+            }
+            out.write(content.data(), static_cast<std::streamsize>(content.size()));
+            if (!out) {
+                std::error_code ec;
+                fs::remove(temp_path, ec);
+                result.error = "failed to write document";
+                return result;
+            }
+        }
+        std::error_code ec;
+        fs::rename(temp_path, storage_path, ec);
+        if (ec) {
+            fs::remove(temp_path, ec);
+            result.error = "failed to finalize document";
+            return result;
+        }
+    } catch (const std::exception& ex) {
+        std::error_code ec;
+        fs::remove(temp_path, ec);
+        result.error = std::string("failed to store document: ") + ex.what();
+        return result;
+    }
+
+    if (!documentRegistry_.ensureDocument(document_id, canonical_name, storage_path)) {
+        std::error_code ec;
+        fs::remove(storage_path, ec);
+        result.error = "canonical_name slot conflict";
+        return result;
+    }
+    if (!documentRegistry_.beginRevision(document_id,
+                                         revision_id,
+                                         storage_path,
+                                         "pending",
+                                         computed_hash,
+                                         options.local_source_mtime_sec)) {
+        std::error_code ec;
+        fs::remove(storage_path, ec);
+        result.error = "revision already exists";
+        return result;
+    }
+    if (!owner_context_id.empty()) {
+        documentRegistry_.addSessionLink(document_id, owner_context_id);
+    }
+    if (!documentRegistry_.save(Thoth::DocumentRegistry::defaultRegistryPath())) {
+        std::error_code ec;
+        fs::remove(storage_path, ec);
+        result.error = "failed to persist document registry";
+        return result;
+    }
+
+    {
+        std::lock_guard<std::mutex> inflight_lock(inFlightMutex_);
+        inFlightIndexKeys_.insert(document_id);
+    }
+
+    AlpIndexContext ctx{document_id, revision_id, canonical_name};
+    indexFileAsync(storage_path, ctx);
+
+    result.ok = true;
+    result.document_id = document_id;
+    result.document_name = canonical_name;
+    result.revision_id = revision_id;
     return result;
 }
