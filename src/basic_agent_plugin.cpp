@@ -93,6 +93,7 @@ BasicAgentPlugin::BasicAgentPlugin()
     config.applyEnvironmentOverrides();
 
     Thoth::logResolvedRuntimeConfig(&config);
+    Thoth::logInferenceBackendMisconfigWarnings(&config);
     Thoth::logEmbeddingStartupProbe(&config);
 
     // --- Load retrieval_config.json (Phase 5.1) ---
@@ -181,7 +182,8 @@ void BasicAgentPlugin::bootstrapSandboxIfEmpty() {
     cmdProcessor.setInitialized(true);
 }
 
-std::string BasicAgentPlugin::processInput(const std::string& input) {
+std::string BasicAgentPlugin::processInput(const std::string& input,
+                                           const std::optional<std::string>& active_goal) {
     std::string trimmed = input;
     auto b = trimmed.find_first_not_of(" \t\r\n");
     if (b == std::string::npos) return "";
@@ -193,7 +195,7 @@ std::string BasicAgentPlugin::processInput(const std::string& input) {
         return cmdProcessor.handleCommand(trimmed);
     }
 
-    return cmdProcessor.processQuery(trimmed);
+    return cmdProcessor.processQuery(trimmed, active_goal);
 }
 
 void BasicAgentPlugin::setConversationMemory(const std::vector<std::pair<std::string, std::string>>& messages,
@@ -510,7 +512,8 @@ nlohmann::json BasicAgentPlugin::createConversationSession() {
 }
 
 nlohmann::json BasicAgentPlugin::appendUserTurn(const std::string& session_id,
-                                                const std::string& content) {
+                                                const std::string& content,
+                                                const std::optional<std::string>& active_goal) {
     if (session_id.empty()) {
         throw Thoth::EngineException(
             Thoth::EngineError::invalidRequest("session_id must not be empty."));
@@ -521,7 +524,7 @@ nlohmann::json BasicAgentPlugin::appendUserTurn(const std::string& session_id,
     }
 
     setSessionId(session_id);
-    const std::string assistant_text = processInput(content);
+    const std::string assistant_text = processInput(content, active_goal);
 
     const auto messages = memory.getTimedMessages(session_id);
     if (messages.empty()) {

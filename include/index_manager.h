@@ -171,6 +171,8 @@ private:
     // Helper functions
     std::string limitText(const std::string& text, size_t maxChars);
     void rebuildInternalStructures();
+    /** Requires chunksMutex held. Rebuilds store + codeToChunkIndex from chunks. */
+    void rebuildInternalStructuresUnlocked();
     void removeChunksFromPath(const std::string& rootPath);
     void removeChunksForFile(const std::string& filePath);
     size_t getCurrentMemoryUsage() const;

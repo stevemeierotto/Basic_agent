@@ -26,6 +26,9 @@
 #include "restore_api.h"
 #include "chat_generation_safety.h"
 #include "chat_rag_observability.h"
+#include "chat_retrieval_goal.h"
+
+#include <optional>
 
 class CommandProcessor {
 public:
@@ -42,7 +45,8 @@ public:
     void handleSimilarityCommand(const std::string& args);
 
     // NEW: Send query through Memory + RAG + LLM
-    std::string processQuery(const std::string& input);
+    std::string processQuery(const std::string& input,
+                             const std::optional<std::string>& active_goal = std::nullopt);
     void ensureInitialized();
     void setInitialized(bool value) { initialized = value; }
     void setController(std::shared_ptr<Thoth::ExecutiveController> ctrl) { controller = ctrl; }
@@ -74,6 +78,7 @@ private:
     Config* config;
     DecisionTraceLogger traceLogger;
     Thoth::ConstraintChecker constraint_checker_;
+    Thoth::SessionGoalEmbedCache session_goal_cache_;
 
     void showConfig() const;
     void setConfig(const std::string& key, const std::string& value);

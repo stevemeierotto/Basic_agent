@@ -16,6 +16,7 @@
 #include "../include/graph_statistics.h"
 #include "../include/corpus_create.h"
 #include "../include/corpus_documents.h"
+#include "../include/runtime_bootstrap.h"
 
 #include <httplib.h>
 #include <json.hpp>
@@ -26,6 +27,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <string>
 
@@ -167,6 +169,7 @@ struct EngineHttpTransport::Impl {
             nlohmann::json body;
             body["workspace"] = runtime.workspacePath();
             body["capabilities"] = capabilitiesJson(runtime);
+            body["embedding"] = embeddingProbeJson(getLastEmbeddingProbeSnapshot());
             if (runtime.isReady()) {
                 body["status"] = "ready";
                 setJsonResponse(res, 200, body);
@@ -210,8 +213,12 @@ struct EngineHttpTransport::Impl {
 
             const std::string text = body["text"].get<std::string>();
             const std::string resolved_session = normalizeEngineSessionId(session_id);
+            std::optional<std::string> active_goal;
+            if (body.contains("active_goal") && body["active_goal"].is_string()) {
+                active_goal = body["active_goal"].get<std::string>();
+            }
 
-            handleEngineFuture(runtime.submitChat(resolved_session, text),
+            handleEngineFuture(runtime.submitChat(resolved_session, text, active_goal),
                                res,
                                [&](const std::string& response) {
                                    setJsonResponse(res,
@@ -450,8 +457,13 @@ struct EngineHttpTransport::Impl {
                         }
                         const std::string session_id = body["session_id"].get<std::string>();
                         const std::string content = body["content"].get<std::string>();
+                        std::optional<std::string> active_goal;
+                        if (body.contains("active_goal") && body["active_goal"].is_string()) {
+                            active_goal = body["active_goal"].get<std::string>();
+                        }
                         try {
-                            setJsonResponse(res, 200, runtime.appendUserTurn(session_id, content));
+                            setJsonResponse(res, 200,
+                                            runtime.appendUserTurn(session_id, content, active_goal));
                         } catch (const EngineException& ex) {
                             setErrorResponse(res, ex.error());
                         } catch (const std::exception& ex) {

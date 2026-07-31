@@ -288,7 +288,8 @@ void EngineRuntime::shutdown(std::chrono::milliseconds drain_timeout) {
 }
 
 std::future<std::string> EngineRuntime::submitChat(const std::string& session_id,
-                                                   const std::string& text) {
+                                                   const std::string& text,
+                                                   const std::optional<std::string>& active_goal) {
     if (!isReady()) {
         return rejectWithError(EngineError::engineBusy("Engine is not ready."));
     }
@@ -301,10 +302,10 @@ std::future<std::string> EngineRuntime::submitChat(const std::string& session_id
     std::future<std::string> future = promise->get_future();
 
     try {
-        impl_->enqueue([this, resolved_session, text, promise]() {
+        impl_->enqueue([this, resolved_session, text, active_goal, promise]() {
             try {
                 impl_->ensureSessionOnWorker(resolved_session);
-                promise->set_value(impl_->plugin->processInput(text));
+                promise->set_value(impl_->plugin->processInput(text, active_goal));
             } catch (const std::exception& e) {
                 promise->set_exception(
                     std::make_exception_ptr(EngineException(EngineError::internalError(e.what()))));
@@ -497,7 +498,8 @@ nlohmann::json EngineRuntime::createConversationSession() {
 }
 
 nlohmann::json EngineRuntime::appendUserTurn(const std::string& session_id,
-                                             const std::string& content) {
+                                             const std::string& content,
+                                             const std::optional<std::string>& active_goal) {
     if (!isReady()) {
         throw EngineException(EngineError::engineBusy("Engine is not ready."));
     }
@@ -507,10 +509,10 @@ nlohmann::json EngineRuntime::appendUserTurn(const std::string& session_id,
     const std::string resolved = normalizeEngineSessionId(session_id);
     auto promise = std::make_shared<std::promise<nlohmann::json>>();
     std::future<nlohmann::json> future = promise->get_future();
-    impl_->enqueue([this, promise, resolved, content]() {
+    impl_->enqueue([this, promise, resolved, content, active_goal]() {
         try {
             impl_->ensureSessionOnWorker(resolved);
-            promise->set_value(impl_->plugin->appendUserTurn(resolved, content));
+            promise->set_value(impl_->plugin->appendUserTurn(resolved, content, active_goal));
         } catch (...) {
             promise->set_exception(std::current_exception());
         }

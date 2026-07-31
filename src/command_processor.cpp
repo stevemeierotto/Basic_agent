@@ -346,7 +346,8 @@ CommandProcessor::ConversationalTurnResult CommandProcessor::runConversationalGe
     return turn;
 }
 
-std::string CommandProcessor::processQuery(const std::string& input) {
+std::string CommandProcessor::processQuery(const std::string& input,
+                                           const std::optional<std::string>& active_goal) {
     auto trace = traceLogger.startTrace("query", input.size());
     
     try {
@@ -633,21 +634,52 @@ std::string CommandProcessor::processQuery(const std::string& input) {
         }
 
         // Sync embeddings for GRAG when we have any plan context (even if idle)
-        if (hasPlanContext) {
+        const std::string activeContextKey =
+            session_id.empty() ? memory.getActiveSessionId() : session_id;
+        const Thoth::ChatRetrievalGoal chatGoal = Thoth::resolveChatRetrievalGoal(
+            controller.get(),
+            activeContextKey,
+            active_goal,
+            session_goal_cache_,
+            rag.engine.get());
+
+        if (!chatGoal.embedding.empty()) {
+            rag.setGoalEmbedding(chatGoal.embedding);
+            if (chatGoal.source == "executive" && controller) {
+                rag.setCurrentEmbedding(controller->get_current_embedding());
+            } else {
+                rag.setCurrentEmbedding({});
+            }
+        } else if (hasPlanContext) {
             rag.setGoalEmbedding(controller->get_goal_embedding());
             rag.setCurrentEmbedding(controller->get_current_embedding());
         }
 
+        if (!chatGoal.error.empty()) {
+            StructuredLogger::instance().log(
+                LogLevel::Warn,
+                "command_processor",
+                "session_goal_embed_failed",
+                chatGoal.error,
+                {{"goal_source", chatGoal.source}, {"session_id", activeContextKey}},
+                trace.requestId);
+        }
+
         GragDiagnostics retrievalDiagnostics;
+        retrievalDiagnostics.goal_source = chatGoal.source;
         const int topK = static_cast<int>(DEFAULT_RAG_TOP_K);
-        const std::string activeContextKey =
-            session_id.empty() ? memory.getActiveSessionId() : session_id;
         Thoth::RetrievalScope retrievalScope =
             Thoth::resolveAgentContextRetrievalScope(activeContextKey, rag.getIndexManager());
         Thoth::RetrievalTrace retrievalTrace;
         std::vector<CodeChunk> contextChunks = rag.retrieveRelevant(
             input, {}, topK, trace.requestId, activePlanId, activeStepId, {}, {}, {},
             &retrievalDiagnostics, &retrievalScope, &retrievalTrace);
+        retrievalDiagnostics.goal_source = chatGoal.source;
+        if (!chatGoal.embedding.empty()) {
+            retrievalDiagnostics.goal_present = true;
+        } else if (!chatGoal.error.empty()) {
+            retrievalDiagnostics.goal_present = false;
+        }
 
         // Plan M G1 (R1): fail-closed grounding floor on post-boost final_score.
         // grounded=true must mean chunks survived the floor, not merely that the

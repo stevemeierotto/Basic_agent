@@ -24,6 +24,9 @@ namespace Thoth {
 namespace {
 
 std::once_flag g_bootstrapOnce;
+std::mutex g_probeMutex;
+EmbeddingProbeSnapshot g_lastProbeSnapshot;
+bool g_probeCached = false;
 
 constexpr const char* kEmbedProbeInput = "thoth-embedding-probe";
 
@@ -47,6 +50,24 @@ std::string resolveEmbeddingModelName(const Config* config) {
     return "nomic-embed-text:v1.5";
 }
 
+bool urlHintsLlamaCppService(const std::string& url) {
+    return url.find("llama-server") != std::string::npos
+        || url.find("llama-embed") != std::string::npos
+        || url.find(":8080") != std::string::npos
+        || url.find(":8081") != std::string::npos;
+}
+
+bool urlHintsOllamaService(const std::string& url) {
+    return url.find(":11434") != std::string::npos
+        || url.find("ollama") != std::string::npos;
+}
+
+void cacheProbeSnapshot(EmbeddingProbeSnapshot snapshot) {
+    std::lock_guard<std::mutex> lock(g_probeMutex);
+    g_lastProbeSnapshot = std::move(snapshot);
+    g_probeCached = true;
+}
+
 } // namespace
 
 void bootstrapRuntimeEnvironment() {
@@ -65,6 +86,62 @@ bool runtimeConfigDiagnosticsEnabled(const Config* config) {
         return true;
     }
     return config != nullptr && config->verbosity >= 2;
+}
+
+std::vector<InferenceMisconfigWarning> detectInferenceBackendMisconfigs(
+    const std::string& backend_name,
+    const InferenceEndpointConfig& endpoints) {
+    std::vector<InferenceMisconfigWarning> warnings;
+
+    if (backend_name == "ollama") {
+        if (urlHintsLlamaCppService(endpoints.base_url)) {
+            warnings.push_back({
+                "backend_url_mismatch",
+                "THOTH_INFERENCE_BACKEND=ollama but inference_base looks like llama.cpp "
+                    "(set THOTH_INFERENCE_BACKEND=llama_cpp for Docker Compose)",
+            });
+        }
+        if (urlHintsLlamaCppService(endpoints.embed_base_url)) {
+            warnings.push_back({
+                "embed_backend_url_mismatch",
+                "THOTH_INFERENCE_BACKEND=ollama but embed_base looks like llama-embed-server "
+                    "(set THOTH_INFERENCE_BACKEND=llama_cpp and keep THOTH_EMBED_BASE_URL)",
+            });
+        }
+    } else if (backend_name == "llama_cpp") {
+        if (urlHintsOllamaService(endpoints.base_url)) {
+            warnings.push_back({
+                "backend_url_mismatch",
+                "THOTH_INFERENCE_BACKEND=llama_cpp but inference_base looks like Ollama "
+                    "(use http://llama-server:8080 in Docker or http://127.0.0.1:8080 on host)",
+            });
+        }
+        if (urlHintsOllamaService(endpoints.embed_base_url)) {
+            warnings.push_back({
+                "embed_backend_url_mismatch",
+                "THOTH_INFERENCE_BACKEND=llama_cpp but embed_base looks like Ollama "
+                    "(use http://llama-embed-server:8081 in Docker or http://127.0.0.1:8081 on host)",
+            });
+        }
+    }
+
+    return warnings;
+}
+
+void logInferenceBackendMisconfigWarnings(const Config* config) {
+    const auto endpoints = config != nullptr ? resolveInferenceEndpoints(*config)
+                                             : resolveInferenceEndpoints();
+
+    std::string backend_error;
+    const auto backend = tryResolveInferenceBackend(backend_error);
+    const std::string backend_name =
+        backend ? inferenceBackendName(*backend)
+                : (backend_error.empty() ? "unknown" : "invalid");
+
+    for (const auto& warning : detectInferenceBackendMisconfigs(backend_name, endpoints)) {
+        std::cerr << "[Thoth] config_warning code=" << warning.code << ' '
+                  << warning.message << '\n';
+    }
 }
 
 void logResolvedRuntimeConfig(const Config* config) {
@@ -98,66 +175,123 @@ void logResolvedRuntimeConfig(const Config* config) {
               << "[Thoth] config=" << fileHandler.getAgentWorkspacePath("config.json") << '\n';
 }
 
+EmbeddingProbeSnapshot probeEmbeddingBackend(const Config* config) {
+    EmbeddingProbeSnapshot snapshot;
+    snapshot.status = "unknown";
+    snapshot.model = resolveEmbeddingModelName(config);
+
+    if (testSuiteDevTierEnabled()) {
+        snapshot.status = "skipped";
+        cacheProbeSnapshot(snapshot);
+        return snapshot;
+    }
+
+    const auto endpoints = config != nullptr ? resolveInferenceEndpoints(*config)
+                                           : resolveInferenceEndpoints();
+    snapshot.embed_base_url = endpoints.embed_base_url;
+
+    const int expected_dim =
+        EmbeddingEngine(EmbeddingEngine::Method::External, nullptr).getDimension();
+
+    std::string backend_error;
+    const auto backend = tryResolveInferenceBackend(backend_error);
+    snapshot.backend =
+        backend ? inferenceBackendName(*backend)
+                : (backend_error.empty() ? "unknown" : "invalid");
+
+    if (!backend) {
+        snapshot.status = "failed";
+        snapshot.error = backend_error;
+        cacheProbeSnapshot(snapshot);
+        return snapshot;
+    }
+
+    try {
+        const auto client = createInferenceClient(endpoints, config);
+        snapshot.backend = client->backendName();
+
+        InferenceEmbedRequest request;
+        request.model = snapshot.model;
+        request.inputs = {kEmbedProbeInput};
+
+        const auto result = client->embed(request);
+        if (!result.ok || result.embeddings.empty()) {
+            snapshot.status = "failed";
+            snapshot.error = result.error.empty() ? "embed request failed" : result.error;
+            cacheProbeSnapshot(snapshot);
+            return snapshot;
+        }
+
+        snapshot.dimension = static_cast<int>(result.embeddings.front().size());
+        if (snapshot.dimension != expected_dim) {
+            snapshot.status = "failed";
+            snapshot.error = "dimension mismatch: got " + std::to_string(snapshot.dimension)
+                + " expected " + std::to_string(expected_dim);
+            cacheProbeSnapshot(snapshot);
+            return snapshot;
+        }
+
+        snapshot.status = "ok";
+        cacheProbeSnapshot(snapshot);
+        return snapshot;
+    } catch (const std::exception& ex) {
+        snapshot.status = "failed";
+        snapshot.error = ex.what();
+        cacheProbeSnapshot(snapshot);
+        return snapshot;
+    }
+}
+
+EmbeddingProbeSnapshot getLastEmbeddingProbeSnapshot() {
+    std::lock_guard<std::mutex> lock(g_probeMutex);
+    if (g_probeCached) {
+        return g_lastProbeSnapshot;
+    }
+    EmbeddingProbeSnapshot unknown;
+    unknown.status = "unknown";
+    return unknown;
+}
+
+nlohmann::json embeddingProbeJson(const EmbeddingProbeSnapshot& snapshot) {
+    nlohmann::json body{
+        {"status", snapshot.status},
+        {"backend", snapshot.backend},
+        {"embed_base_url", snapshot.embed_base_url},
+        {"model", snapshot.model},
+        {"dimension", snapshot.dimension},
+    };
+    if (!snapshot.error.empty()) {
+        body["error"] = snapshot.error;
+    }
+    return body;
+}
+
 void logEmbeddingStartupProbe(const Config* config) {
     if (testSuiteDevTierEnabled()) {
         if (runtimeConfigDiagnosticsEnabled(config)) {
             std::cerr << "[Thoth] embed_probe=skipped (THOTH_TEST_SUITE_DEV TfIdf tier)\n";
         }
+        (void)probeEmbeddingBackend(config);
         return;
     }
 
-    const auto endpoints = config != nullptr ? resolveInferenceEndpoints(*config)
-                                           : resolveInferenceEndpoints();
-    const std::string model = resolveEmbeddingModelName(config);
-    const int expected_dim = EmbeddingEngine(EmbeddingEngine::Method::External, nullptr).getDimension();
+    const EmbeddingProbeSnapshot snapshot = probeEmbeddingBackend(config);
 
-    std::string backend_error;
-    const auto backend = tryResolveInferenceBackend(backend_error);
-    const std::string backend_name =
-        backend ? inferenceBackendName(*backend)
-                : (backend_error.empty() ? "unknown" : "invalid");
-
-    if (!backend) {
-        std::cerr << "[Thoth] embed_probe=failed backend=" << backend_name
-                  << " error=" << backend_error << '\n';
+    if (snapshot.status == "ok") {
+        std::cerr << "[Thoth] embed_probe=ok backend=" << snapshot.backend
+                  << " embed_base=" << snapshot.embed_base_url
+                  << " model=" << snapshot.model << " dimension=" << snapshot.dimension
+                  << '\n';
         return;
     }
 
-    try {
-        const auto client = createInferenceClient(endpoints, config);
-        InferenceEmbedRequest request;
-        request.model = model;
-        request.inputs = {kEmbedProbeInput};
-
-        const auto result = client->embed(request);
-        if (!result.ok || result.embeddings.empty()) {
-            std::cerr << "[Thoth] embed_probe=failed backend=" << client->backendName()
-                      << " embed_base=" << endpoints.embed_base_url
-                      << " model=" << model;
-            if (!result.error.empty()) {
-                std::cerr << " error=" << result.error;
-            }
-            std::cerr << '\n';
-            return;
-        }
-
-        const std::size_t dim = result.embeddings.front().size();
-        if (static_cast<int>(dim) != expected_dim) {
-            std::cerr << "[Thoth] embed_probe=failed backend=" << client->backendName()
-                      << " embed_base=" << endpoints.embed_base_url
-                      << " model=" << model << " dimension=" << dim
-                      << " expected=" << expected_dim << '\n';
-            return;
-        }
-
-        std::cerr << "[Thoth] embed_probe=ok backend=" << client->backendName()
-                  << " embed_base=" << endpoints.embed_base_url
-                  << " model=" << model << " dimension=" << dim << '\n';
-    } catch (const std::exception& ex) {
-        std::cerr << "[Thoth] embed_probe=failed backend=" << backend_name
-                  << " embed_base=" << endpoints.embed_base_url
-                  << " model=" << model << " error=" << ex.what() << '\n';
+    std::cerr << "[Thoth] embed_probe=failed backend=" << snapshot.backend
+              << " embed_base=" << snapshot.embed_base_url
+              << " model=" << snapshot.model;
+    if (!snapshot.error.empty()) {
+        std::cerr << " error=" << snapshot.error;
     }
+    std::cerr << '\n';
 }
 
 } // namespace Thoth

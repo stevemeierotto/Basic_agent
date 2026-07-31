@@ -111,6 +111,7 @@ set(BASIC_AGENT_SOURCES
     src/chat_retrieval_boost.cpp
     src/chat_generation_safety.cpp
     src/chat_query_utils.cpp
+    src/chat_retrieval_goal.cpp
     src/reflection_utils.cpp
     src/reflection_ab_cases.cpp
     src/robustness_mock_responses.cpp

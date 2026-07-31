@@ -721,9 +721,13 @@ void IndexManager::removeChunksForFile(const std::string& filePath) {
     } catch (...) { normalized = filePath; }
 
     std::unique_lock lock(chunksMutex);
+    const size_t before = chunks.size();
     chunks.erase(std::remove_if(chunks.begin(), chunks.end(),
             [&](const CodeChunk& c) { return c.fileName == normalized; }),
         chunks.end());
+    if (chunks.size() != before) {
+        rebuildInternalStructuresUnlocked();
+    }
     indexedFileFingerprints.erase(normalized);
 }
 
@@ -1398,8 +1402,7 @@ void IndexManager::loadIndex(const std::string& dbPath) {
     std::cout << "[basic_agent:RAG] Index loaded from: " << dbPath << " (entries=" << n << ")\n";
 }
 
-void IndexManager::rebuildInternalStructures() {
-    std::unique_lock lock(chunksMutex);
+void IndexManager::rebuildInternalStructuresUnlocked() {
     store.clear();
     codeToChunkIndex.clear();
     for (size_t i = 0; i < chunks.size(); ++i) {
@@ -1409,6 +1412,11 @@ void IndexManager::rebuildInternalStructures() {
         store.addDocumentWithEmbedding(chunk.code, chunk.embedding);
         codeToChunkIndex[chunk.code] = i;
     }
+}
+
+void IndexManager::rebuildInternalStructures() {
+    std::unique_lock lock(chunksMutex);
+    rebuildInternalStructuresUnlocked();
 }
 
 void IndexManager::addChunkToIndex(CodeChunk&& chunk) {

@@ -21,6 +21,8 @@
 #include "corpus_create.h"
 #include "json.hpp"
 
+#include <optional>
+
 //#include "Plugin.h"  // Plugin interface
 
 class BasicAgentPlugin {
@@ -31,7 +33,8 @@ public:
     // Event system for UI integration
     std::function<void(const ControllerEvent&)> onEvent;
 
-    std::string processInput(const std::string& input);
+    std::string processInput(const std::string& input,
+                             const std::optional<std::string>& active_goal = std::nullopt);
     void setConversationMemory(
         const std::vector<std::pair<std::string, std::string>>& messages,
         const std::string& summary = "");
@@ -92,7 +95,9 @@ public:
 
     /** Phase 10 — Engine-owned conversation authority. */
     nlohmann::json createConversationSession();
-    nlohmann::json appendUserTurn(const std::string& session_id, const std::string& content);
+    nlohmann::json appendUserTurn(const std::string& session_id,
+                                  const std::string& content,
+                                  const std::optional<std::string>& active_goal = std::nullopt);
     nlohmann::json getConversationForSession(const std::string& session_id) const;
     nlohmann::json getConversationSummaryForSession(const std::string& session_id) const;
 

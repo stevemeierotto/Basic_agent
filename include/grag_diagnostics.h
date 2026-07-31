@@ -60,6 +60,8 @@ struct GragDiagnostics {
     std::string plan_id;
     std::string step_id;
     bool goal_present = false;
+    /** CSG-A: "executive" | "session" | "none" */
+    std::string goal_source = "none";
     
     // Adaptive Graph Memory Metrics (Step 4.6)
     int graph_total_nodes = 0;
@@ -88,6 +90,7 @@ struct GragDiagnostics {
             {"plan_id", plan_id},
             {"step_id", step_id},
             {"goal_present", goal_present},
+            {"goal_source", goal_source},
             {"graph_total_nodes", graph_total_nodes},
             {"graph_total_edges", graph_total_edges},
             {"graph_avg_weight", graph_avg_weight},

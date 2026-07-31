@@ -24,6 +24,12 @@ inline constexpr int kSchemaVersion = 1;
 inline constexpr const char* kHttpPathSessions = "/v1/conversation/sessions";
 inline constexpr const char* kHttpPathTurns = "/v1/conversation/turns";
 
+/**
+ * Optional POST /v1/conversation/turns and POST /v1/chat field (CSG-A):
+ * active_goal — host session banner goal for directional chat retrieval after GUI restart.
+ */
+inline constexpr const char* kTurnFieldActiveGoal = "active_goal";
+
 /** Engine /ready capability token when conversation authority is served. */
 inline constexpr const char* kReadyCapability = "conversation";
 

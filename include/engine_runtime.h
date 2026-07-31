@@ -13,11 +13,13 @@
 #include "json.hpp"
 
 #include <chrono>
+#include <optional>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,7 +43,9 @@ public:
     /** Marks not-ready for new commands (e.g. HTTP SIGTERM before drain). */
     void beginShutdown();
 
-    std::future<std::string> submitChat(const std::string& session_id, const std::string& text);
+    std::future<std::string> submitChat(const std::string& session_id,
+                                        const std::string& text,
+                                        const std::optional<std::string>& active_goal = std::nullopt);
     std::future<std::string> submitGoal(const std::string& session_id, const std::string& goal);
     void pause();
     void resume();
@@ -85,7 +89,9 @@ public:
     nlohmann::json createCorpusDocument(const CorpusCreate::CreateDocumentRequest& request);
 
     nlohmann::json createConversationSession();
-    nlohmann::json appendUserTurn(const std::string& session_id, const std::string& content);
+    nlohmann::json appendUserTurn(const std::string& session_id,
+                                  const std::string& content,
+                                  const std::optional<std::string>& active_goal = std::nullopt);
     nlohmann::json getConversationForSession(const std::string& session_id) const;
     nlohmann::json getConversationSummaryForSession(const std::string& session_id) const;
 
