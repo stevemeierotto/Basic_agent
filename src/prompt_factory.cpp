@@ -153,6 +153,7 @@ std::string PromptFactory::assembleConversationSections(const std::string& user_
     }
 
     const std::string antiTranscript = std::string(Thoth::ChatPrompt::kAntiTranscriptRules);
+    const std::string antiRegurgitation = std::string(Thoth::ChatPrompt::kAntiRegurgitationRules);
     const std::string groundingRules =
         options.grounded ? std::string(Thoth::ChatPrompt::kGroundingRules) : "";
     const std::string toolList =
@@ -160,11 +161,17 @@ std::string PromptFactory::assembleConversationSections(const std::string& user_
     std::string memoryContext = getMemoryContext(useExtendedSummary);
     std::string conversationHistory = getConversationHistory();
 
-    // Plan M G3 cue B: no open [Agent] completion slot.
-    const std::string userBlock = Thoth::ChatPrompt::formatUserBlock(user_input);
+    // Completion boundary: ungrounded keeps [User]+query+[Agent]; grounded uses [Agent] only.
+    const std::string userBlock =
+        options.includeCompletionCue
+            ? (options.queryInUserQueryHeader
+                   ? Thoth::ChatPrompt::formatAgentCompletionCue()
+                   : Thoth::ChatPrompt::formatUserBlock(user_input))
+            : std::string();
 
     const std::size_t coreBytes =
-        antiTranscript.size() + groundingRules.size() + systemPrompt.size() + userBlock.size() + 8;
+        antiTranscript.size() + antiRegurgitation.size() + groundingRules.size() + systemPrompt.size()
+        + userBlock.size() + 8;
 
     auto trimFromStart = [](std::string& text, std::size_t targetSize) {
         if (text.size() <= targetSize) {
@@ -216,8 +223,13 @@ std::string PromptFactory::assembleConversationSections(const std::string& user_
         }
     }
 
+    if (!options.includeConversationHistory) {
+        conversationHistory.clear();
+    }
+
     std::ostringstream assembled;
     assembled << antiTranscript << "\n";
+    assembled << antiRegurgitation << "\n";
     if (!groundingRules.empty()) {
         assembled << groundingRules << "\n";
     }
@@ -237,7 +249,8 @@ std::string PromptFactory::assembleConversationSections(const std::string& user_
 
     if (metrics) {
         metrics->system_prompt_chars = systemPrompt.size();
-        metrics->grounding_rules_chars = groundingRules.size() + antiTranscript.size();
+        metrics->grounding_rules_chars =
+            groundingRules.size() + antiTranscript.size() + antiRegurgitation.size();
         metrics->tool_schema_chars = toolList.size();
         metrics->tools_included = toolsIncluded;
         metrics->tool_schema_chars_in_final = toolsIncluded ? toolList.size() : 0;
@@ -273,23 +286,30 @@ std::string PromptFactory::buildChatPrompt(const std::string& user_input,
     }
 
     const std::size_t totalBudget = config.maxContextLength;
+    const bool queryInUserQueryHeader = !ragContext.empty();
+    effectiveOptions.queryInUserQueryHeader = queryInUserQueryHeader;
+
     const std::size_t ragHeaderChars =
         ragContext.empty()
             ? 0
             : std::char_traits<char>::length(Thoth::ChatPrompt::kRagContextHeader) +
-                  std::char_traits<char>::length(Thoth::ChatPrompt::kUserQueryHeader) + 1;
+                  std::char_traits<char>::length(Thoth::ChatPrompt::kUserQueryHeader) +
+                  user_input.size() + 1;
 
     std::string systemPrompt = config.systemPrompt;
     if (systemPrompt.size() > Thoth::ChatPrompt::kMaxSystemPromptChars) {
         systemPrompt = systemPrompt.substr(0, Thoth::ChatPrompt::kMaxSystemPromptChars);
     }
     const std::string antiTranscript = std::string(Thoth::ChatPrompt::kAntiTranscriptRules);
+    const std::string antiRegurgitation = std::string(Thoth::ChatPrompt::kAntiRegurgitationRules);
     const std::string groundingRules =
         effectiveOptions.grounded ? std::string(Thoth::ChatPrompt::kGroundingRules) : "";
-    // Plan M G3 cue B: no open [Agent] completion slot.
-    const std::string userBlock = Thoth::ChatPrompt::formatUserBlock(user_input);
+    const std::string userBlock =
+        queryInUserQueryHeader ? Thoth::ChatPrompt::formatAgentCompletionCue()
+                               : Thoth::ChatPrompt::formatUserBlock(user_input);
     const std::size_t minCore =
-        antiTranscript.size() + groundingRules.size() + systemPrompt.size() + userBlock.size() + 8;
+        antiTranscript.size() + antiRegurgitation.size() + groundingRules.size() + systemPrompt.size()
+        + userBlock.size() + 8;
 
     std::size_t ragBudget = 0;
     if (!ragContext.empty() && totalBudget > minCore + ragHeaderChars) {
@@ -309,7 +329,7 @@ std::string PromptFactory::buildChatPrompt(const std::string& user_input,
         const std::string fittedRag = fitRagContextToBudget(ragContext, ragBudget);
         ragChars = fittedRag.size();
         finalPrompt << Thoth::ChatPrompt::kRagContextHeader << fittedRag << '\n'
-                    << Thoth::ChatPrompt::kUserQueryHeader;
+                    << Thoth::ChatPrompt::kUserQueryHeader << user_input << '\n';
     }
 
     finalPrompt << conversationPart;
@@ -328,6 +348,116 @@ std::string PromptFactory::buildChatPrompt(const std::string& user_input,
     return result;
 }
 
+PromptFactory::ChatRolePrompt PromptFactory::buildChatRolePrompt(const std::string& user_input,
+                                               const std::string& ragContext,
+                                               bool useExtendedSummary,
+                                               const ConversationBuildOptions& options,
+                                               Thoth::ConversationPromptMetrics* metrics) {
+    ConversationBuildOptions effectiveOptions = options;
+    if (effectiveOptions.grounded && ragContext.empty()) {
+        effectiveOptions.grounded = false;
+    }
+
+    const bool queryInUserQueryHeader = !ragContext.empty();
+    effectiveOptions.queryInUserQueryHeader = queryInUserQueryHeader;
+    effectiveOptions.includeCompletionCue = false;
+    effectiveOptions.includeConversationHistory = false;
+
+    const std::size_t totalBudget = config.maxContextLength;
+    const std::size_t ragHeaderChars =
+        ragContext.empty()
+            ? 0
+            : std::char_traits<char>::length(Thoth::ChatPrompt::kRagContextHeader) +
+                  std::char_traits<char>::length(Thoth::ChatPrompt::kUserQueryHeader) +
+                  user_input.size() + 1;
+
+    std::string systemPrompt = config.systemPrompt;
+    if (systemPrompt.size() > Thoth::ChatPrompt::kMaxSystemPromptChars) {
+        systemPrompt = systemPrompt.substr(0, Thoth::ChatPrompt::kMaxSystemPromptChars);
+    }
+    const std::string antiTranscript = std::string(Thoth::ChatPrompt::kAntiTranscriptRules);
+    const std::string antiRegurgitation = std::string(Thoth::ChatPrompt::kAntiRegurgitationRules);
+    const std::string groundingRules =
+        effectiveOptions.grounded ? std::string(Thoth::ChatPrompt::kGroundingRules) : "";
+    const std::size_t minCore =
+        antiTranscript.size() + antiRegurgitation.size() + groundingRules.size() + systemPrompt.size() + 8;
+
+    std::size_t ragBudget = 0;
+    if (!ragContext.empty() && totalBudget > minCore + ragHeaderChars) {
+        const std::size_t available = totalBudget - minCore - ragHeaderChars;
+        ragBudget = std::min(ragContext.size(), available * 3 / 5);
+    }
+
+    const std::size_t convBudget =
+        totalBudget > ragBudget + ragHeaderChars ? totalBudget - ragBudget - ragHeaderChars : minCore;
+
+    ChatRolePrompt rolePrompt;
+    rolePrompt.system_content = assembleConversationSections(
+        user_input, useExtendedSummary, effectiveOptions, convBudget, metrics);
+
+    std::size_t ragChars = 0;
+    if (!ragContext.empty()) {
+        const std::string fittedRag = fitRagContextToBudget(ragContext, ragBudget);
+        ragChars = fittedRag.size();
+        rolePrompt.user_content.append(Thoth::ChatPrompt::kRagContextHeader);
+        rolePrompt.user_content.append(fittedRag);
+        rolePrompt.user_content.push_back('\n');
+        rolePrompt.user_content.append(Thoth::ChatPrompt::kUserQueryHeader);
+        rolePrompt.user_content.append(user_input);
+        rolePrompt.user_content.push_back('\n');
+    } else {
+        rolePrompt.user_content = user_input;
+        if (!rolePrompt.user_content.empty() && rolePrompt.user_content.back() != '\n') {
+            rolePrompt.user_content.push_back('\n');
+        }
+    }
+
+    if (effectiveOptions.includeConversationHistory) {
+        const std::string history = getConversationHistory();
+        if (!history.empty()) {
+            rolePrompt.user_content.append(history);
+        }
+    }
+
+    if (metrics) {
+        metrics->rag_context_chars = ragChars;
+        metrics->final_prompt_chars =
+            rolePrompt.system_content.size() + rolePrompt.user_content.size();
+        if (ragContext.size() > ragChars) {
+            metrics->truncated = true;
+            metrics->truncated_section =
+                metrics->truncated_section.empty() ? "rag_context" : metrics->truncated_section;
+        }
+    }
+
+    return rolePrompt;
+}
+
+std::vector<std::pair<std::string, std::string>> PromptFactory::getPriorChatTurnMessages() const {
+    const auto convo = memory.getConversation();
+    const size_t start = convo.size() > config.maxRecentMessages
+                             ? convo.size() - config.maxRecentMessages
+                             : 0;
+
+    std::vector<std::pair<std::string, std::string>> messages;
+    messages.reserve(convo.size() - start);
+    for (size_t i = start; i < convo.size(); ++i) {
+        if (!convo[i].contains("role") || !convo[i]["role"].is_string() ||
+            !convo[i].contains("content") || !convo[i]["content"].is_string()) {
+            continue;
+        }
+        const std::string role = convo[i]["role"].get<std::string>();
+        if (role != "user" && role != "assistant") {
+            continue;
+        }
+        const std::string content = convo[i]["content"].get<std::string>();
+        if (content.empty()) {
+            continue;
+        }
+        messages.emplace_back(role, content);
+    }
+    return messages;
+}
 
 std::string PromptFactory::buildRagQueryPrompt(const std::string& query) {
     std::string defaultTemplate = 
@@ -502,9 +632,9 @@ std::string PromptFactory::getConversationHistory() {
     for (size_t i = start; i < convo.size(); i++) {
         std::ostringstream turn;
         if (config.includeRoleLabels) {
-            turn << "[" << convo[i]["role"] << "] ";
+            turn << "[" << convo[i]["role"].get<std::string>() << "] ";
         }
-        turn << convo[i]["content"];
+        turn << convo[i]["content"].get<std::string>();
         if (config.includeTimestamps && convo[i].contains("timestamp")) {
             turn << " (" << convo[i]["timestamp"] << ")";
         }

@@ -1851,6 +1851,11 @@ IndexManager::CreateCorpusDocumentResult IndexManager::createCorpusDocumentAlp(
                 || policy.action == SendAction::Retry)) {
             document_id = "dry-run-preview";
         }
+        if (policy.action == SendAction::NoOp && !owner_context_id.empty()
+            && !document_id.empty()
+            && !documentRegistry_.hasSessionLink(document_id, owner_context_id)) {
+            result.action = "link_only";
+        }
         result.ok = true;
         result.document_id = document_id;
         result.document_name = canonical_name;

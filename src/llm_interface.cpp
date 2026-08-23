@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <regex>
+#include <sstream>
 #include <cstdint>
 
 using json = nlohmann::json;
@@ -397,6 +398,130 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
         }
         if (usage.total_tokens <= 0) {
             usage = estimateTokenUsage(prompt, result.text);
+        }
+        result.token_usage = usage;
+        recordTokenUsage(usage);
+        return result;
+    } catch (const std::exception& e) {
+        result.ok = false;
+        result.error = std::string("Inference request failed: ") + e.what();
+        return result;
+    } catch (...) {
+        result.ok = false;
+        result.error = "Inference request failed with an unknown error.";
+        return result;
+    }
+}
+
+namespace {
+
+std::string flattenChatRequestForTelemetry(const Thoth::InferenceChatRequest& request) {
+    std::ostringstream oss;
+    for (const auto& message : request.messages) {
+        oss << message.role << ": " << message.content << '\n';
+    }
+    return oss.str();
+}
+
+} // namespace
+
+Thoth::InferenceGenerateResult LLMInterface::queryDetailedChat(
+    const Thoth::InferenceChatRequest& chat_request,
+    int num_predict_override,
+    const std::vector<std::string>& stop_sequences) {
+    Thoth::InferenceGenerateResult result;
+    const std::string telemetryPrompt = flattenChatRequestForTelemetry(chat_request);
+    try {
+        if (auto fail = Thoth::RobustnessMockResponses::popFailure()) {
+            result.ok = false;
+            result.error = *fail;
+            recordTokenUsage(estimateTokenUsage(telemetryPrompt, ""));
+            return result;
+        }
+        if (auto scripted = Thoth::RobustnessMockResponses::pop()) {
+            result.ok = true;
+            result.text = *scripted;
+            recordTokenUsage(estimateTokenUsage(telemetryPrompt, result.text));
+            return result;
+        }
+        if (envTruthy("THOTH_MOCK_LLM_UNAVAILABLE")) {
+            result.ok = false;
+            result.error = "LLM service unavailable (mock).";
+            recordTokenUsage(estimateTokenUsage(telemetryPrompt, ""));
+            return result;
+        }
+        if (Thoth::testSuiteDevTierEnabled()) {
+            result.ok = true;
+            result.text = Thoth::mockTestSuiteLlmResponse(telemetryPrompt);
+            recordTokenUsage(estimateTokenUsage(telemetryPrompt, result.text));
+            return result;
+        }
+        if (backend != LLMBackend::Ollama) {
+            result.ok = false;
+            result.error = "OpenAI backend not supported for queryDetailedChat";
+            return result;
+        }
+
+        std::lock_guard<std::recursive_mutex> lock(llmMutex);
+        try {
+            ensureInferenceClient();
+        } catch (const std::exception& e) {
+            result.error = std::string("Inference client unavailable: ") + e.what();
+            return result;
+        }
+        if (!inference_client_) {
+            result.error = "Inference client not initialized.";
+            return result;
+        }
+
+        double temperature = config ? config->temperature : 0.7;
+        double topP = config ? config->top_p : 1.0;
+        int maxTokens = config ? config->max_tokens : 2048;
+        if (num_predict_override >= 0) {
+            maxTokens = num_predict_override;
+        }
+        std::string model = resolveOllamaModel();
+        if (model.empty()) {
+            result.error =
+                "No inference model configured. Set llm_model, OLLAMA_MODEL, or ensure the "
+                "inference service is reachable.";
+            return result;
+        }
+
+        Thoth::InferenceChatRequest request = chat_request;
+        request.model = model;
+        request.temperature = temperature;
+        request.top_p = topP;
+        request.max_tokens = maxTokens;
+        request.stop_sequences = stop_sequences;
+
+        result = inference_client_->generateChat(request);
+        if (!result.ok && result.error.find("not found") != std::string::npos) {
+            const std::string detected = detectOllamaModel();
+            if (!detected.empty() && detected != model) {
+                selectedModel = detected;
+                request.model = selectedModel;
+                result = inference_client_->generateChat(request);
+            }
+        }
+
+        if (!result.ok) {
+            DecisionTraceLogger traceLogger;
+            DecisionTrace trace = traceLogger.startTrace("inference_error", telemetryPrompt.size());
+            traceLogger.finishTrace(trace, false, std::string("Inference failure: ") + result.error);
+            traceLogger.writeTrace(trace);
+            return result;
+        }
+
+        LlmTokenUsage usage = result.token_usage;
+        if (!result.raw_json.empty() && usage.total_tokens <= 0) {
+            usage = parseOllamaTokenUsage(result.raw_json);
+        }
+        if (usage.total_tokens <= 0) {
+            usage = parseOpenAiTokenUsage(result.raw_json);
+        }
+        if (usage.total_tokens <= 0) {
+            usage = estimateTokenUsage(telemetryPrompt, result.text);
         }
         result.token_usage = usage;
         recordTokenUsage(usage);

@@ -110,6 +110,7 @@ set(BASIC_AGENT_SOURCES
     src/chat_rag_golden_cases.cpp
     src/chat_retrieval_boost.cpp
     src/chat_generation_safety.cpp
+    src/chat_turn_timing.cpp
     src/chat_query_utils.cpp
     src/chat_retrieval_goal.cpp
     src/reflection_utils.cpp

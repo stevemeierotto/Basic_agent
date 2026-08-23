@@ -9,6 +9,8 @@
  */
 #pragma once
 #include <string>
+#include <utility>
+#include <vector>
 #include "memory.h"
 #include "rag.h"
 #include "planner_injection_config.h"
@@ -31,6 +33,21 @@ public:
     struct ConversationBuildOptions {
         bool includeTools = false;
         bool grounded = false;
+        /** When true, user_input is emitted under [User Query]; conversation ends with [Agent] only. */
+        bool queryInUserQueryHeader = false;
+        /** Phase A chat path — omit [User]/[Agent] completion cue from instruction assembly. */
+        bool includeCompletionCue = true;
+        /**
+         * When true, append flattened getConversationHistory() to chat-role user_content.
+         * Chat inference sets false — prior turns are separate /v1/chat/completions messages.
+         */
+        bool includeConversationHistory = true;
+    };
+
+    /** Phase A — two-message chat/completions layout (system instructions + user turn). */
+    struct ChatRolePrompt {
+        std::string system_content;
+        std::string user_content;
     };
 
 private:
@@ -56,6 +73,23 @@ public:
                                 bool useExtendedSummary,
                                 const ConversationBuildOptions& options,
                                 Thoth::ConversationPromptMetrics* metrics = nullptr);
+
+    /**
+     * Phase A — same retrieval/budget inputs as buildChatPrompt; emits system + user messages only.
+     * System: rules + system prompt (+ tools/memory when included by assembly).
+     * User: RAG block + query (+ flattened history when enabled).
+     */
+    ChatRolePrompt buildChatRolePrompt(const std::string& user_input,
+                                       const std::string& ragContext,
+                                       bool useExtendedSummary,
+                                       const ConversationBuildOptions& options,
+                                       Thoth::ConversationPromptMetrics* metrics = nullptr);
+
+    /**
+     * Prior session turns for chat/completions (content only; user/assistant roles).
+     * Excludes the current turn — memory is read before the active user message is stored.
+     */
+    std::vector<std::pair<std::string, std::string>> getPriorChatTurnMessages() const;
 
     std::string buildRagQueryPrompt(const std::string& query);
 

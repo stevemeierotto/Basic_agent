@@ -30,6 +30,21 @@ struct InferenceGenerateRequest {
     std::vector<std::string> stop_sequences;
 };
 
+/** OpenAI-style chat message for /v1/chat/completions. */
+struct InferenceChatMessage {
+    std::string role;
+    std::string content;
+};
+
+struct InferenceChatRequest {
+    std::string model;
+    std::vector<InferenceChatMessage> messages;
+    double temperature = 0.7;
+    double top_p = 1.0;
+    int max_tokens = 2048;
+    std::vector<std::string> stop_sequences;
+};
+
 struct InferenceGenerateResult {
     std::string text;
     LlmTokenUsage token_usage;

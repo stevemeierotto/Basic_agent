@@ -27,7 +27,11 @@
 #include "chat_generation_safety.h"
 #include "chat_rag_observability.h"
 #include "chat_retrieval_goal.h"
+#include "inference_types.h"
 
+#include <optional>
+
+#include <cstdint>
 #include <optional>
 
 class CommandProcessor {
@@ -114,12 +118,24 @@ private:
         std::string final_response;
         Thoth::ChatGeneration::ChatGenerationResult gen;
     };
-    ConversationalTurnResult runConversationalGenerate(const std::string& prompt,
-                                                       bool use_greeting_fallback,
-                                                       DecisionTrace& trace,
-                                                       const std::string& generation_stage_message);
+    ConversationalTurnResult runConversationalGenerate(
+        const std::string& prompt,
+        const std::string& user_query,
+        bool use_greeting_fallback,
+        DecisionTrace& trace,
+        const std::string& generation_stage_message,
+        const std::optional<Thoth::InferenceChatRequest>& chat_request = std::nullopt);
     static void applyGenerationDiagnostics(Thoth::ChatRagResponseRecord& record,
                                            const Thoth::ChatGeneration::ChatGenerationResult& gen);
+    static void applyChatTurnTelemetry(Thoth::ChatRagResponseRecord& record,
+                                       const std::string& user_query,
+                                       const ConversationalTurnResult& turn,
+                                       const DecisionTrace& trace,
+                                       std::int64_t queue_wait_ms,
+                                       std::int64_t session_setup_ms,
+                                       std::int64_t retrieval_latency_ms,
+                                       std::int64_t prompt_build_latency_ms,
+                                       std::int64_t post_processing_latency_ms);
 
     // helpers
     static std::string trim(const std::string& s);

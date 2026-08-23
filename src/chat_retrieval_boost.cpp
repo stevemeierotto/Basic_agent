@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cmath>
 #include <filesystem>
 #include <regex>
@@ -331,7 +332,33 @@ GroundingFloorResult applyGroundingFloor(
     return result;
 }
 
-std::string formatChunkForPrompt(const CodeChunk& chunk) {
+RagChunkPresentation ragChunkPresentationFromEnv() {
+    const char* env = std::getenv("THOTH_CHAT_RAG_PRESENTATION");
+    if (env == nullptr || env[0] == '\0') {
+        return RagChunkPresentation::Labeled;
+    }
+    const std::string value = lowerCopy(env);
+    if (value == "metadata_off" || value == "metadata-off") {
+        return RagChunkPresentation::MetadataOff;
+    }
+    return RagChunkPresentation::Labeled;
+}
+
+const char* ragChunkPresentationLabel(RagChunkPresentation presentation) {
+    switch (presentation) {
+    case RagChunkPresentation::MetadataOff:
+        return "metadata_off";
+    case RagChunkPresentation::Labeled:
+    default:
+        return "labeled";
+    }
+}
+
+std::string formatChunkForPrompt(const CodeChunk& chunk, RagChunkPresentation presentation) {
+    if (presentation == RagChunkPresentation::MetadataOff) {
+        return chunk.code;
+    }
+
     std::ostringstream oss;
     oss << "Document: " << fileBasename(chunk.fileName) << '\n';
     // Plan N N4 / L7 — LLM-facing span label (not "Lines:", which primed numbered answers).

@@ -143,10 +143,48 @@ InferenceGenerateResult LlamaServerClient::generate(const InferenceGenerateReque
     return parseCompletionResponse(http.body);
 }
 
+InferenceGenerateResult LlamaServerClient::generateChat(const InferenceChatRequest& request) {
+    InferenceGenerateResult result;
+    if (request.model.empty()) {
+        result.error = "Model name is required";
+        return result;
+    }
+    if (request.messages.empty()) {
+        result.error = "At least one chat message is required";
+        return result;
+    }
+
+    const std::string url = inferenceUrl(base_url_, "/v1/chat/completions");
+    const auto http = inferenceHttpPost(url, serializeChatPayload(request), llmTimeoutSeconds());
+    if (!http.ok) {
+        result.error = http.error.empty() ? http.body : http.error;
+        return result;
+    }
+    return parseCompletionResponse(http.body);
+}
+
 std::string LlamaServerClient::serializeGeneratePayload(const InferenceGenerateRequest& request) {
     json payload;
     payload["model"] = request.model;
     payload["prompt"] = request.prompt;
+    payload["max_tokens"] = request.max_tokens;
+    payload["temperature"] = request.temperature;
+    payload["top_p"] = request.top_p;
+    payload["stream"] = false;
+    if (!request.stop_sequences.empty()) {
+        payload["stop"] = request.stop_sequences;
+    }
+    return payload.dump();
+}
+
+std::string LlamaServerClient::serializeChatPayload(const InferenceChatRequest& request) {
+    json payload;
+    payload["model"] = request.model;
+    json messages = json::array();
+    for (const auto& message : request.messages) {
+        messages.push_back({{"role", message.role}, {"content", message.content}});
+    }
+    payload["messages"] = std::move(messages);
     payload["max_tokens"] = request.max_tokens;
     payload["temperature"] = request.temperature;
     payload["top_p"] = request.top_p;

@@ -16,6 +16,7 @@ public:
     LlamaServerClient(std::string base_url, std::string embed_base_url);
 
     InferenceGenerateResult generate(const InferenceGenerateRequest& request) override;
+    InferenceGenerateResult generateChat(const InferenceChatRequest& request) override;
     InferenceEmbedResult embed(const InferenceEmbedRequest& request) override;
     InferenceHealthResult health() override;
     std::string backendName() const override { return "llama_cpp"; }
@@ -25,6 +26,8 @@ public:
 
     /** Plan M G3 — serialize generate payload (for tests + generate()). */
     static std::string serializeGeneratePayload(const InferenceGenerateRequest& request);
+    /** Phase A — serialize chat payload (for tests + generateChat()). */
+    static std::string serializeChatPayload(const InferenceChatRequest& request);
 
 private:
     std::string base_url_;

@@ -28,6 +28,12 @@ public:
     virtual ~InferenceClient() = default;
 
     virtual InferenceGenerateResult generate(const InferenceGenerateRequest& request) = 0;
+    /** Phase A — default unsupported; llama_cpp overrides for /v1/chat/completions. */
+    virtual InferenceGenerateResult generateChat(const InferenceChatRequest& request) {
+        InferenceGenerateResult result;
+        result.error = "Chat completions not supported for this inference backend";
+        return result;
+    }
     virtual InferenceEmbedResult embed(const InferenceEmbedRequest& request) = 0;
     virtual InferenceHealthResult health() = 0;
     virtual std::string backendName() const = 0;

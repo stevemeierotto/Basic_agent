@@ -9,6 +9,7 @@
 #include "../include/engine_runtime.h"
 
 #include "../include/basic_agent_plugin.h"
+#include "../include/chat_turn_timing.h"
 #include "../include/decision_summary.h"
 #include "../include/conversation_authority.h"
 #include "../include/research_resources.h"
@@ -302,8 +303,11 @@ std::future<std::string> EngineRuntime::submitChat(const std::string& session_id
     std::future<std::string> future = promise->get_future();
 
     try {
-        impl_->enqueue([this, resolved_session, text, active_goal, promise]() {
+        const std::int64_t enqueued_at_ms = nowUtcMs();
+        impl_->enqueue([this, resolved_session, text, active_goal, promise, enqueued_at_ms]() {
             try {
+                ChatTurnTiming::setActiveWorkerContext(
+                    {enqueued_at_ms, nowUtcMs()});
                 impl_->ensureSessionOnWorker(resolved_session);
                 promise->set_value(impl_->plugin->processInput(text, active_goal));
             } catch (const std::exception& e) {
@@ -509,8 +513,10 @@ nlohmann::json EngineRuntime::appendUserTurn(const std::string& session_id,
     const std::string resolved = normalizeEngineSessionId(session_id);
     auto promise = std::make_shared<std::promise<nlohmann::json>>();
     std::future<nlohmann::json> future = promise->get_future();
-    impl_->enqueue([this, promise, resolved, content, active_goal]() {
+    const std::int64_t enqueued_at_ms = nowUtcMs();
+    impl_->enqueue([this, promise, resolved, content, active_goal, enqueued_at_ms]() {
         try {
+            ChatTurnTiming::setActiveWorkerContext({enqueued_at_ms, nowUtcMs()});
             impl_->ensureSessionOnWorker(resolved);
             promise->set_value(impl_->plugin->appendUserTurn(resolved, content, active_goal));
         } catch (...) {

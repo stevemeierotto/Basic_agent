@@ -51,9 +51,22 @@ std::vector<std::pair<CodeChunk, float>> selectTopKForInjection(
     std::size_t minChunkChars,
     GragDiagnostics& diagnostics);
 
-/** Format a chunk with document metadata for LLM context (injection-time only).
- *  Plan N N4 / L7: emit `source_span=` (not `Lines:`) so ranges do not resemble list cues. */
-std::string formatChunkForPrompt(const CodeChunk& chunk);
+/** Investigation — LLM-facing chunk layout (default labeled preserves CSG-B injection). */
+enum class RagChunkPresentation {
+    Labeled,      /** Document: + source_span= + body (Plan N N4 default) */
+    MetadataOff,  /** Body only; chunk --- segmentation unchanged at call site */
+};
+
+/** Resolve from THOTH_CHAT_RAG_PRESENTATION (labeled | metadata_off). Default labeled. */
+RagChunkPresentation ragChunkPresentationFromEnv();
+
+/** Telemetry label for ChatRagContextRecord.presentation_mode. */
+const char* ragChunkPresentationLabel(RagChunkPresentation presentation);
+
+/** Format a chunk for LLM context (injection-time only).
+ *  Plan N N4 / L7: labeled mode emits `source_span=` (not `Lines:`). */
+std::string formatChunkForPrompt(const CodeChunk& chunk,
+                                 RagChunkPresentation presentation = RagChunkPresentation::Labeled);
 
 /** Plan M G1 (R1) — stats from applying the fail-closed grounding floor. */
 struct GroundingFloorStats {

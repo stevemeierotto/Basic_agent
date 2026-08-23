@@ -59,6 +59,12 @@ public:
         int num_predict_override,
         const std::vector<std::string>& stop_sequences);
 
+    /** Phase A — structured chat generate via /v1/chat/completions (llama_cpp only). */
+    Thoth::InferenceGenerateResult queryDetailedChat(
+        const Thoth::InferenceChatRequest& request,
+        int num_predict_override,
+        const std::vector<std::string>& stop_sequences);
+
     /** Plan N N6 — format Class A provider errors for the chat UI (no ChatGenerationResult UI strings). */
     std::string formatProviderError(const std::string& detail);
 
