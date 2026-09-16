@@ -9,6 +9,7 @@
 #include "../include/llama_server_client.h"
 #include "../include/inference_endpoint.h"
 #include "../include/inference_http.h"
+#include "../include/llm_timeout_policy.h"
 
 #include <../include/json.hpp>
 
@@ -20,20 +21,6 @@ using json = nlohmann::json;
 namespace Thoth {
 
 namespace {
-
-long llmTimeoutSeconds() {
-    long timeout_seconds = 600;
-    if (const char* env = std::getenv("THOTH_LLM_TIMEOUT_SECONDS")) {
-        try {
-            const long parsed = std::stol(env);
-            if (parsed > 0) {
-                timeout_seconds = parsed;
-            }
-        } catch (...) {
-        }
-    }
-    return timeout_seconds;
-}
 
 LlmTokenUsage parseOpenAiCompletionUsage(const json& j) {
     LlmTokenUsage usage;
@@ -135,7 +122,7 @@ InferenceGenerateResult LlamaServerClient::generate(const InferenceGenerateReque
     }
 
     const std::string url = inferenceUrl(base_url_, "/v1/completions");
-    const auto http = inferenceHttpPost(url, serializeGeneratePayload(request), llmTimeoutSeconds());
+    const auto http = inferenceHttpPost(url, serializeGeneratePayload(request), LlmTimeoutPolicy::timeoutSeconds());
     if (!http.ok) {
         result.error = http.error.empty() ? http.body : http.error;
         return result;
@@ -155,7 +142,7 @@ InferenceGenerateResult LlamaServerClient::generateChat(const InferenceChatReque
     }
 
     const std::string url = inferenceUrl(base_url_, "/v1/chat/completions");
-    const auto http = inferenceHttpPost(url, serializeChatPayload(request), llmTimeoutSeconds());
+    const auto http = inferenceHttpPost(url, serializeChatPayload(request), LlmTimeoutPolicy::timeoutSeconds());
     if (!http.ok) {
         result.error = http.error.empty() ? http.body : http.error;
         return result;

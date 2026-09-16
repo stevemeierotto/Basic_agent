@@ -7,6 +7,7 @@
  */
 
 #include "../include/workflow_engine.h"
+#include "../include/llm_timeout_policy.h"
 #include "../include/agent_context_retrieval.h"
 #include "../include/tools.h"
 #include "../include/rag.h"
@@ -270,7 +271,10 @@ StepResult WorkflowEngine::executeStep(const PlanStep& step,
         return result;
     }
 
-    int maxAttempts = 1 + step.failure_policy.max_retries;
+    // Phase A: synthesis/LLM steps do not retry (avoids stacked attempts under one soft deadline).
+    int maxAttempts = (step.type == StepType::LLM)
+                          ? 1
+                          : (1 + step.failure_policy.max_retries);
     bool success = false;
     StepResult currentAttempt;
     currentAttempt.step_id = step.step_id;
@@ -369,12 +373,8 @@ std::future<StepResult> WorkflowEngine::executeStepAsync(const PlanStep& step,
                 return this->executeStep(step, planId, context);
             });
 
-            int timeoutMs = step.failure_policy.timeout_ms;
-            if (timeoutMs <= 0) {
-                timeoutMs = (step.type == StepType::LLM) ? 180000 : 30000;
-            } else if (step.type == StepType::LLM && timeoutMs < 120000) {
-                timeoutMs = 120000;
-            }
+            const int timeoutMs = LlmTimeoutPolicy::stepTimeoutMs(
+                step.type, step.failure_policy.timeout_ms);
 
             auto status = executionFuture.wait_for(std::chrono::milliseconds(timeoutMs));
 
@@ -386,7 +386,9 @@ std::future<StepResult> WorkflowEngine::executeStepAsync(const PlanStep& step,
                 timeoutResult.success = false;
                 timeoutResult.error_message = "Step execution timed out after " + std::to_string(timeoutMs) + "ms";
                 timeoutResult.latency_ms = timeoutMs;
-                timeoutResult.data = {{"status", "failed"}, {"error_message", timeoutResult.error_message}};
+                timeoutResult.data = {{"status", "failed"},
+                                     {"error_message", timeoutResult.error_message},
+                                     {"timeout_ms", timeoutMs}};
                 return timeoutResult;
             }
         } catch (const std::exception& e) {

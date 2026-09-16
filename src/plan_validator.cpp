@@ -60,6 +60,8 @@ Plan PlanValidator::createFallbackPlan(const std::string& plan_id, const std::st
     synthesis.type = StepType::LLM;
     synthesis.depends_on = {"retrieve-context"};
     synthesis.payload = nlohmann::json::object();
+    // Phase A: disable synthesis retries until Phase B cancellation semantics.
+    synthesis.failure_policy.max_retries = 0;
 
     plan.steps = {retrieval, synthesis};
     return plan;
@@ -118,6 +120,13 @@ PlanValidationResult PlanValidator::validateAndRepair(Plan& plan, bool allow_too
     }
 
     wireRetrievalLlmDependencies(plan, result.depends_on_repaired);
+
+    // Phase A: LLM/synthesis steps do not retry under the shared step deadline.
+    for (auto& step : plan.steps) {
+        if (step.type == StepType::LLM) {
+            step.failure_policy.max_retries = 0;
+        }
+    }
 
     result.valid = true;
     return result;

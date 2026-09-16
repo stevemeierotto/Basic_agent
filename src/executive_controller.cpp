@@ -20,6 +20,7 @@
 #include "../include/runtime_latency_config.h"
 #include "../include/config.h"
 #include "../include/reflection_utils.h"
+#include "../include/llm_timeout_policy.h"
 #include "../include/graph_refiner.h"
 #include <chrono>
 #include <thread>
@@ -997,8 +998,20 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
     } else {
         current_plan_.updated_at_ms = nowMs();
         std::string err = result.error_message;
+        std::string next_action = "continue";
+        if (step.failure_policy.revise_plan_on_failure) {
+            next_action = "revise";
+        } else if (step.failure_policy.abort_on_failure) {
+            next_action = "abort";
+        }
+        nlohmann::json fail_meta = {{"error", err}, {"next_action", next_action}};
+        fail_meta["timeout_ms"] = LlmTimeoutPolicy::stepTimeoutMs(
+            step.type, step.failure_policy.timeout_ms);
+        if (result.data.is_object() && result.data.contains("timeout_ms")) {
+            fail_meta["timeout_ms"] = result.data["timeout_ms"];
+        }
         lock.unlock();
-        emit_event(EventType::STEP_FAILED, step.step_id, {{"error", err}});
+        emit_event(EventType::STEP_FAILED, step.step_id, fail_meta);
 
         lock.lock();
         invalidatePrefetchForStep_unlocked(step.step_id);
@@ -1102,9 +1115,20 @@ void ExecutiveController::emit_event(EventType type, const std::string& step_id,
                     }
                     if (type == EventType::STEP_STARTED) {
                         enriched_meta["step_type"] = static_cast<int>(s.type);
+                        if (!enriched_meta.contains("timeout_ms")) {
+                            enriched_meta["timeout_ms"] = LlmTimeoutPolicy::stepTimeoutMs(
+                                s.type, s.failure_policy.timeout_ms);
+                        }
                     }
                     if (type == EventType::STEP_FAILED) {
                         enriched_meta["success"] = false;
+                        if (!enriched_meta.contains("timeout_ms")) {
+                            enriched_meta["timeout_ms"] = LlmTimeoutPolicy::stepTimeoutMs(
+                                s.type, s.failure_policy.timeout_ms);
+                        }
+                    }
+                    if (!enriched_meta.contains("description") && !s.description.empty()) {
+                        enriched_meta["description"] = s.description;
                     }
                     break;
                 }
