@@ -90,6 +90,10 @@ public:
     /** ALP-C — extended create with hash/mtime/force_replace/dry_run. */
     nlohmann::json createCorpusDocument(const Thoth::CorpusCreate::CreateDocumentRequest& request);
 
+    /** ALP amend — remove session↔document link (Local Note X). */
+    nlohmann::json unlinkSessionDocument(const std::string& document_id,
+                                         const std::string& session_id);
+
     /** TCB3 / §3.0 — active session for local ingest bind (v1 context key source). */
     std::string getActiveSessionId() const;
 

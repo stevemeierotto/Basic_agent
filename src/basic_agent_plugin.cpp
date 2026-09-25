@@ -492,6 +492,29 @@ nlohmann::json BasicAgentPlugin::createCorpusDocument(
     return Thoth::CorpusCreate::makeAcceptedResponse(outcome.document_id, outcome.document_name);
 }
 
+nlohmann::json BasicAgentPlugin::unlinkSessionDocument(const std::string& document_id,
+                                                        const std::string& session_id) {
+    if (!indexManager) {
+        throw Thoth::EngineException(
+            Thoth::EngineError::engineBusy("Index manager not initialized."));
+    }
+    if (document_id.empty() || session_id.empty()) {
+        throw Thoth::EngineException(Thoth::EngineError::invalidRequest(
+            "document_id and session_id are required"));
+    }
+    if (!indexManager->unlinkSessionDocument(document_id, session_id)) {
+        throw Thoth::EngineException(Thoth::EngineError::invalidRequest(
+            "failed to unlink session document (ALP may be disabled)"));
+    }
+    return nlohmann::json{
+        {"ok", true},
+        {"document_id", document_id},
+        {"session_id", session_id},
+        {"removed", true},
+        {"schema_version", Thoth::CorpusCreate::kSchemaVersion},
+    };
+}
+
 namespace {
 
 std::string newConversationSessionId() {

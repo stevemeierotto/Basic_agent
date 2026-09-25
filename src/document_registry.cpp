@@ -395,6 +395,24 @@ bool DocumentRegistry::addSessionLink(const std::string& document_id,
     return true;
 }
 
+bool DocumentRegistry::removeSessionLink(const std::string& document_id,
+                                         const std::string& session_id) {
+    if (document_id.empty() || session_id.empty() || !body_.contains("session_links")
+        || !body_["session_links"].is_array()) {
+        return true;
+    }
+    auto& links = body_["session_links"];
+    const auto before = links.size();
+    links.erase(std::remove_if(links.begin(),
+                               links.end(),
+                               [&](const nlohmann::json& row) {
+                                   return jsonStringField(row, "document_id") == document_id
+                                          && jsonStringField(row, "session_id") == session_id;
+                               }),
+                links.end());
+    return links.size() <= before;
+}
+
 bool DocumentRegistry::hasSessionLink(const std::string& document_id,
                                       const std::string& session_id) const {
     if (!body_.contains("session_links")) {

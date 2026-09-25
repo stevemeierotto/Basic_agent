@@ -1972,3 +1972,15 @@ IndexManager::CreateCorpusDocumentResult IndexManager::createCorpusDocumentAlp(
     result.revision_id = revision_id;
     return result;
 }
+
+bool IndexManager::unlinkSessionDocument(const std::string& document_id,
+                                         const std::string& session_id) {
+    if (document_id.empty() || session_id.empty()) {
+        return false;
+    }
+    if (!Thoth::AlpFeatureFlags::alpCreateAllowed()) {
+        return false;
+    }
+    documentRegistry_.removeSessionLink(document_id, session_id);
+    return documentRegistry_.save(Thoth::DocumentRegistry::defaultRegistryPath());
+}

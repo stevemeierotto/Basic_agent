@@ -86,6 +86,9 @@ public:
 
     bool addSessionLink(const std::string& document_id, const std::string& session_id);
 
+    /** Remove one (document_id, session_id) link. Document/revision rows unchanged. */
+    bool removeSessionLink(const std::string& document_id, const std::string& session_id);
+
     bool hasSessionLink(const std::string& document_id, const std::string& session_id) const;
 
     bool lastRevisionFailed(const std::string& document_id) const;

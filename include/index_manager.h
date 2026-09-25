@@ -98,6 +98,13 @@ public:
                                                     const std::string& owner_context_id,
                                                     const CreateCorpusDocumentOptions& options);
 
+    /**
+     * ALP amend — remove session↔document link (Local Note X).
+     * Document/revision/storage unchanged. Returns false if ids empty.
+     */
+    bool unlinkSessionDocument(const std::string& document_id,
+                               const std::string& session_id);
+
     /** R2 — record worker outcome for corpus `failed` (in-memory; Option A). */
     void recordIndexingOutcome(const std::string& normalizedPath,
                                bool success,
