@@ -88,6 +88,10 @@ public:
     /** ALP-C — extended create request. */
     nlohmann::json createCorpusDocument(const CorpusCreate::CreateDocumentRequest& request);
 
+    /** ALP amend — remove session↔document link. */
+    nlohmann::json unlinkSessionDocument(const std::string& document_id,
+                                         const std::string& session_id);
+
     nlohmann::json createConversationSession();
     nlohmann::json appendUserTurn(const std::string& session_id,
                                   const std::string& content,

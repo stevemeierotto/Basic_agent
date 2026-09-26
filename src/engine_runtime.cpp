@@ -474,6 +474,17 @@ nlohmann::json EngineRuntime::createCorpusDocument(
     return impl_->plugin->createCorpusDocument(request);
 }
 
+nlohmann::json EngineRuntime::unlinkSessionDocument(const std::string& document_id,
+                                                    const std::string& session_id) {
+    if (!isReady()) {
+        throw EngineException(EngineError::engineBusy("Engine is not ready."));
+    }
+    if (!impl_ || !impl_->plugin) {
+        throw EngineException(EngineError::engineBusy("Engine plugin not initialized."));
+    }
+    return impl_->plugin->unlinkSessionDocument(document_id, session_id);
+}
+
 nlohmann::json EngineRuntime::createConversationSession() {
     if (!isReady()) {
         throw EngineException(EngineError::engineBusy("Engine is not ready."));

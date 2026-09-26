@@ -25,6 +25,9 @@ inline constexpr int kAlpSchemaVersion = 2;
 /** Locked HTTP path (resource-oriented — not upload/multipart contract). */
 inline constexpr const char* kHttpPath = "/v1/rag/documents";
 
+/** Remove session↔document link (Local Note X). Document rows unchanged. */
+inline constexpr const char* kHttpPathSessionLinkRemove = "/v1/rag/session-links/remove";
+
 /** Engine /ready capability token when create-document is served. */
 inline constexpr const char* kReadyCapability = "ingest";
 

@@ -409,6 +409,42 @@ struct EngineHttpTransport::Impl {
                         }
                     });
 
+        server.Post(Thoth::CorpusCreate::kHttpPathSessionLinkRemove,
+                    [this](const httplib::Request& req, httplib::Response& res) {
+                        if (rejectIfShuttingDown(res)) {
+                            return;
+                        }
+                        if (!runtime.isReady()) {
+                            setErrorResponse(res, EngineError::engineBusy("Engine is not ready."));
+                            return;
+                        }
+                        nlohmann::json body;
+                        if (!parseJsonBody(req.body, body, res)) {
+                            return;
+                        }
+                        if (!body.contains("document_id") || !body["document_id"].is_string()
+                            || !body.contains("session_id") || !body["session_id"].is_string()) {
+                            setErrorResponse(res,
+                                             EngineError::invalidRequest(
+                                                 "Fields \"document_id\" and \"session_id\" "
+                                                 "are required."));
+                            return;
+                        }
+                        const std::string document_id = body["document_id"].get<std::string>();
+                        const std::string session_id = body["session_id"].get<std::string>();
+                        try {
+                            setJsonResponse(
+                                res, 200, runtime.unlinkSessionDocument(document_id, session_id));
+                        } catch (const EngineException& ex) {
+                            setErrorResponse(res, ex.error());
+                        } catch (const std::exception& ex) {
+                            setErrorResponse(res, EngineError::internalError(ex.what()));
+                        } catch (...) {
+                            setErrorResponse(res,
+                                             EngineError::internalError("Unknown engine error."));
+                        }
+                    });
+
         server.Post("/v1/conversation/sessions",
                     [this](const httplib::Request&, httplib::Response& res) {
                         if (rejectIfShuttingDown(res)) {
