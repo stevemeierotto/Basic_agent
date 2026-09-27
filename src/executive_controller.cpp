@@ -348,6 +348,28 @@ void ExecutiveController::clear_e2_strict_eval_context() {
     }
 }
 
+/** Stamp the goal session onto planner logs for this thread only, then restore. */
+class PlannerLogSessionGuard {
+public:
+    explicit PlannerLogSessionGuard(const std::string& sessionId) {
+        auto& logger = StructuredLogger::instance();
+        previousRequestId_ = logger.currentRequestId();
+        previousSessionId_ = logger.currentSessionId();
+        logger.setContext(previousRequestId_, sessionId);
+    }
+
+    ~PlannerLogSessionGuard() {
+        StructuredLogger::instance().setContext(previousRequestId_, previousSessionId_);
+    }
+
+    PlannerLogSessionGuard(const PlannerLogSessionGuard&) = delete;
+    PlannerLogSessionGuard& operator=(const PlannerLogSessionGuard&) = delete;
+
+private:
+    std::string previousRequestId_;
+    std::string previousSessionId_;
+};
+
 std::string ExecutiveController::execute_goal(const std::string& goal,
                                               const BenchmarkAttribution& benchmark) {
     // Join any prior loop outside the lock (same pattern as ~ExecutiveController).
@@ -400,7 +422,10 @@ std::string ExecutiveController::execute_goal(const std::string& goal,
         }
 
         const auto planStart = nowMs();
-        current_plan_ = planner_->create_plan(enhanced_goal);
+        {
+            PlannerLogSessionGuard sessionGuard(session_id_);
+            current_plan_ = planner_->create_plan(enhanced_goal);
+        }
         planning_time_ms_ += nowMs() - planStart;
         sync_planning_tokens_unlocked();
         current_plan_.created_at_ms = nowMs();
@@ -723,11 +748,16 @@ void ExecutiveController::decide_transition() {
                 const std::string reflection_goal =
                     Thoth::cleanGoalForStorage(current_plan_.goal) +
                     " (Reflection: previous attempt had low success score " + std::to_string(score) + ")";
+                const std::string plannerSessionId = session_id_;
 
                 lock.unlock();
                 emit_event(EventType::REFLECTION_REPLAN, "", reflection_meta);
                 const auto planStart = nowMs();
-                auto new_plan = planner_->create_plan(reflection_goal);
+                Plan new_plan;
+                {
+                    PlannerLogSessionGuard sessionGuard(plannerSessionId);
+                    new_plan = planner_->create_plan(reflection_goal);
+                }
                 planning_time_ms_ += nowMs() - planStart;
                 sync_planning_tokens_unlocked();
                 lock.lock();
