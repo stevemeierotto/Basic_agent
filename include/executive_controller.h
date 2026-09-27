@@ -236,6 +236,11 @@ protected:
     Thoth::IEpisodeEventChannel* episode_event_channel_ = nullptr;
 
     std::int64_t goal_started_at_ms_ = 0;
+    std::string c64_window_id_;
+    std::string c64_protocol_version_;
+    std::string c64_metric_schema_version_;
+    std::string c64_environment_schema_version_;
+    std::string c64_cohort_fingerprint_;
     std::int64_t planning_time_ms_ = 0;
     std::int64_t retrieval_time_ms_ = 0;
     std::int64_t llm_synthesis_time_ms_ = 0;

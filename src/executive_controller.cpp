@@ -16,6 +16,7 @@
 #include "../include/step_metrics_repository.h"
 #include "../include/file_handler.h"
 #include "../include/goal_text_utils.h"
+#include "../include/c64_window_attribution.h"
 #include "../include/cognitive_metrics.h"
 #include "../include/runtime_latency_config.h"
 #include "../include/config.h"
@@ -1567,6 +1568,19 @@ void ExecutiveController::reset_goal_metrics_unlocked() {
     last_grag_alpha_ = 0.0f;
     last_grag_routing_mode_.clear();
     final_trajectory_score_ = 0.0f;
+    c64_window_id_.clear();
+    c64_protocol_version_.clear();
+    c64_metric_schema_version_.clear();
+    c64_environment_schema_version_.clear();
+    c64_cohort_fingerprint_.clear();
+    const C64WindowAssignment window = resolveC64WindowAssignment(goal_started_at_ms_);
+    if (window.assigned) {
+        c64_window_id_ = window.window_id;
+        c64_protocol_version_ = window.protocol_version;
+        c64_metric_schema_version_ = window.metric_schema_version;
+        c64_environment_schema_version_ = window.environment_schema_version;
+        c64_cohort_fingerprint_ = window.c64_cohort_fingerprint;
+    }
     reflection_skip_reason_.clear();
     prefetch_cache_.clear();
     prefetch_futures_.clear();
@@ -1646,6 +1660,11 @@ void ExecutiveController::emit_goal_cognitive_metrics_unlocked(const std::string
         record.run_id = benchmark_attribution_.run_id;
         record.env_hash = benchmark_attribution_.env_hash;
     }
+    record.c64_window_id = c64_window_id_;
+    record.c64_protocol_version = c64_protocol_version_;
+    record.c64_metric_schema_version = c64_metric_schema_version_;
+    record.c64_environment_schema_version = c64_environment_schema_version_;
+    record.c64_cohort_fingerprint = c64_cohort_fingerprint_;
     if (llm_interface_) {
         const LlmTokenUsage usage = llm_interface_->sessionTokenUsage();
         record.prompt_tokens = usage.prompt_tokens;

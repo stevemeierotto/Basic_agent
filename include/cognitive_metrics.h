@@ -24,6 +24,13 @@ struct GoalCognitiveMetricsRecord {
     std::string run_id;
     std::string env_hash;
 
+    /** C6.4 prospective window. Empty unless attributed at goal start. */
+    std::string c64_window_id;
+    std::string c64_protocol_version;
+    std::string c64_metric_schema_version;
+    std::string c64_environment_schema_version;
+    std::string c64_cohort_fingerprint;
+
     std::int64_t goal_started_at_ms = 0;
     std::int64_t goal_finished_at_ms = 0;
     std::int64_t total_wall_clock_ms = 0;

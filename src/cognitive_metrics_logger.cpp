@@ -93,6 +93,13 @@ nlohmann::json CognitiveMetricsLogger::toJson(const GoalCognitiveMetricsRecord& 
     if (!record.env_hash.empty()) {
         json["env_hash"] = record.env_hash;
     }
+    if (!record.c64_window_id.empty()) {
+        json["window_id"] = record.c64_window_id;
+        json["protocol_version"] = record.c64_protocol_version;
+        json["metric_schema_version"] = record.c64_metric_schema_version;
+        json["environment_schema_version"] = record.c64_environment_schema_version;
+        json["c64_cohort_fingerprint"] = record.c64_cohort_fingerprint;
+    }
     return json;
 }
 
