@@ -113,6 +113,7 @@ set(BASIC_AGENT_SOURCES
     src/chat_turn_timing.cpp
     src/chat_query_utils.cpp
     src/chat_retrieval_goal.cpp
+    src/episodic_authoritative_v2.cpp
     src/reflection_utils.cpp
     src/reflection_ab_cases.cpp
     src/robustness_mock_responses.cpp
