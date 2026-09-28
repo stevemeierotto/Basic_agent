@@ -443,19 +443,24 @@ std::string ExecutiveController::execute_goal(const std::string& goal,
         refresh_goal_state_embeddings_unlocked();
         persist_current_plan_unlocked();
 
-        // Start the execution loop
         state_ = ControllerState::IDLE;
         running_ = true;
+    }
+
+    // Announce the plan before the loop can emit STEP_STARTED. The Plan
+    // surface creates its rows from PLAN_CREATED; a step event that arrives
+    // first has nowhere to land.
+    if (!plan_reuse_meta.is_null()) {
+        emit_event(EventType::PLAN_REUSE_INJECTION, "", plan_reuse_meta);
+    }
+    emit_event(EventType::PLAN_CREATED);
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
         loop_thread_ = std::make_unique<std::thread>([this]() {
             run_loop();
         });
     }
-
-    if (!plan_reuse_meta.is_null()) {
-        emit_event(EventType::PLAN_REUSE_INJECTION, "", plan_reuse_meta);
-    }
-    
-    emit_event(EventType::PLAN_CREATED);
     return "GOAL ACCEPTED: " + goal;
 }
 
