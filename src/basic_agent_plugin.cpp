@@ -6,6 +6,7 @@
 #include "../include/engine_error.h"
 #include "../include/file_handler.h"
 #include "../include/research_resources.h"
+#include "../include/trajectory_research_listing.h"
 #include "../include/graph_statistics.h"
 #include "../include/runtime_bootstrap.h"
 #include "logger.h"
@@ -338,32 +339,7 @@ nlohmann::json BasicAgentPlugin::listStrategies() const {
 }
 
 nlohmann::json BasicAgentPlugin::listTrajectories() const {
-    auto trajs = getAllTrajectories();
-    std::sort(trajs.begin(), trajs.end(), [](const auto& a, const auto& b) {
-        return a.created_at > b.created_at;
-    });
-    if (trajs.size() > 20) {
-        trajs.resize(20);
-    }
-
-    nlohmann::json items = nlohmann::json::array();
-    for (const auto& t : trajs) {
-        nlohmann::json trajectory = nlohmann::json::object();
-        try {
-            trajectory = nlohmann::json::parse(t.trajectory_json);
-        } catch (...) {
-        }
-        items.push_back({
-            {"trajectory_id", t.trajectory_id},
-            {"goal", t.goal},
-            {"trajectory", trajectory},
-            {"success_score", t.success_score},
-            {"created_at", t.created_at},
-            {"usage_count", t.usage_count},
-            {"tier", t.tier},
-        });
-    }
-    return Thoth::ResearchResources::makeCollection(items);
+    return Thoth::listTrajectoryResearchCollection(getAllTrajectories());
 }
 
 nlohmann::json BasicAgentPlugin::listEpisodes() const {
