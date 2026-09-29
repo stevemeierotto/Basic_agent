@@ -7,6 +7,9 @@
  */
 
 #include "../include/summary_generator.h"
+#include "../include/generation_budget.h"
+#include "../include/generation_call.h"
+#include "../include/generation_call_log.h"
 #include "../include/llm_interface.h"
 #include <cstdlib>
 #include <sstream>
@@ -107,9 +110,18 @@ SummaryGenerationResult SummaryGenerator::extract(const std::vector<MessageRecor
     result.prompt_version = "episodic_v1";
     result.llm_model = llm_->getSelectedModel();
 
+    const int summaryCeiling = Thoth::GenerationBudget::resolvedOr(512);
+    Thoth::GenerationCallContext call = Thoth::GenerationCallScope::current();
+    call.call_type = "memory_summary";
+    const Thoth::GenerationOutcome generated = llm_->generateCall(prompt, summaryCeiling, {}, call);
+    const std::string response = generated.ok ? generated.text : std::string();
+    Thoth::GenerationRecordFields fields;
+    fields.associated_generation_id = generated.generation_id;
+    fields.has_parse_ok = true;
+    fields.context_overflow = generated.prompt_tokens + generated.requested_max_tokens > 8192;
+    result.llm_success = generated.ok && !response.empty();
+
     try {
-        const std::string response = llm_->query(prompt, 512);
-        result.llm_success = !response.empty();
 
         std::string jsonText = response;
         const auto start = jsonText.find('{');
@@ -121,8 +133,12 @@ SummaryGenerationResult SummaryGenerator::extract(const std::vector<MessageRecor
         const auto parsed = nlohmann::json::parse(jsonText);
         result.memory = EpisodicMemory::fromJson(parsed);
         result.parse_success = true;
+        fields.parse_ok = true;
+        Thoth::GenerationCallLog::append(generated, fields);
     } catch (...) {
         result.parse_success = false;
+        fields.parse_ok = false;
+        Thoth::GenerationCallLog::append(generated, fields);
     }
 
     result.memory.importance = scoreEpisodicImportance(result.memory);

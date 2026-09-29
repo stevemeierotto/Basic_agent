@@ -62,6 +62,9 @@ set(BASIC_AGENT_SOURCES
     src/index_manager.cpp
     src/agent_context_retrieval.cpp
     src/llm_interface.cpp
+    src/generation_budget.cpp
+    src/generation_call.cpp
+    src/generation_call_log.cpp
     src/logger.cpp
     src/memory.cpp
     src/memory_pruner.cpp

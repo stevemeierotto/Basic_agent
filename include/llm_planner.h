@@ -13,6 +13,7 @@
 #include "rag.h"
 #include "llm_interface.h"
 #include "prompt_factory.h"
+#include "generation_call.h"
 
 /**
  * @brief Concrete implementation of IPlanner that generates plans using an LLM.
@@ -29,6 +30,10 @@ public:
     Plan revise_plan(const Plan& existing_plan,
                      const nlohmann::json& step_result) override;
 
+    /** Production revision prompt, hashed. Does not call the model. */
+    std::string revisionWrapperSha256(const Plan& existing_plan,
+                                      const nlohmann::json& step_result) const;
+
 private:
     std::shared_ptr<Memory> memory_;
     std::shared_ptr<RAGPipeline> rag_;
@@ -37,4 +42,10 @@ private:
     
     std::string generate_uuid();
     void save_plan(const Plan& plan);
+    std::string buildRevisionPromptText(const Plan& existing_plan,
+                                        const nlohmann::json& step_result) const;
+    void logGeneration(const Thoth::GenerationOutcome& outcome,
+                       bool validation_ok,
+                       bool fallback_used,
+                       bool kept_existing_plan) const;
 };

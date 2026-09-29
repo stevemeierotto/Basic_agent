@@ -1,9 +1,12 @@
 #include "../include/llm_interface.h"
 #include "../include/decision_trace.h"
+#include "../include/generation_budget.h"
 #include "../include/inference_client.h"
 #include "../include/inference_endpoint.h"
 #include "../include/test_suite_dev.h"
 #include "../include/robustness_mock_responses.h"
+#include <atomic>
+#include <chrono>
 #include <../include/json.hpp>
 #include <curl/curl.h>
 #include <iostream>
@@ -43,6 +46,36 @@ LlmTokenUsage LLMInterface::sessionTokenUsage() const {
     std::lock_guard<std::recursive_mutex> lock(llmMutex);
     return session_usage_;
 }
+
+void LLMInterface::setInferenceClientForTests(std::unique_ptr<Thoth::InferenceClient> client) {
+    std::lock_guard<std::recursive_mutex> lock(llmMutex);
+    inference_client_ = std::move(client);
+}
+
+namespace {
+
+int resolveRequestedMaxTokens(const Config* config, int num_predict_override) {
+    if (Thoth::GenerationBudget::hasCeiling()) {
+        return Thoth::GenerationBudget::ceiling();
+    }
+    if (num_predict_override >= 0) {
+        return num_predict_override;
+    }
+    return config ? config->max_tokens : 512;
+}
+
+void applyConfiguredSeed(std::optional<int>& seed_field) {
+    if (Thoth::GenerationBudget::hasSeed()) {
+        seed_field = Thoth::GenerationBudget::seed();
+    }
+}
+
+std::string nextGenerationId() {
+    static std::atomic<std::uint64_t> counter{1};
+    return "gen-" + std::to_string(counter.fetch_add(1));
+}
+
+} // namespace
 
 void LLMInterface::recordTokenUsage(const LlmTokenUsage& usage) {
     std::lock_guard<std::recursive_mutex> lock(llmMutex);
@@ -351,10 +384,7 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
 
         double temperature = config ? config->temperature : 0.7;
         double topP = config ? config->top_p : 1.0;
-        int maxTokens = config ? config->max_tokens : 2048;
-        if (num_predict_override >= 0) {
-            maxTokens = num_predict_override;
-        }
+        const int maxTokens = resolveRequestedMaxTokens(config, num_predict_override);
         std::string model = resolveOllamaModel();
         if (model.empty()) {
             result.error =
@@ -370,7 +400,9 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
         request.top_p = topP;
         request.max_tokens = maxTokens;
         request.stop_sequences = stop_sequences;
+        applyConfiguredSeed(request.seed);
 
+        const auto started = std::chrono::steady_clock::now();
         result = inference_client_->generate(request);
         if (!result.ok && result.error.find("not found") != std::string::npos) {
             const std::string detected = detectOllamaModel();
@@ -380,6 +412,9 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
                 result = inference_client_->generate(request);
             }
         }
+        result.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - started)
+                                .count();
 
         if (!result.ok) {
             DecisionTraceLogger traceLogger;
@@ -476,10 +511,7 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailedChat(
 
         double temperature = config ? config->temperature : 0.7;
         double topP = config ? config->top_p : 1.0;
-        int maxTokens = config ? config->max_tokens : 2048;
-        if (num_predict_override >= 0) {
-            maxTokens = num_predict_override;
-        }
+        const int maxTokens = resolveRequestedMaxTokens(config, num_predict_override);
         std::string model = resolveOllamaModel();
         if (model.empty()) {
             result.error =
@@ -494,7 +526,9 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailedChat(
         request.top_p = topP;
         request.max_tokens = maxTokens;
         request.stop_sequences = stop_sequences;
+        applyConfiguredSeed(request.seed);
 
+        const auto started = std::chrono::steady_clock::now();
         result = inference_client_->generateChat(request);
         if (!result.ok && result.error.find("not found") != std::string::npos) {
             const std::string detected = detectOllamaModel();
@@ -504,6 +538,9 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailedChat(
                 result = inference_client_->generateChat(request);
             }
         }
+        result.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - started)
+                                .count();
 
         if (!result.ok) {
             DecisionTraceLogger traceLogger;
@@ -535,6 +572,46 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailedChat(
         result.error = "Inference request failed with an unknown error.";
         return result;
     }
+}
+
+Thoth::GenerationOutcome LLMInterface::generateCall(
+    const std::string& prompt,
+    int num_predict_override,
+    const std::vector<std::string>& stop_sequences,
+    const Thoth::GenerationCallContext& context) {
+    Thoth::GenerationOutcome outcome;
+    outcome.generation_id = nextGenerationId();
+    outcome.context = context;
+    if (outcome.context.task_id.empty()) {
+        const Thoth::GenerationCallContext scoped = Thoth::GenerationCallScope::current();
+        if (!scoped.task_id.empty()) {
+            outcome.context.task_id = scoped.task_id;
+        }
+        if (outcome.context.plan_id.empty()) {
+            outcome.context.plan_id = scoped.plan_id;
+        }
+        if (outcome.context.session_id.empty()) {
+            outcome.context.session_id = scoped.session_id;
+        }
+        if (!outcome.context.reflection) {
+            outcome.context.reflection = scoped.reflection;
+        }
+    }
+    outcome.requested_max_tokens = resolveRequestedMaxTokens(config, num_predict_override);
+    const Thoth::InferenceGenerateResult detailed =
+        queryDetailed(prompt, outcome.requested_max_tokens, stop_sequences);
+    outcome.ok = detailed.ok;
+    outcome.error = detailed.error;
+    outcome.text = detailed.text;
+    outcome.prompt_tokens = detailed.token_usage.prompt_tokens;
+    outcome.completion_tokens = detailed.token_usage.completion_tokens;
+    outcome.total_tokens = detailed.token_usage.total_tokens;
+    outcome.has_total_tokens = detailed.token_usage.total_tokens > 0
+                               || detailed.token_usage.prompt_tokens > 0
+                               || detailed.token_usage.completion_tokens > 0;
+    outcome.finish_reason = detailed.finish_reason;
+    outcome.elapsed_ms = detailed.elapsed_ms;
+    return outcome;
 }
 
 std::string LLMInterface::formatProviderError(const std::string& detail) {

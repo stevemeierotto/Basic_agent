@@ -56,6 +56,8 @@ struct PriorStepContext {
 
 struct StepExecutionContext {
     std::string goal;
+    std::string task_id;
+    std::string session_id;
     std::vector<PriorStepContext> prior_steps;
     /** C7 Phase 3: snapshot G/C/T at dispatch — safe for parallel RETRIEVAL. */
     std::vector<float> goal_embedding;

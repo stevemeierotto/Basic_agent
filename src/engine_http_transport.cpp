@@ -17,11 +17,13 @@
 #include "../include/corpus_create.h"
 #include "../include/corpus_documents.h"
 #include "../include/runtime_bootstrap.h"
+#include "../include/generation_call.h"
 
 #include <httplib.h>
 #include <json.hpp>
 
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <cstdlib>
 #include <functional>
@@ -218,13 +220,27 @@ struct EngineHttpTransport::Impl {
                 active_goal = body["active_goal"].get<std::string>();
             }
 
-            handleEngineFuture(runtime.submitChat(resolved_session, text, active_goal),
+            std::string task_id;
+            if (body.contains("task_id") && body["task_id"].is_string()) {
+                task_id = body["task_id"].get<std::string>();
+            }
+            std::string raw_capture_id;
+            if (body.contains("return_raw_provider_text") && body["return_raw_provider_text"].is_boolean()
+                && body["return_raw_provider_text"].get<bool>()) {
+                static std::atomic<std::uint64_t> raw_ids{1};
+                raw_capture_id = "raw-" + std::to_string(raw_ids.fetch_add(1));
+            }
+            handleEngineFuture(runtime.submitChat(resolved_session, text, active_goal, task_id, raw_capture_id),
                                res,
                                [&](const std::string& response) {
-                                   setJsonResponse(res,
-                                                   200,
-                                                   nlohmann::json{{"response", response},
-                                                                  {"session_id", resolved_session}});
+                                   nlohmann::json payload{{"response", response},
+                                                          {"session_id", resolved_session}};
+                                   if (!raw_capture_id.empty()) {
+                                       if (const auto raw = Thoth::RawProviderCapture::take(raw_capture_id)) {
+                                           payload["raw_provider_text"] = *raw;
+                                       }
+                                   }
+                                   setJsonResponse(res, 200, payload);
                                });
         });
 
@@ -251,7 +267,11 @@ struct EngineHttpTransport::Impl {
             const std::string goal = body["goal"].get<std::string>();
             const std::string resolved_session = normalizeEngineSessionId(session_id);
 
-            handleEngineFuture(runtime.submitGoal(resolved_session, goal),
+            std::string task_id;
+            if (body.contains("task_id") && body["task_id"].is_string()) {
+                task_id = body["task_id"].get<std::string>();
+            }
+            handleEngineFuture(runtime.submitGoal(resolved_session, goal, task_id),
                                res,
                                [&](const std::string& message) {
                                    setJsonResponse(res,
@@ -259,6 +279,32 @@ struct EngineHttpTransport::Impl {
                                                    nlohmann::json{{"status", "accepted"},
                                                                   {"message", message}});
                                });
+        });
+
+        server.Post("/mtcp/revise", [this](const httplib::Request& req, httplib::Response& res) {
+            const char* enabled = std::getenv("THOTH_MTCP_ENABLED");
+            if (!enabled || std::string(enabled) != "1") {
+                setErrorResponse(res, EngineError::invalidRequest("MTCP revision route is disabled."));
+                return;
+            }
+            if (rejectIfShuttingDown(res)) {
+                return;
+            }
+            nlohmann::json body;
+            if (!parseJsonBody(req.body, body, res)) {
+                return;
+            }
+            if (!body.contains("plan") || !body["plan"].is_object()
+                || !body.contains("failed_step_result")) {
+                setErrorResponse(res, EngineError::invalidRequest(
+                    "Fields \"plan\" and \"failed_step_result\" are required."));
+                return;
+            }
+            std::string task_id;
+            if (body.contains("task_id") && body["task_id"].is_string()) {
+                task_id = body["task_id"].get<std::string>();
+            }
+            setJsonResponse(res, 200, runtime.revisePlanForMtcp(body["plan"], body["failed_step_result"], task_id));
         });
 
         server.Post("/v1/control/pause",

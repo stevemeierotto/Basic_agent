@@ -70,7 +70,8 @@ public:
 
     // Primary entry point — drives the full goal to completion
     std::string execute_goal(const std::string& goal,
-                             const BenchmarkAttribution& benchmark = {});
+                             const BenchmarkAttribution& benchmark = {},
+                             const std::string& mtcp_task_id = {});
 
     /** E2 evaluation harness only — inject STRICT kernel context for RETRIEVAL dispatch (A4). */
     void set_e2_strict_eval_context(const SealedEpisodeInjectionLog* episode_log,
@@ -215,6 +216,7 @@ protected:
     ConstraintChecker constraint_checker_;
     EventCallback event_callback_;
     LLMInterface* llm_interface_ = nullptr;
+    std::string mtcp_task_id_;
 
     Plan current_plan_;
     Trajectory current_trajectory_;

@@ -28,6 +28,7 @@ public:
     static std::string serializeGeneratePayload(const InferenceGenerateRequest& request);
     /** Phase A — serialize chat payload (for tests + generateChat()). */
     static std::string serializeChatPayload(const InferenceChatRequest& request);
+    static std::string serializeEmbedPayload(const InferenceEmbedRequest& request);
 
 private:
     std::string base_url_;

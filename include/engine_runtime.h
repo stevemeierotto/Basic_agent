@@ -45,8 +45,15 @@ public:
 
     std::future<std::string> submitChat(const std::string& session_id,
                                         const std::string& text,
-                                        const std::optional<std::string>& active_goal = std::nullopt);
-    std::future<std::string> submitGoal(const std::string& session_id, const std::string& goal);
+                                        const std::optional<std::string>& active_goal = std::nullopt,
+                                        const std::string& task_id = {},
+                                        const std::string& raw_capture_id = {});
+    std::future<std::string> submitGoal(const std::string& session_id,
+                                        const std::string& goal,
+                                        const std::string& task_id = {});
+    nlohmann::json revisePlanForMtcp(const nlohmann::json& plan_json,
+                                     const nlohmann::json& failed_step_result,
+                                     const std::string& task_id = {});
     void pause();
     void resume();
     void abort();

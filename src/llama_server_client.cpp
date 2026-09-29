@@ -161,6 +161,9 @@ std::string LlamaServerClient::serializeGeneratePayload(const InferenceGenerateR
     if (!request.stop_sequences.empty()) {
         payload["stop"] = request.stop_sequences;
     }
+    if (request.seed.has_value()) {
+        payload["seed"] = *request.seed;
+    }
     return payload.dump();
 }
 
@@ -179,6 +182,9 @@ std::string LlamaServerClient::serializeChatPayload(const InferenceChatRequest& 
     if (!request.stop_sequences.empty()) {
         payload["stop"] = request.stop_sequences;
     }
+    if (request.seed.has_value()) {
+        payload["seed"] = *request.seed;
+    }
     return payload.dump();
 }
 
@@ -193,6 +199,16 @@ InferenceEmbedResult LlamaServerClient::embed(const InferenceEmbedRequest& reque
         return result;
     }
 
+    const std::string url = inferenceUrl(embed_base_url_, "/v1/embeddings");
+    const auto http = inferenceHttpPost(url, serializeEmbedPayload(request), 300);
+    if (!http.ok) {
+        result.error = http.error.empty() ? http.body : http.error;
+        return result;
+    }
+    return parseEmbeddingsResponse(http.body);
+}
+
+std::string LlamaServerClient::serializeEmbedPayload(const InferenceEmbedRequest& request) {
     json payload;
     payload["model"] = request.model;
     payload["encoding_format"] = "float";
@@ -201,14 +217,7 @@ InferenceEmbedResult LlamaServerClient::embed(const InferenceEmbedRequest& reque
     } else {
         payload["input"] = request.inputs;
     }
-
-    const std::string url = inferenceUrl(embed_base_url_, "/v1/embeddings");
-    const auto http = inferenceHttpPost(url, payload.dump(), 300);
-    if (!http.ok) {
-        result.error = http.error.empty() ? http.body : http.error;
-        return result;
-    }
-    return parseEmbeddingsResponse(http.body);
+    return payload.dump();
 }
 
 InferenceHealthResult LlamaServerClient::health() {

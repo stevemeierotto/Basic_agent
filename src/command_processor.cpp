@@ -12,6 +12,8 @@
 #include "chat_query_utils.h"
 #include "chat_prompt_config.h"
 #include "chat_generation_safety.h"
+#include "generation_budget.h"
+#include "generation_call.h"
 #include "chat_turn_timing.h"
 #include "agent_context_retrieval.h"
 
@@ -202,7 +204,7 @@ Thoth::ChatRagContextRecord buildChatRagContextRecord(
     record.tool_ratio = safeRatio(record.tool_schema_chars, record.final_prompt_chars);
     record.history_ratio = safeRatio(record.conversation_history_chars, record.final_prompt_chars);
     record.memory_ratio = safeRatio(record.memory_context_chars, record.final_prompt_chars);
-    record.generation_max_tokens = Thoth::ChatPrompt::kChatMaxTokens;
+    record.generation_max_tokens = Thoth::GenerationBudget::resolvedOr(Thoth::ChatPrompt::kChatMaxTokens);
     record.chat_stop_sequence_count = static_cast<int>(
         Thoth::ChatPrompt::chatStopSequences(Thoth::ChatPrompt::chatInferenceModeFromEnv()).size());
     if (Thoth::ChatGeneration::chatPromptLoggingEnabled()) {
@@ -424,7 +426,7 @@ void CommandProcessor::applyGenerationDiagnostics(
     record.response_valid = gen.response_valid;
     record.invalid_reason = gen.invalid_reason;
     record.final_answer_chars = gen.sanitized_text.size();
-    record.generation_max_tokens = Thoth::ChatPrompt::kChatMaxTokens;
+    record.generation_max_tokens = Thoth::GenerationBudget::resolvedOr(Thoth::ChatPrompt::kChatMaxTokens);
 }
 
 void CommandProcessor::applyChatTurnTelemetry(
@@ -473,7 +475,7 @@ CommandProcessor::ConversationalTurnResult CommandProcessor::runConversationalGe
     ConversationalTurnResult turn;
 
     Thoth::ChatGeneration::ChatGenerateOptions opts;
-    opts.max_tokens = Thoth::ChatPrompt::kChatMaxTokens;
+    opts.max_tokens = Thoth::GenerationBudget::resolvedOr(Thoth::ChatPrompt::kChatMaxTokens);
     if (chat_request.has_value()) {
         opts.stop_sequences =
             Thoth::ChatPrompt::chatStopSequences(Thoth::ChatPrompt::ChatInferenceMode::Chat);
@@ -525,7 +527,9 @@ CommandProcessor::ConversationalTurnResult CommandProcessor::runConversationalGe
 }
 
 std::string CommandProcessor::processQuery(const std::string& input,
-                                           const std::optional<std::string>& active_goal) {
+                                           const std::optional<std::string>& active_goal,
+                                           const std::string& task_id,
+                                           const std::string& raw_capture_id) {
     ChatTurnPhaseTiming phaseTiming;
     std::int64_t worker_started_at_ms = 0;
     if (const auto ctx = Thoth::ChatTurnTiming::consumeWorkerContext()) {
@@ -703,6 +707,10 @@ std::string CommandProcessor::processQuery(const std::string& input,
             const std::string& finalResponse = turn.final_response;
 
             Thoth::ChatRagResponseRecord responseRecord;
+            responseRecord.task_id = task_id;
+            if (!raw_capture_id.empty()) {
+                Thoth::RawProviderCapture::store(raw_capture_id, turn.gen.raw_text);
+            }
             responseRecord.request_id = trace.requestId;
             responseRecord.answer_chars = finalResponse.size();
             responseRecord.retrieved_doc_count = 0;
@@ -798,6 +806,10 @@ std::string CommandProcessor::processQuery(const std::string& input,
             const std::string& finalResponse = turn.final_response;
 
             Thoth::ChatRagResponseRecord responseRecord;
+            responseRecord.task_id = task_id;
+            if (!raw_capture_id.empty()) {
+                Thoth::RawProviderCapture::store(raw_capture_id, turn.gen.raw_text);
+            }
             responseRecord.request_id = trace.requestId;
             responseRecord.answer_chars = finalResponse.size();
             responseRecord.retrieved_doc_count = 0;
@@ -1008,6 +1020,10 @@ std::string CommandProcessor::processQuery(const std::string& input,
         const std::string& finalResponse = turn.final_response;
 
         Thoth::ChatRagResponseRecord responseRecord;
+        responseRecord.task_id = task_id;
+        if (!raw_capture_id.empty()) {
+            Thoth::RawProviderCapture::store(raw_capture_id, turn.gen.raw_text);
+        }
         responseRecord.request_id = trace.requestId;
         responseRecord.answer_chars = finalResponse.size();
         responseRecord.retrieved_doc_count = countUniqueDocuments(contextRecord.documents);

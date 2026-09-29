@@ -7,6 +7,9 @@
  */
 
 #include "../include/llm_planner.h"
+#include "../include/alp_sha256.h"
+#include "../include/generation_budget.h"
+#include "../include/generation_call_log.h"
 #include "../include/logger.h"
 #include "../include/plan_parser.h"
 #include "../include/plan_validator.h"
@@ -233,25 +236,36 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
             {"plan_reuse_in_goal", plan_reuse_in_goal},
         });
 
-    std::string llm_response = llm_->query(prompt);
+    Thoth::GenerationCallContext call = Thoth::GenerationCallScope::current();
+    call.call_type = "plan";
+    call.attempt = 0;
+    call.plan_id = plan.plan_id;
+    const Thoth::GenerationOutcome first = llm_->generateCall(prompt, -1, {}, call);
+    std::string llm_response = first.ok ? first.text : std::string("Assistant: [Error] ") + first.error;
 
     bool depends_on_repaired = false;
     bool fallback_used = false;
     std::string validation_reason;
     auto validated = parsePlanWithValidation(
         llm_response, plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
+    logGeneration(first, validated.has_value(), false, false);
 
     if (!validated.has_value()) {
         StructuredLogger::instance().log(LogLevel::Warn, "planner", "plan_validation_failed",
             "First plan attempt failed (" + validation_reason + "), retrying...",
-            {{"llm_response", llm_response}, {"reason", validation_reason}});
+            {{"reason", validation_reason}});
 
         std::string retry_prompt = prompt + "\n\nERROR: " + validation_reason +
             ". Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\nPrevious Response:\n" +
             llm_response;
-        llm_response = llm_->query(retry_prompt);
+        Thoth::GenerationCallContext retry = call;
+        retry.call_type = "plan_retry";
+        retry.attempt = 1;
+        const Thoth::GenerationOutcome second = llm_->generateCall(retry_prompt, -1, {}, retry);
+        llm_response = second.ok ? second.text : std::string("Assistant: [Error] ") + second.error;
         validated = parsePlanWithValidation(
             llm_response, plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
+        logGeneration(second, validated.has_value(), !validated.has_value(), false);
     }
 
     plan = finalizePlanOrFallback(plan.plan_id, prompt_goal, validated, fallback_used);
@@ -302,7 +316,17 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
             {"total_bytes", prompt_metrics.total_bytes},
         });
 
-    std::string llm_response = llm_->query(prompt);
+    Thoth::GenerationCallContext call = Thoth::GenerationCallScope::current();
+    call.call_type = "revision";
+    call.attempt = 0;
+    if (call.plan_id.empty()) {
+        call.plan_id = existing_plan.plan_id;
+    }
+    const std::string wrapper_hash = Thoth::sha256Hex(prompt);
+    const Thoth::GenerationOutcome first_raw = llm_->generateCall(prompt, -1, {}, call);
+    Thoth::GenerationOutcome first = first_raw;
+    first.wrapper_sha256 = wrapper_hash;
+    std::string llm_response = first.ok ? first.text : std::string("Assistant: [Error] ") + first.error;
 
     bool depends_on_repaired = false;
     bool fallback_used = false;
@@ -311,16 +335,26 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
         llm_response, existing_plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
 
     if (!validated.has_value()) {
+        logGeneration(first, false, false, false);
         StructuredLogger::instance().log(LogLevel::Warn, "planner", "revision_validation_failed",
             "First revision attempt failed (" + validation_reason + "), retrying...",
-            {{"llm_response", llm_response}, {"reason", validation_reason}});
+            {{"reason", validation_reason}});
 
         std::string retry_prompt = prompt + "\n\nERROR: " + validation_reason +
             ". Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\nPrevious Response:\n" +
             llm_response;
-        llm_response = llm_->query(retry_prompt);
+        Thoth::GenerationCallContext retry = call;
+        retry.call_type = "revision_retry";
+        retry.attempt = 1;
+        const Thoth::GenerationOutcome second_raw = llm_->generateCall(retry_prompt, -1, {}, retry);
+        Thoth::GenerationOutcome second = second_raw;
+        second.wrapper_sha256 = wrapper_hash;
+        llm_response = second.ok ? second.text : std::string("Assistant: [Error] ") + second.error;
         validated = parsePlanWithValidation(
             llm_response, existing_plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
+        logGeneration(second, validated.has_value(), false, !validated.has_value());
+    } else {
+        logGeneration(first, true, false, false);
     }
 
     if (validated.has_value()) {
@@ -356,6 +390,37 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
     revised.updated_at_ms = nowMs();
     save_plan(revised);
     return revised;
+}
+
+std::string LLMPlanner::buildRevisionPromptText(const Plan& existing_plan,
+                                               const nlohmann::json& step_result) const {
+    if (!prompt_factory_) {
+        return {};
+    }
+    const auto [prompt_goal, unused] = Thoth::splitPlanReuseInjection(existing_plan.goal);
+    (void)unused;
+    return prompt_factory_->buildRevisionPrompt(
+        prompt_goal, existing_plan.to_json().dump(), step_result.dump(), nullptr);
+}
+
+std::string LLMPlanner::revisionWrapperSha256(const Plan& existing_plan,
+                                              const nlohmann::json& step_result) const {
+    return Thoth::sha256Hex(buildRevisionPromptText(existing_plan, step_result));
+}
+
+void LLMPlanner::logGeneration(const Thoth::GenerationOutcome& outcome,
+                               bool validation_ok,
+                               bool fallback_used,
+                               bool kept_existing_plan) const {
+    Thoth::GenerationRecordFields fields;
+    fields.has_validation_ok = true;
+    fields.validation_ok = validation_ok;
+    fields.fallback_used = fallback_used;
+    fields.kept_existing_plan = kept_existing_plan;
+    fields.associated_generation_id = outcome.generation_id;
+    fields.context_overflow =
+        outcome.prompt_tokens + outcome.requested_max_tokens > 8192;
+    Thoth::GenerationCallLog::append(outcome, fields);
 }
 
 void LLMPlanner::save_plan(const Plan& plan) {

@@ -1,4 +1,5 @@
 #include "../include/basic_agent_plugin.h"
+#include "../include/generation_budget.h"
 #include "../include/conversation_authority.h"
 #include "../include/corpus_create.h"
 #include "../include/alp_feature_flags.h"
@@ -47,6 +48,8 @@ BasicAgentPlugin::BasicAgentPlugin()
       rag(std::move(embeddingEngine), indexManager, &config, &memory),
       cmdProcessor(memory, rag, llm, &config) 
 {
+    Thoth::GenerationBudget::enforceOrThrow();
+
     // Setup Planner
     auto memory_ptr = std::shared_ptr<Memory>(&memory, [](Memory*) {});
     auto rag_ptr = std::shared_ptr<RAGPipeline>(&rag, [](RAGPipeline*){});
@@ -184,7 +187,9 @@ void BasicAgentPlugin::bootstrapSandboxIfEmpty() {
 }
 
 std::string BasicAgentPlugin::processInput(const std::string& input,
-                                           const std::optional<std::string>& active_goal) {
+                                           const std::optional<std::string>& active_goal,
+                                           const std::string& task_id,
+                                           const std::string& raw_capture_id) {
     std::string trimmed = input;
     auto b = trimmed.find_first_not_of(" \t\r\n");
     if (b == std::string::npos) return "";
@@ -196,7 +201,27 @@ std::string BasicAgentPlugin::processInput(const std::string& input,
         return cmdProcessor.handleCommand(trimmed);
     }
 
-    return cmdProcessor.processQuery(trimmed, active_goal);
+    return cmdProcessor.processQuery(trimmed, active_goal, task_id, raw_capture_id);
+}
+
+nlohmann::json BasicAgentPlugin::revisePlanForMtcp(const nlohmann::json& plan_json,
+                                                   const nlohmann::json& failed_step_result) {
+    auto llm_planner = std::dynamic_pointer_cast<LLMPlanner>(planner);
+    if (!llm_planner) {
+        return {{"status", "error"}, {"error_message", "LLMPlanner is not active"}};
+    }
+    const Plan frozen = Plan::from_json(plan_json);
+    const std::int64_t created = frozen.created_at_ms;
+    const std::int64_t updated = frozen.updated_at_ms;
+    const std::string wrapper = llm_planner->revisionWrapperSha256(frozen, failed_step_result);
+    const Plan revised = llm_planner->revise_plan(frozen, failed_step_result);
+    return {{"status", "ok"},
+            {"plan_id", revised.plan_id},
+            {"input_created_at_ms", created},
+            {"input_updated_at_ms", updated},
+            {"input_timestamps_unchanged",
+             frozen.created_at_ms == created && frozen.updated_at_ms == updated},
+            {"wrapper_sha256", wrapper}};
 }
 
 void BasicAgentPlugin::setConversationMemory(const std::vector<std::pair<std::string, std::string>>& messages,

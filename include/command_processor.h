@@ -50,7 +50,9 @@ public:
 
     // NEW: Send query through Memory + RAG + LLM
     std::string processQuery(const std::string& input,
-                             const std::optional<std::string>& active_goal = std::nullopt);
+                             const std::optional<std::string>& active_goal = std::nullopt,
+                             const std::string& task_id = {},
+                             const std::string& raw_capture_id = {});
     void ensureInitialized();
     void setInitialized(bool value) { initialized = value; }
     void setController(std::shared_ptr<Thoth::ExecutiveController> ctrl) { controller = ctrl; }

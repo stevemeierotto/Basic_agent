@@ -7,6 +7,8 @@
  */
 
 #include "../include/self_correct_tool.h"
+#include "../include/generation_call.h"
+#include "../include/generation_call_log.h"
 #include <iostream>
 #include <sstream>
 
@@ -43,7 +45,13 @@ nlohmann::json SelfCorrectTool::execute(const nlohmann::json& input) const {
     prompt << "4. Respond with the following JSON schema ONLY. No preamble or markdown fences.\n\n";
     prompt << "{\"valid\": boolean, \"reason\": \"string\"}";
 
-    std::string response = llm_.query(prompt.str());
+    Thoth::GenerationCallContext call = Thoth::GenerationCallScope::current();
+    call.call_type = "self_correct";
+    const Thoth::GenerationOutcome generated = llm_.generateCall(prompt.str(), -1, {}, call);
+    std::string response = generated.ok ? generated.text : std::string("Assistant: [Error] ") + generated.error;
+    Thoth::GenerationRecordFields fields;
+    fields.associated_generation_id = generated.generation_id;
+    fields.context_overflow = generated.prompt_tokens + generated.requested_max_tokens > 8192;
 
     try {
         // Simple attempt to find JSON in response if it has preamble
@@ -55,6 +63,9 @@ nlohmann::json SelfCorrectTool::execute(const nlohmann::json& input) const {
 
         nlohmann::json parsed = nlohmann::json::parse(response);
         
+        fields.has_parse_ok = true;
+        fields.parse_ok = parsed.contains("valid") && parsed["valid"].is_boolean();
+        Thoth::GenerationCallLog::append(generated, fields);
         if (!parsed.contains("valid") || !parsed["valid"].is_boolean()) {
             return {
                 {"status", "error"},
@@ -69,6 +80,9 @@ nlohmann::json SelfCorrectTool::execute(const nlohmann::json& input) const {
             {"error_message", nullptr}
         };
     } catch (const std::exception& e) {
+        fields.has_parse_ok = true;
+        fields.parse_ok = false;
+        Thoth::GenerationCallLog::append(generated, fields);
         return {
             {"status", "error"},
             {"data", {{"raw_response", response}}},

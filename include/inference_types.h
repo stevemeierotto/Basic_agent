@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,8 @@ struct InferenceGenerateRequest {
     int max_tokens = 2048;
     /** Plan M G3 — optional stop sequences; empty means omit from provider payload. */
     std::vector<std::string> stop_sequences;
+    /** MTCP — present only when a characterization or operator seed is configured. */
+    std::optional<int> seed;
 };
 
 /** OpenAI-style chat message for /v1/chat/completions. */
@@ -43,6 +46,8 @@ struct InferenceChatRequest {
     double top_p = 1.0;
     int max_tokens = 2048;
     std::vector<std::string> stop_sequences;
+    /** MTCP — present only when a characterization or operator seed is configured. */
+    std::optional<int> seed;
 };
 
 struct InferenceGenerateResult {
@@ -53,6 +58,8 @@ struct InferenceGenerateResult {
     std::string error;
     /** Plan N N2 — provider finish reason when present (e.g. stop, length). */
     std::string finish_reason;
+    /** Wall time of the provider HTTP call, in milliseconds. */
+    std::int64_t elapsed_ms = 0;
 };
 
 struct InferenceEmbedRequest {

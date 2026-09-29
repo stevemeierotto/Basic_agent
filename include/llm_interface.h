@@ -15,6 +15,7 @@
 #include <memory>
 #include <vector>
 #include "config.h"
+#include "generation_call.h"
 #include "inference_types.h"
 
 namespace Thoth {
@@ -64,6 +65,18 @@ public:
         const Thoth::InferenceChatRequest& request,
         int num_predict_override,
         const std::vector<std::string>& stop_sequences);
+
+    /**
+     * Call-scoped generation. The returned outcome belongs to this invocation.
+     * When THOTH_GENERATION_MAX_TOKENS is set, it replaces num_predict_override.
+     */
+    Thoth::GenerationOutcome generateCall(
+        const std::string& prompt,
+        int num_predict_override,
+        const std::vector<std::string>& stop_sequences,
+        const Thoth::GenerationCallContext& context);
+
+    void setInferenceClientForTests(std::unique_ptr<Thoth::InferenceClient> client);
 
     /** Plan N N6 — format Class A provider errors for the chat UI (no ChatGenerationResult UI strings). */
     std::string formatProviderError(const std::string& detail);

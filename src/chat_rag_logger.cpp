@@ -189,6 +189,9 @@ nlohmann::json ChatRagLogger::responseToJson(const ChatRagResponseRecord& record
         {"final_answer_chars", record.final_answer_chars},
         {"generation_max_tokens", record.generation_max_tokens},
     };
+    if (!record.task_id.empty()) {
+        j["task_id"] = record.task_id;
+    }
     if (!record.raw_sample_first.empty()) {
         j["raw_sample_first"] = record.raw_sample_first;
     }

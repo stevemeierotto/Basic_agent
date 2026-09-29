@@ -7,6 +7,7 @@
  */
 
 #include "../include/executive_controller.h"
+#include "../include/generation_call.h"
 #include "../include/llm_interface.h"
 #include "../include/logger.h"
 #include "../include/grag_scorer.h"
@@ -372,7 +373,8 @@ private:
 };
 
 std::string ExecutiveController::execute_goal(const std::string& goal,
-                                              const BenchmarkAttribution& benchmark) {
+                                              const BenchmarkAttribution& benchmark,
+                                              const std::string& mtcp_task_id) {
     // Join any prior loop outside the lock (same pattern as ~ExecutiveController).
     // Never unlock while a std::lock_guard still owns the mutex.
     {
@@ -396,6 +398,7 @@ std::string ExecutiveController::execute_goal(const std::string& goal,
         reflection_count_ = 0;
         plan_reused_ = false;
         benchmark_attribution_ = benchmark;
+        mtcp_task_id_ = mtcp_task_id;
         reset_goal_metrics_unlocked();
         transition_to_unlocked(ControllerState::PLANNING);
         
@@ -425,6 +428,11 @@ std::string ExecutiveController::execute_goal(const std::string& goal,
         const auto planStart = nowMs();
         {
             PlannerLogSessionGuard sessionGuard(session_id_);
+            Thoth::GenerationCallContext scopeContext;
+            scopeContext.task_id = mtcp_task_id_;
+            scopeContext.session_id = session_id_;
+            scopeContext.call_type = "plan";
+            Thoth::GenerationCallScope scope(scopeContext);
             current_plan_ = planner_->create_plan(enhanced_goal);
         }
         planning_time_ms_ += nowMs() - planStart;
@@ -755,6 +763,7 @@ void ExecutiveController::decide_transition() {
                     Thoth::cleanGoalForStorage(current_plan_.goal) +
                     " (Reflection: previous attempt had low success score " + std::to_string(score) + ")";
                 const std::string plannerSessionId = session_id_;
+                const std::string reflectionTask = mtcp_task_id_;
 
                 lock.unlock();
                 emit_event(EventType::REFLECTION_REPLAN, "", reflection_meta);
@@ -762,6 +771,12 @@ void ExecutiveController::decide_transition() {
                 Plan new_plan;
                 {
                     PlannerLogSessionGuard sessionGuard(plannerSessionId);
+                    Thoth::GenerationCallContext scopeContext;
+                    scopeContext.task_id = reflectionTask;
+                    scopeContext.session_id = plannerSessionId;
+                    scopeContext.call_type = "plan";
+                    scopeContext.reflection = true;
+                    Thoth::GenerationCallScope scope(scopeContext);
                     new_plan = planner_->create_plan(reflection_goal);
                 }
                 planning_time_ms_ += nowMs() - planStart;
@@ -1056,7 +1071,16 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
             current_plan_.updated_at_ms = nowMs();
             persist_current_plan_unlocked();
             
+            const std::string revision_task = mtcp_task_id_;
+            const std::string revision_session = session_id_;
+            const std::string revision_plan = current_plan_.plan_id;
             lock.unlock();
+            Thoth::GenerationCallContext scopeContext;
+            scopeContext.task_id = revision_task;
+            scopeContext.session_id = revision_session;
+            scopeContext.plan_id = revision_plan;
+            scopeContext.call_type = "revision";
+            Thoth::GenerationCallScope scope(scopeContext);
             Plan revised = planner_->revise_plan(current_plan_, result.data);
             
             lock.lock();
@@ -1095,6 +1119,8 @@ nlohmann::json ExecutiveController::dispatch_step(PlanStep& step) {
         attachEmbeddingSnapshot_unlocked(ctx);
         ctx.e2_strict_episode_log = e2_strict_episode_log_;
         ctx.e2_eval_config = e2_eval_config_;
+        ctx.task_id = mtcp_task_id_;
+        ctx.session_id = session_id_;
         return ctx;
     }();
     auto result = workflow_engine_->executeStep(step, current_plan_.plan_id, context);

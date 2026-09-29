@@ -7,6 +7,7 @@
  */
 
 #include "../include/engine_runtime.h"
+#include "../include/generation_call.h"
 
 #include "../include/basic_agent_plugin.h"
 #include "../include/chat_turn_timing.h"
@@ -290,7 +291,9 @@ void EngineRuntime::shutdown(std::chrono::milliseconds drain_timeout) {
 
 std::future<std::string> EngineRuntime::submitChat(const std::string& session_id,
                                                    const std::string& text,
-                                                   const std::optional<std::string>& active_goal) {
+                                                   const std::optional<std::string>& active_goal,
+                                                   const std::string& task_id,
+                                                   const std::string& raw_capture_id) {
     if (!isReady()) {
         return rejectWithError(EngineError::engineBusy("Engine is not ready."));
     }
@@ -304,12 +307,12 @@ std::future<std::string> EngineRuntime::submitChat(const std::string& session_id
 
     try {
         const std::int64_t enqueued_at_ms = nowUtcMs();
-        impl_->enqueue([this, resolved_session, text, active_goal, promise, enqueued_at_ms]() {
+        impl_->enqueue([this, resolved_session, text, active_goal, task_id, raw_capture_id, promise, enqueued_at_ms]() {
             try {
                 ChatTurnTiming::setActiveWorkerContext(
                     {enqueued_at_ms, nowUtcMs()});
                 impl_->ensureSessionOnWorker(resolved_session);
-                promise->set_value(impl_->plugin->processInput(text, active_goal));
+                promise->set_value(impl_->plugin->processInput(text, active_goal, task_id, raw_capture_id));
             } catch (const std::exception& e) {
                 promise->set_exception(
                     std::make_exception_ptr(EngineException(EngineError::internalError(e.what()))));
@@ -326,7 +329,8 @@ std::future<std::string> EngineRuntime::submitChat(const std::string& session_id
 }
 
 std::future<std::string> EngineRuntime::submitGoal(const std::string& session_id,
-                                                   const std::string& goal) {
+                                                   const std::string& goal,
+                                                   const std::string& task_id) {
     if (!isReady()) {
         return rejectWithError(EngineError::engineBusy("Engine is not ready."));
     }
@@ -339,10 +343,10 @@ std::future<std::string> EngineRuntime::submitGoal(const std::string& session_id
     std::future<std::string> future = promise->get_future();
 
     try {
-        impl_->enqueue([this, resolved_session, goal, promise]() {
+        impl_->enqueue([this, resolved_session, goal, task_id, promise]() {
             try {
                 impl_->ensureSessionOnWorker(resolved_session);
-                impl_->plugin->executeGoal(goal);
+                impl_->plugin->executeGoal(goal, {}, task_id);
                 promise->set_value("GOAL ACCEPTED: " + goal);
             } catch (const std::exception& e) {
                 promise->set_exception(
@@ -357,6 +361,28 @@ std::future<std::string> EngineRuntime::submitGoal(const std::string& session_id
     }
 
     return future;
+}
+
+nlohmann::json EngineRuntime::revisePlanForMtcp(const nlohmann::json& plan_json,
+                                                   const nlohmann::json& failed_step_result,
+                                                   const std::string& task_id) {
+    if (!isReady()) {
+        return {{"status", "error"}, {"error_message", "Engine is not ready."}};
+    }
+    auto promise = std::make_shared<std::promise<nlohmann::json>>();
+    auto future = promise->get_future();
+    impl_->enqueue([this, plan_json, failed_step_result, task_id, promise]() {
+        try {
+            Thoth::GenerationCallContext scopeContext;
+            scopeContext.task_id = task_id;
+            scopeContext.call_type = "revision";
+            Thoth::GenerationCallScope scope(scopeContext);
+            promise->set_value(impl_->plugin->revisePlanForMtcp(plan_json, failed_step_result));
+        } catch (const std::exception& e) {
+            promise->set_value({{"status", "error"}, {"error_message", e.what()}});
+        }
+    });
+    return future.get();
 }
 
 void EngineRuntime::pause() {

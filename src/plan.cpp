@@ -84,8 +84,8 @@ PlanStep PlanStep::from_json(const nlohmann::json& j) {
     step.result = j.value("result", nlohmann::json::object());
     loadPlanStepOutcomeFromJson(j, &step.outcome);
     step.reasoning = j.value("reasoning", "");
-    step.started_at_ms = j.value("started_at_ms", 0);
-    step.completed_at_ms = j.value("completed_at_ms", 0);
+    step.started_at_ms = j.value("started_at_ms", static_cast<std::int64_t>(0));
+    step.completed_at_ms = j.value("completed_at_ms", static_cast<std::int64_t>(0));
     step.depends_on = j.value("depends_on", std::vector<std::string>());
     return step;
 }
@@ -111,8 +111,8 @@ Plan Plan::from_json(const nlohmann::json& j) {
     plan.goal = j.value("goal", "");
     plan.current_index = j.value("current_index", 0);
     plan.status = static_cast<PlanStatus>(j.value("status", 0));
-    plan.created_at_ms = j.value("created_at_ms", 0);
-    plan.updated_at_ms = j.value("updated_at_ms", 0);
+    plan.created_at_ms = j.value("created_at_ms", static_cast<std::int64_t>(0));
+    plan.updated_at_ms = j.value("updated_at_ms", static_cast<std::int64_t>(0));
     if (j.contains("steps") && j["steps"].is_array()) {
         for (const auto& step_j : j["steps"]) {
             plan.steps.push_back(PlanStep::from_json(step_j));

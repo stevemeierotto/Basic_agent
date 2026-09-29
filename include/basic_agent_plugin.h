@@ -34,7 +34,9 @@ public:
     std::function<void(const ControllerEvent&)> onEvent;
 
     std::string processInput(const std::string& input,
-                             const std::optional<std::string>& active_goal = std::nullopt);
+                             const std::optional<std::string>& active_goal = std::nullopt,
+                             const std::string& task_id = {},
+                             const std::string& raw_capture_id = {});
     void setConversationMemory(
         const std::vector<std::pair<std::string, std::string>>& messages,
         const std::string& summary = "");
@@ -51,11 +53,16 @@ public:
     void resume() { if (controller) controller->resume(); }
     void abort() { if (controller) controller->abort(); }
     void executeGoal(const std::string& goal,
-                     const Thoth::BenchmarkAttribution& benchmark = {}) {
+                     const Thoth::BenchmarkAttribution& benchmark = {},
+                     const std::string& task_id = {}) {
         if (controller) {
-            controller->execute_goal(goal, benchmark);
+            controller->execute_goal(goal, benchmark, task_id);
         }
     }
+
+    /** MTCP — production revise_plan with a frozen plan. Empty when the planner is absent. */
+    nlohmann::json revisePlanForMtcp(const nlohmann::json& plan_json,
+                                     const nlohmann::json& failed_step_result);
 
     /** Headless TEST_SUITE: index sandbox rag/ only if empty, then skip full re-init. */
     void bootstrapSandboxIfEmpty();

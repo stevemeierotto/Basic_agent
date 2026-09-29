@@ -167,6 +167,7 @@ struct ChatRagResponseRecord {
     /** Investigation — text returned to caller when THOTH_LOG_FULL_RAW_CHAT_COMPLETION=1. */
     std::string final_answer;
     int generation_max_tokens = 0;
+    std::string task_id;
 };
 
 class ChatRagLogger {

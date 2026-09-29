@@ -17,6 +17,8 @@
 #include "../include/decision_trace.h"
 #include "../include/config.h"
 #include "../include/runtime_latency_config.h"
+#include "../include/generation_budget.h"
+#include "../include/generation_call_log.h"
 #include "../include/goal_text_utils.h"
 #include "../include/grag_diagnostics.h"
 #include "../include/memory.h"
@@ -702,7 +704,21 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
         if (config_ && config_->synthesis_num_predict > 0) {
             numPredict = config_->synthesis_num_predict;
         }
-        const std::string response = llm_->query(prompt, numPredict);
+        if (Thoth::GenerationBudget::hasCeiling()) {
+            numPredict = Thoth::GenerationBudget::ceiling();
+        }
+        Thoth::GenerationCallContext call;
+        call.task_id = context.task_id;
+        call.session_id = context.session_id;
+        call.plan_id = planId;
+        call.call_type = "synthesis";
+        const Thoth::GenerationOutcome generated = llm_->generateCall(prompt, numPredict, {}, call);
+        Thoth::GenerationRecordFields fields;
+        fields.associated_generation_id = generated.generation_id;
+        fields.context_overflow = generated.prompt_tokens + generated.requested_max_tokens > 8192;
+        Thoth::GenerationCallLog::append(generated, fields);
+        const std::string response = generated.ok ? generated.text
+                                                   : std::string("Assistant: [Error] ") + generated.error;
         if (response.empty() || llmResponseIsError(response)) {
             result.success = false;
             result.error_message = response.empty() ? "LLM returned an empty response" : response;
