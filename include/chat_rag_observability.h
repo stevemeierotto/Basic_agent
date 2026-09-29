@@ -100,6 +100,7 @@ struct ChatGenerationAttemptRecord {
     std::int64_t latency_ms = 0;
     std::int64_t prompt_tokens = 0;
     std::int64_t completion_tokens = 0;
+    bool usage_unavailable = false;
     std::string finish_reason;
     bool provider_ok = false;
     std::size_t raw_answer_chars = 0;
@@ -157,6 +158,7 @@ struct ChatRagResponseRecord {
     std::vector<ChatGenerationAttemptRecord> generation_attempts;
     std::int64_t prompt_tokens = 0;
     std::int64_t completion_tokens = 0;
+    bool usage_unavailable = false;
     bool response_valid = true;
     std::string invalid_reason = "none";
     /** Populated only when THOTH_LOG_RAW_CHAT_COMPLETION=1 (short samples, not full text). */

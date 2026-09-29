@@ -118,7 +118,7 @@ SummaryGenerationResult SummaryGenerator::extract(const std::vector<MessageRecor
     Thoth::GenerationRecordFields fields;
     fields.associated_generation_id = generated.generation_id;
     fields.has_parse_ok = true;
-    fields.context_overflow = generated.prompt_tokens + generated.requested_max_tokens > 8192;
+    fields.context_overflow = Thoth::reportedContextOverflow(generated);
     result.llm_success = generated.ok && !response.empty();
 
     try {

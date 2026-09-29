@@ -53,6 +53,8 @@ struct InferenceChatRequest {
 struct InferenceGenerateResult {
     std::string text;
     LlmTokenUsage token_usage;
+    /** True only when the provider usage object supplied prompt and completion integers, including measured zero. */
+    bool provider_usage_reported = false;
     std::string raw_json;
     bool ok = false;
     std::string error;

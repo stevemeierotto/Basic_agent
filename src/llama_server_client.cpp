@@ -7,6 +7,7 @@
  */
 
 #include "../include/llama_server_client.h"
+#include "../include/generation_progress_observer.h"
 #include "../include/inference_endpoint.h"
 #include "../include/inference_http.h"
 #include "../include/llm_timeout_policy.h"
@@ -63,7 +64,13 @@ InferenceGenerateResult LlamaServerClient::parseCompletionResponse(const std::st
             if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
                 result.finish_reason = choice["finish_reason"].get<std::string>();
             }
-            result.token_usage = parseOpenAiCompletionUsage(j);
+            const bool usage_object = j.contains("usage") && j["usage"].is_object()
+                && j["usage"].contains("prompt_tokens") && j["usage"]["prompt_tokens"].is_number_integer()
+                && j["usage"].contains("completion_tokens") && j["usage"]["completion_tokens"].is_number_integer();
+            if (usage_object) {
+                result.token_usage = parseOpenAiCompletionUsage(j);
+                result.provider_usage_reported = true;
+            }
             // Plan N N2: empty text with a valid choices payload is provider-ok (soft-empty).
             result.ok = true;
             return result;
@@ -122,6 +129,8 @@ InferenceGenerateResult LlamaServerClient::generate(const InferenceGenerateReque
     }
 
     const std::string url = inferenceUrl(base_url_, "/v1/completions");
+    const std::string progress_id = GenerationProgressIds::current();
+    GenerationProgressSession progress(progress_id, inferenceUrl(base_url_, "/slots"));
     const auto http = inferenceHttpPost(url, serializeGeneratePayload(request), LlmTimeoutPolicy::timeoutSeconds());
     if (!http.ok) {
         result.error = http.error.empty() ? http.body : http.error;
@@ -142,6 +151,8 @@ InferenceGenerateResult LlamaServerClient::generateChat(const InferenceChatReque
     }
 
     const std::string url = inferenceUrl(base_url_, "/v1/chat/completions");
+    const std::string progress_id = GenerationProgressIds::current();
+    GenerationProgressSession progress(progress_id, inferenceUrl(base_url_, "/slots"));
     const auto http = inferenceHttpPost(url, serializeChatPayload(request), LlmTimeoutPolicy::timeoutSeconds());
     if (!http.ok) {
         result.error = http.error.empty() ? http.body : http.error;

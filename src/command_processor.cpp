@@ -142,6 +142,7 @@ void copyGenerationAttempts(std::vector<Thoth::ChatGenerationAttemptRecord>& des
         Thoth::ChatGenerationAttemptRecord row;
         row.attempt = attempt.attempt;
         row.latency_ms = attempt.latency_ms;
+        row.usage_unavailable = attempt.usage_unavailable;
         row.prompt_tokens = attempt.prompt_tokens;
         row.completion_tokens = attempt.completion_tokens;
         row.finish_reason = attempt.finish_reason;
@@ -418,6 +419,7 @@ void CommandProcessor::applyGenerationDiagnostics(
     copyGenerationAttempts(record.generation_attempts, gen.generation_attempts);
     if (!gen.generation_attempts.empty()) {
         const auto& lastAttempt = gen.generation_attempts.back();
+        record.usage_unavailable = lastAttempt.usage_unavailable;
         record.prompt_tokens = lastAttempt.prompt_tokens;
         record.completion_tokens = lastAttempt.completion_tokens;
     }

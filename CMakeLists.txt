@@ -65,6 +65,7 @@ set(BASIC_AGENT_SOURCES
     src/generation_budget.cpp
     src/generation_call.cpp
     src/generation_call_log.cpp
+    src/generation_progress_observer.cpp
     src/logger.cpp
     src/memory.cpp
     src/memory_pruner.cpp

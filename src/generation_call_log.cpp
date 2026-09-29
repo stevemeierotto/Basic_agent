@@ -55,8 +55,6 @@ bool GenerationCallLog::append(const GenerationOutcome& outcome, const Generatio
         {"attempt", outcome.context.attempt},
         {"reflection", outcome.context.reflection},
         {"requested_max_tokens", outcome.requested_max_tokens},
-        {"prompt_tokens", outcome.prompt_tokens},
-        {"completion_tokens", outcome.completion_tokens},
         {"finish_reason", outcome.finish_reason},
         {"elapsed_ms", outcome.elapsed_ms},
         {"provider_ok", outcome.ok},
@@ -64,8 +62,18 @@ bool GenerationCallLog::append(const GenerationOutcome& outcome, const Generatio
         {"kept_existing_plan", fields.kept_existing_plan},
         {"context_overflow", fields.context_overflow},
     };
-    if (outcome.has_total_tokens) {
-        line["total_tokens"] = outcome.total_tokens;
+    if (outcome.provider_usage_reported) {
+        line["provider_usage"] = "reported";
+        line["prompt_tokens"] = outcome.prompt_tokens;
+        line["completion_tokens"] = outcome.completion_tokens;
+        if (outcome.has_total_tokens) {
+            line["total_tokens"] = outcome.total_tokens;
+        }
+    } else {
+        line["provider_usage"] = "unavailable";
+    }
+    if (fields.synthesis_observed_empty) {
+        line["synthesis_observed_empty"] = true;
     }
     if (!outcome.context.task_id.empty()) {
         line["task_id"] = outcome.context.task_id;

@@ -1,6 +1,7 @@
 #include "../include/llm_interface.h"
 #include "../include/decision_trace.h"
 #include "../include/generation_budget.h"
+#include "../include/generation_progress_observer.h"
 #include "../include/inference_client.h"
 #include "../include/inference_endpoint.h"
 #include "../include/test_suite_dev.h"
@@ -417,6 +418,8 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
                                 .count();
 
         if (!result.ok) {
+            result.provider_usage_reported = false;
+            result.token_usage = {};
             DecisionTraceLogger traceLogger;
             DecisionTrace trace = traceLogger.startTrace("inference_error", prompt.size());
             traceLogger.finishTrace(trace, false, std::string("Inference failure: ") + result.error);
@@ -424,17 +427,21 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
             return result;
         }
 
+        if (result.provider_usage_reported) {
+            recordTokenUsage(result.token_usage);
+            return result;
+        }
+        if (!result.raw_json.empty()) {
+            result.token_usage = {};
+            return result;
+        }
+
         LlmTokenUsage usage = result.token_usage;
-        if (!result.raw_json.empty() && usage.total_tokens <= 0) {
-            usage = parseOllamaTokenUsage(result.raw_json);
-        }
-        if (usage.total_tokens <= 0) {
-            usage = parseOpenAiTokenUsage(result.raw_json);
-        }
-        if (usage.total_tokens <= 0) {
+        if (usage.total_tokens <= 0 && usage.prompt_tokens <= 0 && usage.completion_tokens <= 0) {
             usage = estimateTokenUsage(prompt, result.text);
         }
         result.token_usage = usage;
+        result.provider_usage_reported = true;
         recordTokenUsage(usage);
         return result;
     } catch (const std::exception& e) {
@@ -543,6 +550,8 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailedChat(
                                 .count();
 
         if (!result.ok) {
+            result.provider_usage_reported = false;
+            result.token_usage = {};
             DecisionTraceLogger traceLogger;
             DecisionTrace trace = traceLogger.startTrace("inference_error", telemetryPrompt.size());
             traceLogger.finishTrace(trace, false, std::string("Inference failure: ") + result.error);
@@ -550,17 +559,21 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailedChat(
             return result;
         }
 
+        if (result.provider_usage_reported) {
+            recordTokenUsage(result.token_usage);
+            return result;
+        }
+        if (!result.raw_json.empty()) {
+            result.token_usage = {};
+            return result;
+        }
+
         LlmTokenUsage usage = result.token_usage;
-        if (!result.raw_json.empty() && usage.total_tokens <= 0) {
-            usage = parseOllamaTokenUsage(result.raw_json);
-        }
-        if (usage.total_tokens <= 0) {
-            usage = parseOpenAiTokenUsage(result.raw_json);
-        }
-        if (usage.total_tokens <= 0) {
+        if (usage.total_tokens <= 0 && usage.prompt_tokens <= 0 && usage.completion_tokens <= 0) {
             usage = estimateTokenUsage(telemetryPrompt, result.text);
         }
         result.token_usage = usage;
+        result.provider_usage_reported = true;
         recordTokenUsage(usage);
         return result;
     } catch (const std::exception& e) {
@@ -598,17 +611,22 @@ Thoth::GenerationOutcome LLMInterface::generateCall(
         }
     }
     outcome.requested_max_tokens = resolveRequestedMaxTokens(config, num_predict_override);
+    Thoth::GenerationProgressIds::set(outcome.generation_id);
+    struct ClearProgressId {
+        ~ClearProgressId() { Thoth::GenerationProgressIds::clear(); }
+    } clear_progress_id;
     const Thoth::InferenceGenerateResult detailed =
         queryDetailed(prompt, outcome.requested_max_tokens, stop_sequences);
     outcome.ok = detailed.ok;
     outcome.error = detailed.error;
     outcome.text = detailed.text;
-    outcome.prompt_tokens = detailed.token_usage.prompt_tokens;
-    outcome.completion_tokens = detailed.token_usage.completion_tokens;
-    outcome.total_tokens = detailed.token_usage.total_tokens;
-    outcome.has_total_tokens = detailed.token_usage.total_tokens > 0
-                               || detailed.token_usage.prompt_tokens > 0
-                               || detailed.token_usage.completion_tokens > 0;
+    outcome.provider_usage_reported = detailed.provider_usage_reported;
+    if (detailed.provider_usage_reported) {
+        outcome.prompt_tokens = detailed.token_usage.prompt_tokens;
+        outcome.completion_tokens = detailed.token_usage.completion_tokens;
+        outcome.total_tokens = detailed.token_usage.total_tokens;
+        outcome.has_total_tokens = true;
+    }
     outcome.finish_reason = detailed.finish_reason;
     outcome.elapsed_ms = detailed.elapsed_ms;
     return outcome;

@@ -126,8 +126,6 @@ nlohmann::json ChatRagLogger::responseToJson(const ChatRagResponseRecord& record
         attempts.push_back({
             {"attempt", attempt.attempt},
             {"latency_ms", attempt.latency_ms},
-            {"prompt_tokens", attempt.prompt_tokens},
-            {"completion_tokens", attempt.completion_tokens},
             {"finish_reason", attempt.finish_reason},
             {"provider_ok", attempt.provider_ok},
             {"raw_answer_chars", attempt.raw_answer_chars},
@@ -142,6 +140,13 @@ nlohmann::json ChatRagLogger::responseToJson(const ChatRagResponseRecord& record
             {"raw_sample_first", attempt.raw_sample_first},
             {"raw_sample_last", attempt.raw_sample_last},
         });
+        if (attempt.usage_unavailable) {
+            attempts.back()["provider_usage"] = "unavailable";
+        } else {
+            attempts.back()["provider_usage"] = "reported";
+            attempts.back()["prompt_tokens"] = attempt.prompt_tokens;
+            attempts.back()["completion_tokens"] = attempt.completion_tokens;
+        }
         if (!attempt.raw_completion.empty()) {
             attempts.back()["raw_completion"] = attempt.raw_completion;
         }
@@ -182,13 +187,18 @@ nlohmann::json ChatRagLogger::responseToJson(const ChatRagResponseRecord& record
         {"worker_turn_total_ms", record.worker_turn_total_ms},
         {"generation_attempt_count", record.generation_attempt_count},
         {"generation_attempts", attempts},
-        {"prompt_tokens", record.prompt_tokens},
-        {"completion_tokens", record.completion_tokens},
         {"response_valid", record.response_valid},
         {"invalid_reason", record.invalid_reason},
         {"final_answer_chars", record.final_answer_chars},
         {"generation_max_tokens", record.generation_max_tokens},
     };
+    if (record.usage_unavailable) {
+        j["provider_usage"] = "unavailable";
+    } else {
+        j["provider_usage"] = "reported";
+        j["prompt_tokens"] = record.prompt_tokens;
+        j["completion_tokens"] = record.completion_tokens;
+    }
     if (!record.task_id.empty()) {
         j["task_id"] = record.task_id;
     }

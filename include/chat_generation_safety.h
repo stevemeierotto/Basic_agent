@@ -109,6 +109,7 @@ struct GenerationAttemptTelemetry {
     std::int64_t latency_ms = 0;
     std::int64_t prompt_tokens = 0;
     std::int64_t completion_tokens = 0;
+    bool usage_unavailable = false;
     std::string finish_reason;
     bool provider_ok = false;
     std::size_t raw_answer_chars = 0;

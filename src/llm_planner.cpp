@@ -418,8 +418,7 @@ void LLMPlanner::logGeneration(const Thoth::GenerationOutcome& outcome,
     fields.fallback_used = fallback_used;
     fields.kept_existing_plan = kept_existing_plan;
     fields.associated_generation_id = outcome.generation_id;
-    fields.context_overflow =
-        outcome.prompt_tokens + outcome.requested_max_tokens > 8192;
+    fields.context_overflow = reportedContextOverflow(outcome);
     Thoth::GenerationCallLog::append(outcome, fields);
 }
 

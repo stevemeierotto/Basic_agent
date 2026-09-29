@@ -715,7 +715,9 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
         const Thoth::GenerationOutcome generated = llm_->generateCall(prompt, numPredict, {}, call);
         Thoth::GenerationRecordFields fields;
         fields.associated_generation_id = generated.generation_id;
-        fields.context_overflow = generated.prompt_tokens + generated.requested_max_tokens > 8192;
+        fields.context_overflow = Thoth::reportedContextOverflow(generated);
+        fields.synthesis_observed_empty =
+            generated.ok && generated.provider_usage_reported && generated.text.empty();
         Thoth::GenerationCallLog::append(generated, fields);
         const std::string response = generated.ok ? generated.text
                                                    : std::string("Assistant: [Error] ") + generated.error;

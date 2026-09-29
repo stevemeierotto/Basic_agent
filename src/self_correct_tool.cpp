@@ -51,7 +51,7 @@ nlohmann::json SelfCorrectTool::execute(const nlohmann::json& input) const {
     std::string response = generated.ok ? generated.text : std::string("Assistant: [Error] ") + generated.error;
     Thoth::GenerationRecordFields fields;
     fields.associated_generation_id = generated.generation_id;
-    fields.context_overflow = generated.prompt_tokens + generated.requested_max_tokens > 8192;
+    fields.context_overflow = Thoth::reportedContextOverflow(generated);
 
     try {
         // Simple attempt to find JSON in response if it has preamble

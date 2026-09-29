@@ -59,8 +59,9 @@ InferenceGenerateResult runTrackedGeneration(LlmAttemptContext& ctx,
     GenerationAttemptTelemetry row;
     row.attempt = static_cast<int>(ctx.attempts.size()) + 1;
     row.latency_ms = latencyMs;
-    row.prompt_tokens = generated.token_usage.prompt_tokens;
-    row.completion_tokens = generated.token_usage.completion_tokens;
+    row.usage_unavailable = !generated.provider_usage_reported;
+    row.prompt_tokens = generated.provider_usage_reported ? generated.token_usage.prompt_tokens : 0;
+    row.completion_tokens = generated.provider_usage_reported ? generated.token_usage.completion_tokens : 0;
     row.finish_reason = generated.finish_reason;
     row.provider_ok = generated.ok;
     row.raw_answer_chars = generated.ok ? generated.text.size() : 0;

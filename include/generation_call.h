@@ -53,6 +53,8 @@ struct GenerationOutcome {
     std::int64_t completion_tokens = 0;
     std::int64_t total_tokens = 0;
     bool has_total_tokens = false;
+    /** False means provider usage is unavailable. Token integers are then not measurements. */
+    bool provider_usage_reported = false;
     std::string finish_reason;
     std::int64_t elapsed_ms = 0;
     GenerationCallContext context;
@@ -75,6 +77,13 @@ struct GenerationRecordFields {
     /** Provider generation this decision refers to. Same id as outcome.generation_id. */
     std::string associated_generation_id;
     bool context_overflow = false;
+    /** Completed provider text was empty. Not inferred from token counts. */
+    bool synthesis_observed_empty = false;
 };
+
+inline bool reportedContextOverflow(const GenerationOutcome& outcome) {
+    return outcome.provider_usage_reported
+        && outcome.prompt_tokens + static_cast<std::int64_t>(outcome.requested_max_tokens) > 8192;
+}
 
 } // namespace Thoth
