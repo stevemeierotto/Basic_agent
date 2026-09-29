@@ -925,6 +925,8 @@ void ExecutiveController::decide_transition() {
         attachEmbeddingSnapshot_unlocked(execution_context);
         execution_context.e2_strict_episode_log = e2_strict_episode_log_;
         execution_context.e2_eval_config = e2_eval_config_;
+        execution_context.task_id = mtcp_task_id_;
+        execution_context.session_id = session_id_;
     }
 
     for (const auto& [step_id, cached] : prefetched_completions) {
