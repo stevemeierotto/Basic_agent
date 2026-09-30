@@ -39,21 +39,28 @@ void StrategyEngine::processTrajectories() {
 
             std::vector<std::string> step_sequence;
             for (const auto& s : tj["steps"]) {
-                // Semantic Pattern Extraction: Tool + Step Type
-                std::string tool_name = s.value("tool", "none");
-                int type = s.value("type", 0);
-                
-                // We create a semantic key like "RETRIEVAL" or "TOOL:project_analyze"
-                if (tool_name != "none" && !tool_name.empty()) {
-                    step_sequence.push_back("TOOL:" + tool_name);
-                } else {
-                    // Map type enum to string for readability
-                    switch(type) {
-                        case 1: step_sequence.push_back("RETRIEVAL"); break;
-                        case 2: step_sequence.push_back("LLM"); break;
-                        default: step_sequence.push_back("STEP_" + std::to_string(type)); break;
+                if (!s.is_object()) {
+                    continue;
+                }
+                std::string label;
+                if (s.contains("tool") && s["tool"].is_string()) {
+                    const std::string tool_name = s["tool"].get<std::string>();
+                    if (!tool_name.empty() && tool_name != "none") {
+                        label = "TOOL:" + tool_name;
                     }
                 }
+                if (label.empty()) {
+                    if (!s.contains("type") || !s["type"].is_number_integer()) {
+                        continue;
+                    }
+                    const int type = s["type"].get<int>();
+                    switch (type) {
+                        case 1: label = "RETRIEVAL"; break;
+                        case 2: label = "LLM"; break;
+                        default: label = "STEP_" + std::to_string(type); break;
+                    }
+                }
+                step_sequence.push_back(std::move(label));
             }
 
             if (step_sequence.size() < 2) continue;

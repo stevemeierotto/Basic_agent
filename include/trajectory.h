@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 #include "plan.h"
@@ -21,6 +22,8 @@ namespace Thoth {
 struct RecordedStep {
     std::string step_id;
     std::string description;
+    /** Absent when an older stored step did not record a type. */
+    std::optional<StepType> type;
     nlohmann::json tool;
     nlohmann::json result;
     std::string error;

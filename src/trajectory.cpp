@@ -14,6 +14,9 @@ nlohmann::json RecordedStep::to_json() const {
     nlohmann::json j;
     j["step_id"] = step_id;
     j["description"] = description;
+    if (type.has_value()) {
+        j["type"] = static_cast<int>(*type);
+    }
     j["tool"] = tool;
     j["result"] = result;
     j["error"] = error;
@@ -26,6 +29,9 @@ RecordedStep RecordedStep::from_json(const nlohmann::json& j) {
     RecordedStep step;
     step.step_id = j.value("step_id", "");
     step.description = j.value("description", "");
+    if (j.contains("type") && j["type"].is_number_integer()) {
+        step.type = static_cast<StepType>(j["type"].get<int>());
+    }
     step.tool = j.value("tool", nlohmann::json::object());
     step.result = j.value("result", nlohmann::json::object());
     step.error = j.value("error", "");

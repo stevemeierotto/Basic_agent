@@ -1268,6 +1268,7 @@ void ExecutiveController::record_trajectory_step(const PlanStep& step, const Tho
     RecordedStep recorded;
     recorded.step_id = step.step_id;
     recorded.description = step.description;
+    recorded.type = step.type;
     recorded.tool = step.tool;
     recorded.result = result.data;
     recorded.error = result.error_message;
