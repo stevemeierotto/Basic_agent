@@ -782,7 +782,8 @@ void ExecutiveController::decide_transition() {
                 planning_time_ms_ += nowMs() - planStart;
                 sync_planning_tokens_unlocked();
                 lock.lock();
-                
+
+                const std::string retiredPlanId = current_plan_.plan_id;
                 current_plan_ = new_plan;
                 current_plan_.created_at_ms = nowMs();
                 current_plan_.updated_at_ms = current_plan_.created_at_ms;
@@ -796,6 +797,10 @@ void ExecutiveController::decide_transition() {
                 current_trajectory_.embedding = goal_embedding_;
 
                 persist_current_plan_unlocked();
+                if (memory_ && !retiredPlanId.empty() && !current_plan_.plan_id.empty()
+                    && retiredPlanId != current_plan_.plan_id) {
+                    memory_->deleteActivePlan(retiredPlanId);
+                }
                 transition_to_unlocked(ControllerState::IDLE);
                 
                 lock.unlock();
