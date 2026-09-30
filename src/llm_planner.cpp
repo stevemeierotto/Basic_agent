@@ -65,6 +65,47 @@ std::string formatStrategyContext(const Memory::CognateStrategyRecord& strategy,
     return oss.str();
 }
 
+} // namespace
+
+namespace Thoth {
+
+GeneratedPlanAssessment assessGeneratedPlan(const std::string& llm_response,
+                                            const std::string& plan_id,
+                                            const std::string& prompt_goal,
+                                            bool allow_tool_steps) {
+    GeneratedPlanAssessment assessment;
+    std::string parser_reason;
+    auto parsed = PlanParser::parse(llm_response, plan_id, &parser_reason);
+    if (!parsed.has_value()) {
+        assessment.reason = parser_reason;
+        return assessment;
+    }
+
+    Plan candidate = parsed.value();
+    candidate.goal = prompt_goal;
+    auto validation = PlanValidator::validateAndRepair(candidate, allow_tool_steps);
+    assessment.depends_on_repaired = validation.depends_on_repaired;
+    if (validation.valid) {
+        assessment.plan = candidate;
+        assessment.reason = validation.depends_on_repaired ? "depends_on wired" : "ok";
+        return assessment;
+    }
+    assessment.reason = validation.reason;
+    return assessment;
+}
+
+std::string buildPlannerRetryPrompt(const std::string& prompt,
+                                    const std::string& validation_reason,
+                                    const std::string& previous_response) {
+    return prompt + "\n\nERROR: " + validation_reason
+        + ". Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\nPrevious Response:\n"
+        + previous_response;
+}
+
+}  // namespace Thoth
+
+namespace {
+
 std::optional<Plan> parsePlanWithValidation(const std::string& llm_response,
                                             const std::string& plan_id,
                                             const std::string& prompt_goal,
@@ -74,25 +115,11 @@ std::optional<Plan> parsePlanWithValidation(const std::string& llm_response,
                                             std::string& validation_reason) {
     depends_on_repaired = false;
     fallback_used = false;
-
-    auto parsed = Thoth::PlanParser::parse(llm_response, plan_id);
-    if (!parsed.has_value()) {
-        validation_reason = "JSON parse failed";
-        return std::nullopt;
-    }
-
-    Plan candidate = parsed.value();
-    candidate.goal = prompt_goal;
-
-    auto validation = Thoth::PlanValidator::validateAndRepair(candidate, allow_tool_steps);
-    depends_on_repaired = validation.depends_on_repaired;
-    if (validation.valid) {
-        validation_reason = validation.depends_on_repaired ? "depends_on wired" : "ok";
-        return candidate;
-    }
-
-    validation_reason = validation.reason;
-    return std::nullopt;
+    const Thoth::GeneratedPlanAssessment assessment =
+        Thoth::assessGeneratedPlan(llm_response, plan_id, prompt_goal, allow_tool_steps);
+    depends_on_repaired = assessment.depends_on_repaired;
+    validation_reason = assessment.reason;
+    return assessment.plan;
 }
 
 Plan finalizePlanOrFallback(const std::string& plan_id,
@@ -255,9 +282,7 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
             "First plan attempt failed (" + validation_reason + "), retrying...",
             {{"reason", validation_reason}});
 
-        std::string retry_prompt = prompt + "\n\nERROR: " + validation_reason +
-            ". Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\nPrevious Response:\n" +
-            llm_response;
+        std::string retry_prompt = Thoth::buildPlannerRetryPrompt(prompt, validation_reason, llm_response);
         Thoth::GenerationCallContext retry = call;
         retry.call_type = "plan_retry";
         retry.attempt = 1;
@@ -340,9 +365,7 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
             "First revision attempt failed (" + validation_reason + "), retrying...",
             {{"reason", validation_reason}});
 
-        std::string retry_prompt = prompt + "\n\nERROR: " + validation_reason +
-            ". Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\nPrevious Response:\n" +
-            llm_response;
+        std::string retry_prompt = Thoth::buildPlannerRetryPrompt(prompt, validation_reason, llm_response);
         Thoth::GenerationCallContext retry = call;
         retry.call_type = "revision_retry";
         retry.attempt = 1;

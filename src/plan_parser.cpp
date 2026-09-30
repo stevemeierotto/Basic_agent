@@ -51,9 +51,14 @@ std::string PlanParser::extractJsonString(const std::string& raw_output) {
     return raw_output.substr(start_pos, end_pos - start_pos + 1);
 }
 
-std::optional<Plan> PlanParser::parse(const std::string& raw_llm_output, const std::string& plan_id) {
+std::optional<Plan> PlanParser::parse(const std::string& raw_llm_output,
+                                         const std::string& plan_id,
+                                         std::string* failure_reason) {
     DecisionTraceLogger logger;
     auto log_failure = [&](const std::string& reason, const std::string& bad_json) {
+        if (failure_reason != nullptr) {
+            *failure_reason = reason;
+        }
         DecisionTrace trace = logger.startTrace("plan_parsing", raw_llm_output.length());
         logger.addStage(trace, "parse_failed", false, reason, {
             {"input", raw_llm_output},
@@ -62,6 +67,9 @@ std::optional<Plan> PlanParser::parse(const std::string& raw_llm_output, const s
         logger.finishTrace(trace, false, "Plan parsing failed");
         logger.writeTrace(trace);
     };
+    if (failure_reason != nullptr) {
+        failure_reason->clear();
+    }
 
     std::string json_str = extractJsonString(raw_llm_output);
     json parsed_json;

@@ -15,6 +15,27 @@
 #include "prompt_factory.h"
 #include "generation_call.h"
 
+#include <optional>
+
+namespace Thoth {
+
+struct GeneratedPlanAssessment {
+    std::optional<Plan> plan;
+    std::string reason;
+    bool depends_on_repaired = false;
+};
+
+GeneratedPlanAssessment assessGeneratedPlan(const std::string& llm_response,
+                                            const std::string& plan_id,
+                                            const std::string& prompt_goal,
+                                            bool allow_tool_steps);
+
+std::string buildPlannerRetryPrompt(const std::string& prompt,
+                                    const std::string& validation_reason,
+                                    const std::string& previous_response);
+
+}  // namespace Thoth
+
 /**
  * @brief Concrete implementation of IPlanner that generates plans using an LLM.
  */

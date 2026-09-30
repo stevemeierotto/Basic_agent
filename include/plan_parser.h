@@ -37,7 +37,9 @@ public:
      * @return A std::optional<Plan> containing the valid Plan if parsing and validation
      *         succeed, otherwise std::nullopt.
      */
-    static std::optional<Plan> parse(const std::string& raw_llm_output, const std::string& plan_id);
+    static std::optional<Plan> parse(const std::string& raw_llm_output,
+                                     const std::string& plan_id,
+                                     std::string* failure_reason = nullptr);
 
 private:
     /**
