@@ -84,5 +84,7 @@ struct Plan {
     int64_t updated_at_ms = 0;
 
     nlohmann::json to_json() const;
+    /** Planner-boundary view: root `plan` array and string `step_type`. Not the stored plan. */
+    nlohmann::json toLlmFacingJson() const;
     static Plan from_json(const nlohmann::json& j);
 };

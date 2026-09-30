@@ -299,7 +299,7 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
     Thoth::PlannerPromptMetrics prompt_metrics;
     std::string prompt = prompt_factory_->buildRevisionPrompt(
         prompt_goal,
-        existing_plan.to_json().dump(),
+        existing_plan.toLlmFacingJson().dump(),
         step_result.dump(),
         &prompt_metrics);
 
@@ -400,7 +400,7 @@ std::string LLMPlanner::buildRevisionPromptText(const Plan& existing_plan,
     const auto [prompt_goal, unused] = Thoth::splitPlanReuseInjection(existing_plan.goal);
     (void)unused;
     return prompt_factory_->buildRevisionPrompt(
-        prompt_goal, existing_plan.to_json().dump(), step_result.dump(), nullptr);
+        prompt_goal, existing_plan.toLlmFacingJson().dump(), step_result.dump(), nullptr);
 }
 
 std::string LLMPlanner::revisionWrapperSha256(const Plan& existing_plan,

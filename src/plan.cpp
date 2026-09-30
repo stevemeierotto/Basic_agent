@@ -7,6 +7,7 @@
  */
 
 #include "../include/plan.h"
+#include "../include/goal_text_utils.h"
 
 namespace {
 
@@ -88,6 +89,26 @@ PlanStep PlanStep::from_json(const nlohmann::json& j) {
     step.completed_at_ms = j.value("completed_at_ms", static_cast<std::int64_t>(0));
     step.depends_on = j.value("depends_on", std::vector<std::string>());
     return step;
+}
+
+nlohmann::json Plan::toLlmFacingJson() const {
+    nlohmann::json steps = nlohmann::json::array();
+    for (const auto& step : this->steps) {
+        nlohmann::json item = nlohmann::json::object();
+        if (!step.step_id.empty()) {
+            item["step_id"] = step.step_id;
+        }
+        item["step_type"] = Thoth::stepTypeLabel(step.type);
+        item["description"] = step.description;
+        if (!step.depends_on.empty()) {
+            item["depends_on"] = step.depends_on;
+        }
+        if (!step.payload.is_null()) {
+            item["payload"] = step.payload;
+        }
+        steps.push_back(std::move(item));
+    }
+    return nlohmann::json{{"plan", std::move(steps)}};
 }
 
 nlohmann::json Plan::to_json() const {
