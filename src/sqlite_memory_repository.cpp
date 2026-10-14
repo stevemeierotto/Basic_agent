@@ -771,11 +771,26 @@ bool SQLiteMemoryRepository::storeStepMetric(const StepMetricRecord& metric) {
     } catch (...) { return false; }
 }
 
+void SQLiteMemoryRepository::setActivePlanCommitObserverForTests(ActivePlanCommitObserver observer) {
+    std::lock_guard<std::mutex> lock(active_plan_observer_mu_);
+    active_plan_observer_ = std::move(observer);
+}
+
 bool SQLiteMemoryRepository::storeActivePlan(const ActivePlanRecord& plan) {
+    // Copy the observer out before any SQLite work. The callback runs later,
+    // without this mutex, so it cannot deadlock against a nested install.
+    ActivePlanCommitObserver observer;
+    {
+        std::lock_guard<std::mutex> lock(active_plan_observer_mu_);
+        observer = active_plan_observer_;
+    }
+
+    bool statement_done = false;
+    bool autocommit_after_step = false;
     try {
         const char* sql = "INSERT OR REPLACE INTO active_plans (plan_id, session_id, goal, steps_json, current_index, controller_state, created_at_ms, updated_at_ms) "
                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
-        sqlite3_stmt* stmt;
+        sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
 
         sqlite3_bind_text(stmt, 1, plan.plan_id.c_str(), -1, SQLITE_STATIC);
@@ -787,10 +802,31 @@ bool SQLiteMemoryRepository::storeActivePlan(const ActivePlanRecord& plan) {
         sqlite3_bind_int64(stmt, 7, plan.created_at_ms);
         sqlite3_bind_int64(stmt, 8, plan.updated_at_ms);
 
-        bool success = (sqlite3_step(stmt) == SQLITE_DONE);
+        // Autocommit INSERT commits inside sqlite3_step. SQLITE_DONE means that
+        // commit has finished. sqlite3_get_autocommit() != 0 then confirms the
+        // connection is not still inside an explicit transaction.
+        statement_done = (sqlite3_step(stmt) == SQLITE_DONE);
+        autocommit_after_step = db_ && db_->handle && sqlite3_get_autocommit(db_->handle) != 0;
         sqlite3_finalize(stmt);
-        return success;
-    } catch (...) { return false; }
+    } catch (...) {
+        return false;
+    }
+
+    if (!statement_done) return false;
+
+    // Statement is finalized. A second connection can read the row. Production
+    // callers with a null observer skip this block entirely.
+    if (autocommit_after_step && observer) {
+        try {
+            observer(plan);
+        } catch (const std::exception& ex) {
+            std::cerr << "[SQLiteMemoryRepository] active-plan commit observer failed: "
+                      << ex.what() << "\n";
+        } catch (...) {
+            std::cerr << "[SQLiteMemoryRepository] active-plan commit observer failed\n";
+        }
+    }
+    return true;
 }
 
 std::optional<MemoryRepository::ActivePlanRecord> SQLiteMemoryRepository::getActivePlan(const std::string& session_id) {

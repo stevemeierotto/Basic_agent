@@ -19,6 +19,7 @@
 #include "benchmark_environment.h"
 #include "episode_event_channel.h"
 #include "corpus_create.h"
+#include "sqlite_memory_repository.h"
 #include "json.hpp"
 
 #include <optional>
@@ -74,6 +75,10 @@ public:
 
     /** E2-D3-05: testing only — production episode channel after plugin init. */
     Thoth::InProcessEpisodeEventChannel* episodeEventChannelForTests() const;
+
+    /** Reliability harness only. No effect on production execution when unused. */
+    void setActivePlanCommitObserverForTests(
+        Thoth::SQLiteMemoryRepository::ActivePlanCommitObserver observer);
 
     // --- Cognate UI Integration ---
     std::vector<Memory::CognateStrategyRecord> getAllStrategies() const;

@@ -41,6 +41,70 @@ static int64_t nowMs() {
         .count();
 }
 
+static bool payloadNamesTool(const nlohmann::json& payload) {
+    if (!payload.is_object()) {
+        return false;
+    }
+    if (!payload.value("tool", std::string()).empty()) {
+        return true;
+    }
+    return !payload.value("tool_name", std::string()).empty();
+}
+
+static bool isOrdinaryReadOnlyRetrieval(const PlanStep& step) {
+    if (step.type != StepType::RETRIEVAL) {
+        return false;
+    }
+    if (step.result.is_object() || step.result.is_array()) {
+        if (!step.result.empty()) {
+            return false;
+        }
+    } else if (step.result.is_string()) {
+        if (!step.result.get<std::string>().empty()) {
+            return false;
+        }
+    } else if (!step.result.is_null()) {
+        return false;
+    }
+    if (!step.payload.is_null() && !step.payload.is_object()) {
+        return false;
+    }
+    if (payloadNamesTool(step.payload)) {
+        return false;
+    }
+    if (step.tool.is_object()) {
+        if (!step.tool.empty()) {
+            return false;
+        }
+    } else if (!step.tool.is_null()) {
+        return false;
+    }
+    return true;
+}
+
+static bool stepIsInFlight(const std::string& step_id,
+                    const std::vector<std::string>& active_ids,
+                    const std::vector<std::string>& prefetch_ids) {
+    return std::find(active_ids.begin(), active_ids.end(), step_id) != active_ids.end()
+        || std::find(prefetch_ids.begin(), prefetch_ids.end(), step_id) != prefetch_ids.end();
+}
+
+static void rememberPriorRunning(PlanStep& step) {
+    constexpr const char* kMarker = "[resume_prior_status=RUNNING]";
+    if (step.reasoning.find(kMarker) == std::string::npos) {
+        if (!step.reasoning.empty()) {
+            step.reasoning += " ";
+        }
+        step.reasoning += kMarker;
+    }
+}
+
+static bool planStatusIsTerminal(PlanStatus status) {
+    return status == PlanStatus::COMPLETED
+        || status == PlanStatus::FAILED
+        || status == PlanStatus::ABORTED;
+}
+
 static void cognatePlanRecordFromPlan(const Plan& plan, MemoryRepository::CognatePlanRecord& record) {
     record.plan_id = plan.plan_id;
     record.goal = plan.goal;
@@ -521,6 +585,10 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
         }
     }
 
+    nlohmann::json failureMetadata;
+    std::vector<std::string> requeued;
+    bool failClosed = false;
+    bool startLoop = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stop_requested_ = false;
@@ -528,21 +596,117 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
         current_plan_ = plan;
         current_plan_.updated_at_ms = nowMs();
         benchmark_attribution_ = {};
-        
-        // Restore session ID if it's not set but exists in the plan's context
-        // (Note: active_plans table now has session_id, but the Plan struct doesn't yet have it as a direct member)
-        // For now, we rely on the controller already having session_id set by the AgentInterface.
-        
+
+        // A stored terminal plan is left unchanged, including any orphaned
+        // RUNNING step. Reconciliation applies only to an unfinished plan.
+        if (!planStatusIsTerminal(current_plan_.status)) {
+            failClosed = reconcileOrphanedRunningSteps_unlocked(requeued, failureMetadata);
+        }
+
         update_goal_embedding_unlocked(current_plan_.goal);
         refresh_goal_state_embeddings_unlocked();
+
+        if (failClosed || current_plan_.status == PlanStatus::FAILED) {
+            state_ = ControllerState::FAILED;
+            running_ = false;
+        } else if (current_plan_.status == PlanStatus::ABORTED) {
+            state_ = ControllerState::ABORTED;
+            running_ = false;
+        } else if (current_plan_.status == PlanStatus::COMPLETED) {
+            state_ = ControllerState::COMPLETED;
+            running_ = false;
+        } else {
+            state_ = ControllerState::IDLE;
+            running_ = true;
+            startLoop = true;
+        }
         persist_current_plan_unlocked();
-        
-        state_ = ControllerState::IDLE;
-        running_ = true;
-        loop_thread_ = std::make_unique<std::thread>([this]() {
-            run_loop();
+    }
+
+    if (failClosed) {
+        emit_event(EventType::PLAN_FAILED, "", failureMetadata);
+        return;
+    }
+    for (const auto& stepId : requeued) {
+        emit_event(EventType::STATE_CHANGED, stepId, {
+            {"resume_reconciliation", "retrieval_requeued"},
+            {"prior_status", "RUNNING"},
+            {"success", true}
         });
     }
+    if (startLoop) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!stop_requested_ && !loop_thread_) {
+            loop_thread_ = std::make_unique<std::thread>([this]() {
+                run_loop();
+            });
+        }
+    }
+}
+
+bool ExecutiveController::reconcileOrphanedRunningSteps_unlocked(std::vector<std::string>& requeued_step_ids,
+                                                                nlohmann::json& failure_metadata) {
+    if (planStatusIsTerminal(current_plan_.status)) {
+        return false;
+    }
+    std::vector<PlanStep*> orphans;
+    for (auto& step : current_plan_.steps) {
+        if (step.status != StepStatus::RUNNING) {
+            continue;
+        }
+        if (stepIsInFlight(step.step_id, active_step_ids_, prefetch_step_ids_)) {
+            continue;
+        }
+        orphans.push_back(&step);
+    }
+    if (orphans.empty()) {
+        return false;
+    }
+
+    bool unsafe = false;
+    for (const PlanStep* step : orphans) {
+        if (!isOrdinaryReadOnlyRetrieval(*step)) {
+            unsafe = true;
+            break;
+        }
+    }
+
+    if (unsafe) {
+        failure_metadata = {
+            {"error", "interrupted_step_not_replayed"},
+            {"prior_status", "RUNNING"},
+            {"steps", nlohmann::json::array()}
+        };
+        for (PlanStep* step : orphans) {
+            rememberPriorRunning(*step);
+            step->result = {
+                {"error", "interrupted_step_not_replayed"},
+                {"prior_status", "RUNNING"},
+                {"step_type", static_cast<int>(step->type)}
+            };
+            step->status = StepStatus::FAILED;
+            step->completed_at_ms = nowMs();
+            failure_metadata["steps"].push_back({
+                {"step_id", step->step_id},
+                {"step_type", static_cast<int>(step->type)},
+                {"prior_status", "RUNNING"},
+                {"error", "interrupted_step_not_replayed"}
+            });
+        }
+        current_plan_.status = PlanStatus::FAILED;
+        current_plan_.updated_at_ms = nowMs();
+        return true;
+    }
+
+    for (PlanStep* step : orphans) {
+        rememberPriorRunning(*step);
+        step->status = StepStatus::PENDING;
+        step->started_at_ms = 0;
+        step->completed_at_ms = 0;
+        requeued_step_ids.push_back(step->step_id);
+    }
+    current_plan_.updated_at_ms = nowMs();
+    return false;
 }
 
 std::optional<Plan> ExecutiveController::get_resumable_plan() const {

@@ -1,6 +1,8 @@
 #pragma once
 #include "memory_repository.h"
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace Thoth {
@@ -88,6 +90,27 @@ public:
     std::optional<ActivePlanRecord> getActivePlan(const std::string& session_id) override;
     bool deleteActivePlan(const std::string& plan_id) override;
 
+    /**
+     * Test-only hook for the reliability harness.
+     *
+     * The callback is inactive unless a test installs one. It runs only after
+     * an autocommit INSERT OR REPLACE into active_plans has reached
+     * SQLITE_DONE and sqlite3_get_autocommit confirms the connection is no
+     * longer inside a transaction, and only after sqlite3_finalize has
+     * destroyed the statement. The write is durable to the WAL before the
+     * callback. The callback is not invoked when the statement fails, and it
+     * is not invoked when the connection is inside an explicit transaction
+     * (that insert is not committed yet).
+     *
+     * The repository mutex that guards this pointer is not held during the
+     * callback. Memory::storeActivePlan may still hold its own mutex, so the
+     * callback must not re-enter Memory or this SQLite connection. Exceptions
+     * from the callback are caught and do not change the true/false result of
+     * the committed write.
+     */
+    using ActivePlanCommitObserver = std::function<void(const ActivePlanRecord&)>;
+    void setActivePlanCommitObserverForTests(ActivePlanCommitObserver observer);
+
     // Cognate Phase 2.1
     bool saveCognatePlan(const CognatePlanRecord& record) override;
     std::optional<CognatePlanRecord> loadCognatePlan(const std::string& plan_id) override;
@@ -122,6 +145,8 @@ private:
     struct DBHandle;
     std::unique_ptr<DBHandle> db_;
     std::vector<WarmMemoryRecord> getAllRecentWarmMemory(int limit);
+    mutable std::mutex active_plan_observer_mu_;
+    ActivePlanCommitObserver active_plan_observer_;
 };
 
 } // namespace Thoth

@@ -171,6 +171,10 @@ protected:
     void record_trajectory_step(const PlanStep& step, const Thoth::StepResult& result);
     float calculate_trajectory_score(bool plan_completed_successfully);
     void persist_current_plan_unlocked();
+    /** Resume-only. Terminal plans are left unchanged. Returns true when an
+     *  orphaned RUNNING step on an unfinished plan must fail closed. */
+    bool reconcileOrphanedRunningSteps_unlocked(std::vector<std::string>& requeued_step_ids,
+                                                nlohmann::json& failure_metadata);
     void persist_problem_state_unlocked();
 
     // The main loop — runs until COMPLETED, ABORTED, or FAILED

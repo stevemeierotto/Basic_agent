@@ -315,6 +315,13 @@ void BasicAgentPlugin::setSessionId(const std::string& sessionId) {
     if (indexManager) indexManager->setSessionId(sessionId);
 }
 
+void BasicAgentPlugin::setActivePlanCommitObserverForTests(
+    Thoth::SQLiteMemoryRepository::ActivePlanCommitObserver observer) {
+    if (auto* repo = memory.getSQLiteRepo()) {
+        repo->setActivePlanCommitObserverForTests(std::move(observer));
+    }
+}
+
 void BasicAgentPlugin::checkResumablePlan() {
     if (!controller) return;
     auto plan = controller->get_resumable_plan();
