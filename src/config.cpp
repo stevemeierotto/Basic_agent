@@ -34,7 +34,7 @@ Config::Config()
       allow_file_io(true),
       wq(0.4f),
       wd(0.4f),
-      wt(0.2f),
+      wt(-0.05f),
       keyword_weight(0.3f),
       graph_weight(0.3f),
       synthesis_max_context_chars(
