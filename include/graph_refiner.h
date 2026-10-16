@@ -25,6 +25,11 @@ public:
      * @brief Reinforces or penalizes edges based on the success of a completed plan.
      */
     void refineFromTrajectory(const std::vector<Memory::Edge>& trajectory_edges, float success_score);
+    // Same arithmetic as refineFromTrajectory, without writing. The controller
+    // commits the returned edges in one transaction with the consumed marker.
+    std::vector<Memory::Edge> computeReinforcedEdges(
+        const std::vector<Memory::Edge>& trajectory_edges,
+        float success_score) const;
 
 private:
     std::shared_ptr<Memory> memory_;

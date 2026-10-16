@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <ctime>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 
 using json = nlohmann::json;
@@ -227,63 +228,136 @@ std::vector<Memory::CognateTrajectoryRecord> Memory::retrieveSimilarTrajectories
 
 void Memory::processMemoryAging() {
     std::unique_lock lock(mtx);
-    if (!repo) return;
+    applyAgingLocked(false, nullptr);
+}
+
+bool Memory::applyAgingLocked(bool transactional,
+                              const Thoth::MemoryRepository::ActivePlanRecord* marker) {
+    if (!repo) return false;
+    if (transactional && !repo->beginTransaction()) return false;
 
     int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count();
-    
+
     constexpr int64_t ONE_DAY_MS = 1000LL * 60 * 60 * 24;
     const int64_t THIRTY_DAYS_MS = 30LL * ONE_DAY_MS;
 
+    struct TierChange {
+        size_t index = 0;
+        int tier = 0;
+    };
+    std::vector<TierChange> pending_tiers;
     bool index_changed = false;
+    bool ok = true;
 
-    // 1. Trajectory Aging
-    for (auto& entry : trajectory_index_) {
-        int old_tier = entry.tier;
-        int64_t age = now_ms - entry.created_at;
-
+    for (size_t i = 0; i < trajectory_index_.size(); ++i) {
+        auto& entry = trajectory_index_[i];
+        const int old_tier = entry.tier;
+        const int64_t age = now_ms - entry.created_at;
+        int new_tier = TIER_COLD;
         if (age < ONE_DAY_MS) {
-            entry.tier = TIER_HOT;
+            new_tier = TIER_HOT;
+        } else if (entry.success_score >= 0.8f || entry.usage_count > 5) {
+            new_tier = TIER_WARM;
         }
-        else if (entry.success_score >= 0.8f || entry.usage_count > 5) {
-            entry.tier = TIER_WARM;
+        if (new_tier == old_tier) continue;
+        index_changed = true;
+        auto traj = repo->loadTrajectory(entry.trajectory_id);
+        if (!traj) continue;
+        traj->tier = new_tier;
+        if (transactional) {
+            if (!repo->saveTrajectory(*traj)) {
+                ok = false;
+                break;
+            }
+            pending_tiers.push_back(TierChange{i, new_tier});
+        } else {
+            entry.tier = new_tier;
+            repo->saveTrajectory(*traj);
         }
-        else {
-            entry.tier = TIER_COLD;
-        }
+    }
 
-        if (entry.tier != old_tier) {
-            index_changed = true;
-            auto traj = repo->loadTrajectory(entry.trajectory_id);
-            if (traj) {
-                traj->tier = entry.tier;
-                repo->saveTrajectory(*traj);
+    if (ok) {
+        auto edges = repo->getAllEdges();
+        for (auto& edge : edges) {
+            edge.weight *= 0.995f;
+            if (now_ms - edge.last_used_ms > THIRTY_DAYS_MS) {
+                edge.weight *= 0.97f;
+            }
+            if (edge.weight < 0.02f) {
+                if (transactional) {
+                    if (!repo->deleteEdge(edge.from_id, edge.to_id)) {
+                        ok = false;
+                        break;
+                    }
+                } else {
+                    repo->deleteEdge(edge.from_id, edge.to_id);
+                }
+            } else if (transactional) {
+                if (!repo->addEdge(edge)) {
+                    ok = false;
+                    break;
+                }
+            } else {
+                repo->addEdge(edge);
             }
         }
     }
 
-    // 2. Graph Memory Aging (Phase 5.6)
-    auto edges = repo->getAllEdges();
-    for (auto& edge : edges) {
-        // Global Decay
-        edge.weight *= 0.995f;
-
-        // Frequency-Based (Dormancy) Penalty
-        if (now_ms - edge.last_used_ms > THIRTY_DAYS_MS) {
-            edge.weight *= 0.97f;
-        }
-
-        // Pruning
-        if (edge.weight < 0.02f) {
-            repo->deleteEdge(edge.from_id, edge.to_id);
-        } else {
-            repo->addEdge(edge); // Update weight
+    if (ok && marker && !repo->storeActivePlan(*marker)) {
+        ok = false;
+    }
+    if (ok && transactional) {
+        if (const char* env = std::getenv("THOTH_INJECT_AGING_COMMIT_FAIL")) {
+            if (std::string(env) == "1") ok = false;
         }
     }
 
-    if (index_changed) {
+    if (transactional) {
+        if (!ok) {
+            repo->rollback();
+            return false;
+        }
+        if (!repo->commit()) return false;
+        for (const auto& change : pending_tiers) {
+            trajectory_index_[change.index].tier = change.tier;
+        }
+    }
+
+    if (index_changed && ok) {
         std::cout << "[Memory] Aging process completed. Tiers updated.\n";
     }
+    return ok;
+}
+
+bool Memory::commitReinforcedPlan(const std::vector<Edge>& edges,
+                                  const Thoth::MemoryRepository::ActivePlanRecord& plan) {
+    std::unique_lock lock(mtx);
+    if (!repo) return false;
+    if (!repo->beginTransaction()) return false;
+    for (const auto& edge : edges) {
+        if (!repo->addEdge(edge)) {
+            repo->rollback();
+            return false;
+        }
+    }
+    if (!repo->storeActivePlan(plan)) {
+        repo->rollback();
+        return false;
+    }
+    if (const char* env = std::getenv("THOTH_INJECT_GRAPH_COMMIT_FAIL")) {
+        if (std::string(env) == "1") {
+            repo->rollback();
+            return false;
+        }
+    }
+    if (!repo->commit()) return false;
+    return true;
+}
+
+bool Memory::commitHistoryStoreAging(const Thoth::MemoryRepository::ActivePlanRecord& plan) {
+    std::unique_lock lock(mtx);
+    return applyAgingLocked(true, &plan);
 }
 
 void Memory::loadTrajectoryIndex() {
@@ -678,9 +752,10 @@ bool Memory::clearPlanEmbeddings(int version) {
     return repo->clearPlanEmbeddings(version);
 }
 
-void Memory::storePastPlan(const PastPlanRecord& plan) {
+bool Memory::storePastPlan(const PastPlanRecord& plan) {
     std::unique_lock lock(mtx);
-    if (repo) repo->storePastPlan(plan, 2);
+    if (!repo) return false;
+    return repo->storePastPlan(plan, 2);
 }
 
 std::vector<Memory::PastPlanRecord> Memory::getAllPastPlans() const {
@@ -694,9 +769,10 @@ void Memory::storeStepMetric(const Thoth::MemoryRepository::StepMetricRecord& me
     if (repo) repo->storeStepMetric(metric);
 }
 
-void Memory::storeActivePlan(const Thoth::MemoryRepository::ActivePlanRecord& plan) {
+bool Memory::storeActivePlan(const Thoth::MemoryRepository::ActivePlanRecord& plan) {
     std::unique_lock lock(mtx);
-    if (repo) repo->storeActivePlan(plan);
+    if (!repo) return false;
+    return repo->storeActivePlan(plan);
 }
 
 std::optional<Thoth::MemoryRepository::ActivePlanRecord> Memory::getActivePlan(const std::string& session_id) const {
@@ -705,9 +781,10 @@ std::optional<Thoth::MemoryRepository::ActivePlanRecord> Memory::getActivePlan(c
     return repo->getActivePlan(session_id);
 }
 
-void Memory::deleteActivePlan(const std::string& plan_id) {
+bool Memory::deleteActivePlan(const std::string& plan_id) {
     std::unique_lock lock(mtx);
-    if (repo) repo->deleteActivePlan(plan_id);
+    if (!repo) return false;
+    return repo->deleteActivePlan(plan_id);
 }
 
 bool Memory::saveCognatePlan(const CognatePlanRecord& record) {

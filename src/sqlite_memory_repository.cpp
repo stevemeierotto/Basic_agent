@@ -47,6 +47,7 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
     // transaction open and poisons every subsequent BEGIN. A busy timeout plus
     // WAL journaling let writers wait briefly and retry instead of failing.
     sqlite3_busy_timeout(db_->handle, 5000);
+    sqlite3_set_authorizer(db_->handle, &SQLiteMemoryRepository::authorizeConnection, this);
     sqlite3_exec(db_->handle, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
     sqlite3_exec(db_->handle, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
 
@@ -280,25 +281,54 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
     }
 }
 
-SQLiteMemoryRepository::~SQLiteMemoryRepository() = default;
+SQLiteMemoryRepository::~SQLiteMemoryRepository() {
+    if (db_ && db_->handle && sqlite3_get_autocommit(db_->handle) == 0) {
+        sqlite3_exec(db_->handle, "ROLLBACK;", nullptr, nullptr, nullptr);
+    }
+}
+
+int SQLiteMemoryRepository::authorizeConnection(void* user, int, const char*, const char*,
+                                                const char*, const char*) {
+    auto* self = static_cast<SQLiteMemoryRepository*>(user);
+    if (!self) {
+        return SQLITE_OK;
+    }
+    std::lock_guard<std::mutex> lock(self->transaction_mu_);
+    if (self->transaction_held_ && std::this_thread::get_id() != self->transaction_owner_) {
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+void SQLiteMemoryRepository::clearTransactionOwnership() {
+    std::lock_guard<std::mutex> lock(transaction_mu_);
+    transaction_held_ = false;
+}
 
 bool SQLiteMemoryRepository::beginTransaction() {
     if (!db_ || !db_->handle) return false;
-    // Self-heal a poisoned connection: if a prior transaction was left open
-    // (e.g. a COMMIT that failed and was never rolled back) the connection is
-    // no longer in autocommit mode. A nested BEGIN would fail instantly
-    // ("cannot start a transaction within a transaction"), permanently
-    // blocking consolidation. Roll the stale transaction back first.
+    // An open transaction belongs to its owner. Rolling it back here would let
+    // an unrelated caller discard graph or aging work. Refuse instead.
     if (sqlite3_get_autocommit(db_->handle) == 0) {
-        std::cerr << "[SQLiteMemoryRepository] Rolling back stale open transaction before BEGIN.\n";
-        sqlite3_exec(db_->handle, "ROLLBACK;", nullptr, nullptr, nullptr);
+        std::cerr << "[SQLiteMemoryRepository] Refusing BEGIN while a transaction is open.\n";
+        return false;
     }
-    return sqlite3_exec(db_->handle, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr) == SQLITE_OK;
+    {
+        std::lock_guard<std::mutex> lock(transaction_mu_);
+        transaction_owner_ = std::this_thread::get_id();
+        transaction_held_ = true;
+    }
+    if (sqlite3_exec(db_->handle, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        clearTransactionOwnership();
+        return false;
+    }
+    return true;
 }
 
 bool SQLiteMemoryRepository::commit() {
     if (!db_ || !db_->handle) return false;
     if (sqlite3_exec(db_->handle, "COMMIT;", nullptr, nullptr, nullptr) == SQLITE_OK) {
+        clearTransactionOwnership();
         return true;
     }
     // COMMIT failed (e.g. SQLITE_BUSY). Leaving the transaction open would
@@ -310,6 +340,7 @@ bool SQLiteMemoryRepository::commit() {
     if (sqlite3_get_autocommit(db_->handle) == 0) {
         sqlite3_exec(db_->handle, "ROLLBACK;", nullptr, nullptr, nullptr);
     }
+    clearTransactionOwnership();
     return false;
 }
 
@@ -318,9 +349,13 @@ bool SQLiteMemoryRepository::rollback() {
     // No-op if no transaction is active, otherwise SQLite returns a harmless
     // but noisy "cannot rollback - no transaction is active" error.
     if (sqlite3_get_autocommit(db_->handle) != 0) {
+        clearTransactionOwnership();
         return true;
     }
-    return sqlite3_exec(db_->handle, "ROLLBACK;", nullptr, nullptr, nullptr) == SQLITE_OK;
+    const bool rolled_back =
+        sqlite3_exec(db_->handle, "ROLLBACK;", nullptr, nullptr, nullptr) == SQLITE_OK;
+    clearTransactionOwnership();
+    return rolled_back;
 }
 
 bool SQLiteMemoryRepository::createSession(const std::string& sessionId, int64_t createdAtMs) {
@@ -552,7 +587,16 @@ bool SQLiteMemoryRepository::storePastPlan(const PastPlanRecord& plan, int versi
         sqlite3_bind_double(stmt, 4, plan.success_score);
         sqlite3_bind_int64(stmt, 5, plan.duration_ms);
         sqlite3_bind_int(stmt, 6, plan.failure_count);
-        sqlite3_bind_blob(stmt, 7, plan.goal_embedding.data(), static_cast<int>(plan.goal_embedding.size() * sizeof(float)), SQLITE_STATIC);
+        // An empty vector has no buffer. Binding that pointer stores NULL and
+        // violates NOT NULL. A zero-length blob keeps the required write.
+        const float emptyEmbedding = 0.0f;
+        const void* embeddingBytes = plan.goal_embedding.empty()
+            ? static_cast<const void*>(&emptyEmbedding)
+            : static_cast<const void*>(plan.goal_embedding.data());
+        const int embeddingBytesCount = plan.goal_embedding.empty()
+            ? 0
+            : static_cast<int>(plan.goal_embedding.size() * sizeof(float));
+        sqlite3_bind_blob(stmt, 7, embeddingBytes, embeddingBytesCount, SQLITE_STATIC);
         sqlite3_bind_int(stmt, 8, version);
         
         bool success = (sqlite3_step(stmt) == SQLITE_DONE);
@@ -614,9 +658,12 @@ bool SQLiteMemoryRepository::addNode(const Node& node) {
 
 bool SQLiteMemoryRepository::addEdge(const Edge& edge) {
     try {
+        // GraphRefiner and processMemoryAging both pass absolute counters.
+        // The conflict update stores those values. Aging rewrites weight without
+        // adding the outcome again.
         const char* sql = "INSERT INTO graph_edges (from_id, to_id, weight, success_count, failure_count, last_used_ms) VALUES (?, ?, ?, ?, ?, ?) "
-                          "ON CONFLICT(from_id, to_id) DO UPDATE SET weight=excluded.weight, success_count=graph_edges.success_count + excluded.success_count, "
-                          "failure_count=graph_edges.failure_count + excluded.failure_count, last_used_ms=excluded.last_used_ms;";
+                          "ON CONFLICT(from_id, to_id) DO UPDATE SET weight=excluded.weight, success_count=excluded.success_count, "
+                          "failure_count=excluded.failure_count, last_used_ms=excluded.last_used_ms;";
         sqlite3_stmt* stmt;
         if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
 

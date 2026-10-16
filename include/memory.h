@@ -103,14 +103,14 @@ public:
 
     // Plan History Reuse (Phase 5)
     using PastPlanRecord = Thoth::MemoryRepository::PastPlanRecord;
-    void storePastPlan(const PastPlanRecord& plan);
+    bool storePastPlan(const PastPlanRecord& plan);
     std::vector<PastPlanRecord> getAllPastPlans() const;
 
     void storeStepMetric(const Thoth::MemoryRepository::StepMetricRecord& metric);
 
-    void storeActivePlan(const Thoth::MemoryRepository::ActivePlanRecord& plan);
+    bool storeActivePlan(const Thoth::MemoryRepository::ActivePlanRecord& plan);
     std::optional<Thoth::MemoryRepository::ActivePlanRecord> getActivePlan(const std::string& session_id) const;
-    void deleteActivePlan(const std::string& plan_id);
+    bool deleteActivePlan(const std::string& plan_id);
 
     // Cognate Plan Persistence (Phase 2.1)
     using CognatePlanRecord = Thoth::MemoryRepository::CognatePlanRecord;
@@ -151,6 +151,11 @@ public:
     void updateTrajectoryIndex(const CognateTrajectoryRecord& record);
     std::vector<TrajectoryIndexEntry> getTrajectoryIndex() const;
     void processMemoryAging(); // Phase 7.8
+    // Edges plus the active-plan marker, or neither.
+    bool commitReinforcedPlan(const std::vector<Thoth::MemoryRepository::Edge>& edges,
+                              const Thoth::MemoryRepository::ActivePlanRecord& plan);
+    // Existing aging formulas plus the history-aging marker, or neither.
+    bool commitHistoryStoreAging(const Thoth::MemoryRepository::ActivePlanRecord& plan);
 
     // Episode Steps (Phase 5, Step 5.5)
     using EpisodeStepRecord = Thoth::MemoryRepository::EpisodeStepRecord;
@@ -211,6 +216,8 @@ public:
 
 private:
     void migrateEmbeddings(); // Step 2 migration path
+    bool applyAgingLocked(bool transactional,
+                          const Thoth::MemoryRepository::ActivePlanRecord* marker);
     void consolidateIfNeeded(const std::string& sessionId);
     void onSessionActivated(const std::string& sessionId);
     int64_t currentTimeMs() const;

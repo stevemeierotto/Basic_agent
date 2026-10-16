@@ -596,6 +596,7 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
             };
             chunksJson.push_back(chunkObj);
         }
+        const nlohmann::json diagnosticsJson = diagnostics.to_json();
 
         if (chunks.empty()) {
             const bool indexPopulated =
@@ -611,6 +612,7 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
                                {"index_populated", false},
                                {"grag_alpha", diagnostics.alpha},
                                {"grag_routing_mode", diagnostics.routing_mode},
+                               {"diagnostics", diagnosticsJson},
                                {"retrieved_chunk_count", 0}};
             } else {
                 result.success = true;
@@ -620,6 +622,7 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
                                {"index_populated", true},
                                {"grag_alpha", diagnostics.alpha},
                                {"grag_routing_mode", diagnostics.routing_mode},
+                               {"diagnostics", diagnosticsJson},
                                {"retrieved_chunk_count", 0}};
             }
         } else {
@@ -628,6 +631,7 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
                            {"data", {{"chunks", chunksJson}}},
                            {"grag_alpha", diagnostics.alpha},
                            {"grag_routing_mode", diagnostics.routing_mode},
+                           {"diagnostics", diagnosticsJson},
                            {"retrieved_chunk_count", static_cast<int>(chunks.size())}};
         }
     } catch (const E2RuntimeHeuristicGuardViolation& e) {

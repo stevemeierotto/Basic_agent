@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace Thoth {
 
@@ -147,6 +148,14 @@ private:
     std::vector<WarmMemoryRecord> getAllRecentWarmMemory(int limit);
     mutable std::mutex active_plan_observer_mu_;
     ActivePlanCommitObserver active_plan_observer_;
+    // Guards transaction_held_ and transaction_owner_. Never hold this across
+    // sqlite3_exec: the authorizer callback takes it.
+    std::mutex transaction_mu_;
+    bool transaction_held_ = false;
+    std::thread::id transaction_owner_{};
+    static int authorizeConnection(void* user, int action, const char* arg1, const char* arg2,
+                                   const char* db_name, const char* trigger);
+    void clearTransactionOwnership();
 };
 
 } // namespace Thoth

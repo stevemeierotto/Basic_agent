@@ -73,6 +73,13 @@ struct PlanStep {
     static PlanStep from_json(const nlohmann::json& j);
 };
 
+// One captured GRAG retrieval set, in completion order.
+// Stage 1 persists this list. It does not mean the edges were reinforced.
+struct RetrievalSetRecord {
+    std::string step_id;
+    std::vector<std::string> chunk_hashes;
+};
+
 // Plan — the full goal execution plan
 struct Plan {
     std::string plan_id;             // UUID string
@@ -82,6 +89,23 @@ struct Plan {
     PlanStatus status = PlanStatus::ACTIVE;
     int64_t created_at_ms = 0;
     int64_t updated_at_ms = 0;
+    // False on legacy rows that omit the key. True only after the graph
+    // transaction commits the edges and this marker together.
+    bool graph_reinforced = false;
+    // Set with the graph marker when this attempt must continue into a
+    // replacement plan. The stored status stays ACTIVE until that plan exists.
+    bool reflection_pending = false;
+    int reflection_count = 0;
+    // True only after history-store aging commits with this marker.
+    bool history_aging_done = false;
+    // False when `retrieval_sets` was absent. An empty present list is a real value.
+    bool retrieval_sets_present = false;
+    std::vector<RetrievalSetRecord> retrieval_sets;
+    // Absent on older active plans. Present only on the stored checkpoint copy.
+    // Not a finalized trajectory-table row.
+    bool working_trajectory_present = false;
+    nlohmann::json working_trajectory = nlohmann::json::object();
+    int working_revisions_count = 0;
 
     nlohmann::json to_json() const;
     /** Planner-boundary view: root `plan` array and string `step_type`. Not the stored plan. */

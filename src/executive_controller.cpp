@@ -32,6 +32,9 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdlib>
+#include <csignal>
+#include <filesystem>
+#include <unistd.h>
 
 namespace Thoth {
 
@@ -465,7 +468,11 @@ std::string ExecutiveController::execute_goal(const std::string& goal,
         mtcp_task_id_ = mtcp_task_id;
         reset_goal_metrics_unlocked();
         transition_to_unlocked(ControllerState::PLANNING);
-        
+        // Drop the previous goal's retrieval sets before this goal retrieves.
+        active_sets_.clear();
+        active_sets_plan_id_.clear();
+        retrieval_sets_memory_authoritative_ = true;
+
         current_plan_ = Plan();
         current_plan_.updated_at_ms = nowMs();
         persist_current_plan_unlocked();
@@ -503,6 +510,7 @@ std::string ExecutiveController::execute_goal(const std::string& goal,
         sync_planning_tokens_unlocked();
         current_plan_.created_at_ms = nowMs();
         current_plan_.updated_at_ms = current_plan_.created_at_ms;
+        bind_active_sets_to_plan_unlocked(current_plan_.plan_id);
         
         // Initialize Trajectory (Phase 7.3)
         current_trajectory_ = Trajectory();
@@ -554,6 +562,8 @@ void ExecutiveController::abort() {
     std::unique_lock<std::mutex> lock(mutex_);
     if (state_ != ControllerState::COMPLETED && state_ != ControllerState::FAILED && state_ != ControllerState::ABORTED) {
         transition_to_unlocked(ControllerState::ABORTED);
+        current_plan_.status = PlanStatus::ABORTED;
+        clear_owned_active_sets_unlocked();
         stop_requested_ = true;
         current_plan_.updated_at_ms = nowMs();
         emit_goal_cognitive_metrics_unlocked("aborted", final_trajectory_score_);
@@ -589,6 +599,8 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
     std::vector<std::string> requeued;
     bool failClosed = false;
     bool startLoop = false;
+    bool continueReflection = false;
+    bool finishHistoryTail = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stop_requested_ = false;
@@ -605,6 +617,16 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
 
         update_goal_embedding_unlocked(current_plan_.goal);
         refresh_goal_state_embeddings_unlocked();
+        if (current_plan_.working_trajectory_present) {
+            current_trajectory_ = Trajectory::from_json(current_plan_.working_trajectory);
+            revisions_count_ = current_plan_.working_revisions_count;
+            current_plan_.working_trajectory_present = false;
+            current_plan_.working_trajectory = nlohmann::json::object();
+            current_plan_.working_revisions_count = 0;
+        } else {
+            current_trajectory_ = Trajectory();
+            revisions_count_ = 0;
+        }
 
         if (failClosed || current_plan_.status == PlanStatus::FAILED) {
             state_ = ControllerState::FAILED;
@@ -615,12 +637,20 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
         } else if (current_plan_.status == PlanStatus::COMPLETED) {
             state_ = ControllerState::COMPLETED;
             running_ = false;
+        } else if (current_plan_.reflection_pending) {
+            state_ = ControllerState::IDLE;
+            running_ = false;
+            continueReflection = true;
         } else {
             state_ = ControllerState::IDLE;
             running_ = true;
             startLoop = true;
         }
+        adopt_resumed_retrieval_sets_unlocked();
         persist_current_plan_unlocked();
+        finishHistoryTail = !failClosed &&
+            planStatusIsTerminal(current_plan_.status) &&
+            current_plan_.graph_reinforced;
     }
 
     if (failClosed) {
@@ -634,12 +664,26 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
             {"success", true}
         });
     }
+    if (continueReflection) {
+        continue_pending_reflection();
+        return;
+    }
     if (startLoop) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!stop_requested_ && !loop_thread_) {
             loop_thread_ = std::make_unique<std::thread>([this]() {
                 run_loop();
             });
+        }
+    }
+    if (finishHistoryTail) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!current_plan_.history_aging_done) {
+            if (commit_history_aging_unlocked() && memory_) {
+                memory_->deleteActivePlan(current_plan_.plan_id);
+            }
+        } else if (memory_) {
+            memory_->deleteActivePlan(current_plan_.plan_id);
         }
     }
 }
@@ -899,6 +943,12 @@ void ExecutiveController::decide_transition() {
         }
 
         if (!any_unfinished && active_step_futures_.empty()) {
+            if (current_plan_.reflection_pending) {
+                lock.unlock();
+                continue_pending_reflection();
+                return;
+            }
+
             float score = calculate_trajectory_score(all_successful);
             const bool timeout_failure = trajectoryHasTimeoutFailure(current_trajectory_);
             reflection_skip_reason_.clear();
@@ -915,84 +965,49 @@ void ExecutiveController::decide_transition() {
             if (score < Reflection::kScoreThreshold && reflectionEnabled && skipReason.empty()) {
                 std::cout << "[DEBUG] Low success score (" << score << "), triggering reflection cycle "
                           << (reflection_count_ + 1) << "\n";
-                reflection_count_++;
-
-                auto reflection_meta = log_reflection_replan(score, reflection_count_);
-                
+                // Penalty polarity for the attempt being stored. The durable row
+                // stays ACTIVE with reflection_pending until the replacement exists.
+                current_plan_.status = PlanStatus::FAILED;
+                reflection_handoff_ = true;
                 store_plan_history(score);
-                transition_to_unlocked(ControllerState::PLANNING);
-                
-                // Re-run planning with failure context only (no plan-reuse injection)
-                const std::string reflection_goal =
-                    Thoth::cleanGoalForStorage(current_plan_.goal) +
-                    " (Reflection: previous attempt had low success score " + std::to_string(score) + ")";
-                const std::string plannerSessionId = session_id_;
-                const std::string reflectionTask = mtcp_task_id_;
-
+                reflection_handoff_ = false;
+                if (!current_plan_.graph_reinforced) {
+                    current_plan_.status = PlanStatus::ACTIVE;
+                    return;
+                }
+                auto reflection_meta = log_reflection_replan(score, reflection_count_);
                 lock.unlock();
                 emit_event(EventType::REFLECTION_REPLAN, "", reflection_meta);
-                const auto planStart = nowMs();
-                Plan new_plan;
-                {
-                    PlannerLogSessionGuard sessionGuard(plannerSessionId);
-                    Thoth::GenerationCallContext scopeContext;
-                    scopeContext.task_id = reflectionTask;
-                    scopeContext.session_id = plannerSessionId;
-                    scopeContext.call_type = "plan";
-                    scopeContext.reflection = true;
-                    Thoth::GenerationCallScope scope(scopeContext);
-                    new_plan = planner_->create_plan(reflection_goal);
-                }
-                planning_time_ms_ += nowMs() - planStart;
-                sync_planning_tokens_unlocked();
-                lock.lock();
-
-                const std::string retiredPlanId = current_plan_.plan_id;
-                current_plan_ = new_plan;
-                current_plan_.created_at_ms = nowMs();
-                current_plan_.updated_at_ms = current_plan_.created_at_ms;
-                
-                // Reset trajectory for new attempt
-                current_trajectory_ = Trajectory();
-                current_trajectory_.trajectory_id = "traj-" + current_plan_.plan_id;
-                current_trajectory_.goal = reflection_goal;
-                current_trajectory_.plan_initial = current_plan_;
-                current_trajectory_.created_at = current_plan_.created_at_ms;
-                current_trajectory_.embedding = goal_embedding_;
-
-                persist_current_plan_unlocked();
-                if (memory_ && !retiredPlanId.empty() && !current_plan_.plan_id.empty()
-                    && retiredPlanId != current_plan_.plan_id) {
-                    memory_->deleteActivePlan(retiredPlanId);
-                }
-                transition_to_unlocked(ControllerState::IDLE);
-                
-                lock.unlock();
-                emit_event(EventType::PLAN_CREATED);
+                continue_pending_reflection();
                 return;
             }
 
-            final_trajectory_score_ = score;
             if (!skipReason.empty() && score < Reflection::kScoreThreshold) {
                 reflection_skip_reason_ = skipReason;
             }
 
-            transition_to_unlocked((all_successful && !current_plan_.steps.empty()) ? ControllerState::COMPLETED : ControllerState::FAILED);
+            const bool goalSucceeded = all_successful && !current_plan_.steps.empty();
+            current_plan_.status = goalSucceeded ? PlanStatus::COMPLETED : PlanStatus::FAILED;
             current_plan_.updated_at_ms = nowMs();
-
-            emit_goal_cognitive_metrics_unlocked(
-                (all_successful && !current_plan_.steps.empty()) ? "completed" : "failed", score);
-
-            publish_episode_completed_unlocked(all_successful && !current_plan_.steps.empty(), score);
-            
             auto history_meta = store_plan_history(score);
+            if (memory_ && history_meta.is_null()) {
+                if (!current_plan_.graph_reinforced) {
+                    current_plan_.status = PlanStatus::ACTIVE;
+                }
+                return;
+            }
+
+            final_trajectory_score_ = score;
+            transition_to_unlocked(goalSucceeded ? ControllerState::COMPLETED : ControllerState::FAILED);
+            emit_goal_cognitive_metrics_unlocked(goalSucceeded ? "completed" : "failed", score);
+            publish_episode_completed_unlocked(goalSucceeded, score);
             if (memory_) memory_->deleteActivePlan(current_plan_.plan_id);
-            
+
             lock.unlock();
             if (!history_meta.is_null()) {
                 emit_event(EventType::PLAN_HISTORY_STORED, "", history_meta);
             }
-            emit_event((all_successful && !current_plan_.steps.empty()) ? EventType::PLAN_COMPLETED : EventType::PLAN_FAILED);
+            emit_event(goalSucceeded ? EventType::PLAN_COMPLETED : EventType::PLAN_FAILED);
             return;
         }
 
@@ -1053,6 +1068,12 @@ void ExecutiveController::decide_transition() {
                     std::cout << "[DEBUG] Step " << step.step_id << " BLOCKED by constraint: " << check_result.reason << "\n";
                     step.status = StepStatus::FAILED;
                     step.result = {{"status", "error"}, {"error_message", "Action blocked by security policy: " + check_result.reason}};
+                    Thoth::StepResult blocked;
+                    blocked.step_id = step.step_id;
+                    blocked.success = false;
+                    blocked.error_message = step.result.value("error_message", "");
+                    blocked.data = step.result;
+                    record_trajectory_step(step, blocked);
                     persist_current_plan_unlocked();
                     continue; // Check next step
                 }
@@ -1146,19 +1167,19 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
     // Record Step in Trajectory (Phase 7.3)
     record_trajectory_step(step, result);
 
-    // Phase 5.5: Store Episode Step for semantic trajectory retrieval
-    if (memory_) {
+    const int episodeIndex = static_cast<int>(std::distance(current_plan_.steps.begin(), it));
+    const auto storeEpisodeAfterCheckpoint = [&]() {
+        if (!memory_) return;
         Memory::EpisodeStepRecord ep;
         ep.episode_id = "traj-" + current_plan_.plan_id;
         ep.goal_id = current_plan_.plan_id;
-        ep.step_index = static_cast<int>(std::distance(current_plan_.steps.begin(), it));
+        ep.step_index = episodeIndex;
         ep.state_summary = step.description;
         ep.action_taken = step.tool.dump();
         ep.result_status = result.success ? "SUCCESS" : "FAILED";
         ep.timestamp_ms = nowMs();
-        // We could embed the state here too, but for now we embed the full summary in TrajectoryBuilder
         memory_->storeEpisodeStep(ep);
-    }
+    };
 
     transition_to_unlocked(ControllerState::OBSERVING_RESULT);
 
@@ -1173,48 +1194,20 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
         update_current_embedding_unlocked();
         
         // Phase 5.6: Capture Active Set from RETRIEVAL result
-        if (step.type == StepType::RETRIEVAL && step.result.contains("diagnostics")) {
-            try {
-                auto diag = step.result["diagnostics"];
-                if (diag.contains("breakdowns") && diag["breakdowns"].is_array()) {
-                    auto breakdowns = diag["breakdowns"];
-                    
-                    float bestScore = 0.0f;
-                    if (!breakdowns.empty()) {
-                        bestScore = breakdowns[0].value("final_score", 0.0f);
-                    }
-
-                    ActiveStepSet currentSet;
-                    currentSet.step_id = step.step_id;
-
-                    for (const auto& b : breakdowns) {
-                        float score = b.value("final_score", 0.0f);
-                        // Take chunks where final_score >= 0.8 * best_score, cap at 5
-                        if (score >= 0.8f * bestScore && currentSet.chunk_hashes.size() < 5) {
-                            std::string content = b.value("code_text", ""); // Need to ensure code_text is in breakdown
-                            if (content.empty()) continue;
-
-                            std::string hash = Memory::calculateContentHash(content);
-                            currentSet.chunk_hashes.push_back(hash);
-
-                            // Register node if it doesn't exist
-                            Memory::Node node;
-                            node.id = hash;
-                            node.file_path = b.value("file_name", "");
-                            node.symbol = b.value("symbol", "");
-                            node.type = "code_chunk";
-                            memory_->addNode(node);
-                        }
-                    }
-                    if (!currentSet.chunk_hashes.empty()) {
-                        active_sets_.push_back(currentSet);
-                    }
+        if (step.type == StepType::RETRIEVAL) {
+            const RetrievalCaptureResult captured = capture_retrieval_set_unlocked(
+                step.step_id, step.result, true);
+            if (!captured.set.chunk_hashes.empty()) {
+                if (active_sets_plan_id_.empty()) {
+                    bind_active_sets_to_plan_unlocked(current_plan_.plan_id);
                 }
-            } catch (...) {}
+                active_sets_.push_back(captured.set);
+            }
         }
 
         update_trajectory_embedding_unlocked();
         persist_current_plan_unlocked();
+        storeEpisodeAfterCheckpoint();
         
         transition_to_unlocked(ControllerState::IDLE);
     } else {
@@ -1241,6 +1234,7 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
             transition_to_unlocked(ControllerState::REVISING_PLAN);
             current_plan_.updated_at_ms = nowMs();
             persist_current_plan_unlocked();
+            storeEpisodeAfterCheckpoint();
             
             const std::string revision_task = mtcp_task_id_;
             const std::string revision_session = session_id_;
@@ -1267,8 +1261,15 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
             current_plan_.updated_at_ms = nowMs();
             persist_current_plan_unlocked();
         } else if (step.failure_policy.abort_on_failure) {
+            // This path does not store history or reinforce. Drop this goal's sets
+            // so they cannot join the next goal. Status matches ControllerState::FAILED.
+            current_plan_.status = PlanStatus::FAILED;
+            active_sets_.clear();
+            active_sets_plan_id_.clear();
+            retrieval_sets_memory_authoritative_ = true;
             transition_to_unlocked(ControllerState::FAILED);
             current_plan_.updated_at_ms = nowMs();
+            storeEpisodeAfterCheckpoint();
             emit_goal_cognitive_metrics_unlocked("failed", 0.0f);
             if (memory_) memory_->deleteActivePlan(current_plan_.plan_id);
             lock.unlock();
@@ -1276,6 +1277,7 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
         } else {
             transition_to_unlocked(ControllerState::IDLE);
             persist_current_plan_unlocked();
+            storeEpisodeAfterCheckpoint();
         }
     }
 }
@@ -1384,53 +1386,398 @@ void ExecutiveController::emit_event(EventType type, const std::string& step_id,
     log_to_trace(event);
 }
 
-void ExecutiveController::reinforce_plan_graph() {
-    if (!memory_ || !graph_refiner_ || current_plan_.plan_id.empty() || active_sets_.size() < 2) return;
+void ExecutiveController::bind_active_sets_to_plan_unlocked(const std::string& plan_id) {
+    active_sets_plan_id_ = plan_id;
+    retrieval_sets_memory_authoritative_ = true;
+}
 
-    // Phase 5.6: Causal Edge Generation
-    // Identify all edges in this trajectory for the refiner
-    std::vector<Memory::Edge> trajectory_edges;
+void ExecutiveController::clear_owned_active_sets_unlocked() {
+    active_sets_.clear();
+    if (!current_plan_.plan_id.empty()) {
+        active_sets_plan_id_ = current_plan_.plan_id;
+    }
+    retrieval_sets_memory_authoritative_ = true;
+}
 
-    for (size_t i = 0; i < active_sets_.size() - 1; ++i) {
-        const auto& fromSet = active_sets_[i];
-        const auto& toSet = active_sets_[i + 1];
+void ExecutiveController::sync_retrieval_sets_into_plan_unlocked() {
+    if (!retrieval_sets_memory_authoritative_) {
+        return;
+    }
+    if (active_sets_plan_id_.empty() || active_sets_plan_id_ != current_plan_.plan_id) {
+        return;
+    }
+    current_plan_.retrieval_sets_present = true;
+    current_plan_.retrieval_sets.clear();
+    for (const auto& set : active_sets_) {
+        RetrievalSetRecord record;
+        record.step_id = set.step_id;
+        record.chunk_hashes = set.chunk_hashes;
+        current_plan_.retrieval_sets.push_back(std::move(record));
+    }
+}
 
-        for (const auto& fromHash : fromSet.chunk_hashes) {
-            for (const auto& toHash : toSet.chunk_hashes) {
-                if (fromHash == toHash) continue;
+bool ExecutiveController::plan_has_unfinished_steps_unlocked() const {
+    for (const auto& step : current_plan_.steps) {
+        if (step.status == StepStatus::PENDING || step.status == StepStatus::RUNNING) {
+            return true;
+        }
+    }
+    return false;
+}
 
-                Memory::Edge edge;
-                edge.from_id = fromHash;
-                edge.to_id = toHash;
-                
-                // Fetch existing if present to preserve counts
-                auto existing = memory_->getEdgesFrom(fromHash);
-                bool found = false;
-                for (const auto& e : existing) {
-                    if (e.to_id == toHash) {
-                        edge = e;
-                        found = true;
-                        break;
-                    }
-                }
-                
-                if (!found) {
-                    edge.weight = 0.1f; // Initial weight
-                    edge.success_count = 0;
-                    edge.failure_count = 0;
-                }
-                edge.last_used_ms = nowMs();
-                trajectory_edges.push_back(edge);
+void ExecutiveController::log_retrieval_set_diagnostic(const char* event, const std::string& detail) const {
+    StructuredLogger::instance().log(
+        LogLevel::Warn,
+        "controller",
+        event,
+        detail,
+        {{"plan_id", current_plan_.plan_id}});
+}
+
+ExecutiveController::RetrievalCaptureResult ExecutiveController::capture_retrieval_set_unlocked(
+    const std::string& step_id,
+    const nlohmann::json& result,
+    bool register_nodes) {
+    RetrievalCaptureResult captured;
+    captured.set.step_id = step_id;
+    if (!result.is_object() || !result.contains("diagnostics")) {
+        captured.unusable = true;
+        return captured;
+    }
+    try {
+        const auto& diag = result["diagnostics"];
+        if (!diag.is_object() || !diag.contains("breakdowns") || !diag["breakdowns"].is_array()) {
+            captured.unusable = true;
+            return captured;
+        }
+        const auto& breakdowns = diag["breakdowns"];
+        float bestScore = 0.0f;
+        if (!breakdowns.empty()) {
+            bestScore = breakdowns[0].value("final_score", 0.0f);
+        }
+        for (const auto& breakdown : breakdowns) {
+            if (!breakdown.is_object()) {
+                continue;
             }
+            const float score = breakdown.value("final_score", 0.0f);
+            if (score < 0.8f * bestScore || captured.set.chunk_hashes.size() >= 5) {
+                continue;
+            }
+            const std::string content = breakdown.value("code_text", "");
+            if (content.empty()) {
+                continue;
+            }
+            const std::string hash = Memory::calculateContentHash(content);
+            captured.set.chunk_hashes.push_back(hash);
+            if (register_nodes && memory_) {
+                Memory::Node node;
+                node.id = hash;
+                node.file_path = breakdown.value("file_name", "");
+                node.symbol = breakdown.value("symbol", "");
+                node.type = "code_chunk";
+                memory_->addNode(node);
+            }
+        }
+    } catch (...) {
+        captured.unusable = true;
+        captured.set.chunk_hashes.clear();
+    }
+    return captured;
+}
+
+void ExecutiveController::restore_legacy_retrieval_sets_unlocked() {
+    struct Candidate {
+        int64_t completed_at_ms = 0;
+        size_t index = 0;
+        ActiveStepSet set;
+    };
+    std::vector<Candidate> candidates;
+    for (size_t index = 0; index < current_plan_.steps.size(); ++index) {
+        const PlanStep& step = current_plan_.steps[index];
+        if (step.type != StepType::RETRIEVAL || step.status != StepStatus::SUCCESS) {
+            continue;
+        }
+        const RetrievalCaptureResult captured = capture_retrieval_set_unlocked(
+            step.step_id, step.result, false);
+        if (captured.unusable) {
+            log_retrieval_set_diagnostic(
+                "retrieval_sets_legacy_incomplete",
+                "Successful retrieval step has no usable diagnostics. Its set was not reconstructed.");
+            continue;
+        }
+        if (captured.set.chunk_hashes.empty()) {
+            continue;
+        }
+        Candidate candidate;
+        candidate.completed_at_ms = step.completed_at_ms;
+        candidate.index = index;
+        candidate.set = captured.set;
+        candidates.push_back(std::move(candidate));
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.completed_at_ms != b.completed_at_ms) {
+            return a.completed_at_ms < b.completed_at_ms;
+        }
+        return a.index < b.index;
+    });
+    for (size_t i = 1; i < candidates.size(); ++i) {
+        if (candidates[i].completed_at_ms == candidates[i - 1].completed_at_ms) {
+            log_retrieval_set_diagnostic(
+                "retrieval_sets_legacy_order_uncertain",
+                "Completed retrieval steps share completed_at_ms. Order follows step index.");
+            break;
+        }
+    }
+    for (const auto& candidate : candidates) {
+        active_sets_.push_back(candidate.set);
+    }
+}
+
+void ExecutiveController::adopt_resumed_retrieval_sets_unlocked() {
+    reflection_count_ = current_plan_.reflection_count;
+    if (!current_plan_.plan_id.empty() && current_plan_.plan_id == active_sets_plan_id_) {
+        return;
+    }
+
+    active_sets_.clear();
+    active_sets_plan_id_ = current_plan_.plan_id;
+
+    if (current_plan_.reflection_pending ||
+        planStatusIsTerminal(current_plan_.status) ||
+        current_plan_.graph_reinforced) {
+        retrieval_sets_memory_authoritative_ = false;
+        return;
+    }
+    // A finished ACTIVE plan with a persisted set list and no consumed marker
+    // is a rolled-back reinforcement. Restore it so the attempt is applied once.
+    // A legacy finished plan has no list and no marker, so its diagnostics must
+    // not be reconstructed: those edges may already have autocommitted.
+    if (!plan_has_unfinished_steps_unlocked() && !current_plan_.retrieval_sets_present) {
+        retrieval_sets_memory_authoritative_ = false;
+        log_retrieval_set_diagnostic(
+            "retrieval_sets_restore_deferred",
+            "Finished legacy plan has no retrieval_sets field. Sets were not reconstructed.");
+        return;
+    }
+
+    retrieval_sets_memory_authoritative_ = true;
+    if (current_plan_.retrieval_sets_present) {
+        for (const auto& record : current_plan_.retrieval_sets) {
+            if (record.chunk_hashes.empty()) {
+                continue;
+            }
+            ActiveStepSet set;
+            set.step_id = record.step_id;
+            set.chunk_hashes = record.chunk_hashes;
+            active_sets_.push_back(std::move(set));
+        }
+        return;
+    }
+    restore_legacy_retrieval_sets_unlocked();
+}
+
+namespace {
+
+MemoryRepository::ActivePlanRecord activePlanRecordFrom(const Plan& plan,
+                                                        const std::string& session_id,
+                                                        const std::string& controller_state) {
+    MemoryRepository::ActivePlanRecord rec;
+    rec.plan_id = plan.plan_id;
+    rec.session_id = session_id;
+    rec.goal = plan.goal;
+    rec.steps_json = plan.to_json().dump();
+    rec.current_index = static_cast<int>(plan.current_index);
+    rec.controller_state = controller_state;
+    rec.created_at_ms = plan.created_at_ms;
+    rec.updated_at_ms = plan.updated_at_ms;
+    return rec;
+}
+
+} // namespace
+
+bool ExecutiveController::reinforce_plan_graph() {
+    if (!memory_ || current_plan_.plan_id.empty()) {
+        active_sets_.clear();
+        active_sets_plan_id_.clear();
+        retrieval_sets_memory_authoritative_ = true;
+        return false;
+    }
+    if (current_plan_.graph_reinforced) {
+        active_sets_.clear();
+        return true;
+    }
+
+    std::vector<Memory::Edge> reinforced;
+    if (graph_refiner_ && active_sets_.size() >= 2) {
+        std::vector<Memory::Edge> trajectory_edges;
+        for (size_t i = 0; i < active_sets_.size() - 1; ++i) {
+            const auto& fromSet = active_sets_[i];
+            const auto& toSet = active_sets_[i + 1];
+            for (const auto& fromHash : fromSet.chunk_hashes) {
+                for (const auto& toHash : toSet.chunk_hashes) {
+                    if (fromHash == toHash) continue;
+                    Memory::Edge edge;
+                    edge.from_id = fromHash;
+                    edge.to_id = toHash;
+                    auto existing = memory_->getEdgesFrom(fromHash);
+                    bool found = false;
+                    for (const auto& candidate : existing) {
+                        if (candidate.to_id == toHash) {
+                            edge = candidate;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        edge.weight = 0.1f;
+                        edge.success_count = 0;
+                        edge.failure_count = 0;
+                    }
+                    edge.last_used_ms = nowMs();
+                    trajectory_edges.push_back(edge);
+                }
+            }
+        }
+        if (!trajectory_edges.empty()) {
+            const float success_score =
+                (current_plan_.status == PlanStatus::COMPLETED) ? 1.0f : 0.0f;
+            reinforced = graph_refiner_->computeReinforcedEdges(trajectory_edges, success_score);
         }
     }
 
-    if (!trajectory_edges.empty()) {
-        float success_score = (current_plan_.status == PlanStatus::COMPLETED) ? 1.0f : 0.0f;
-        graph_refiner_->refineFromTrajectory(trajectory_edges, success_score);
+    Plan durable = current_plan_;
+    durable.graph_reinforced = true;
+    durable.retrieval_sets.clear();
+    durable.retrieval_sets_present = true;
+    durable.history_aging_done = false;
+    durable.updated_at_ms = nowMs();
+    if (reflection_handoff_) {
+        durable.status = PlanStatus::ACTIVE;
+        durable.reflection_pending = true;
+        durable.reflection_count = reflection_count_ + 1;
+    } else {
+        durable.reflection_pending = false;
+        durable.reflection_count = reflection_count_;
     }
-    
-    active_sets_.clear(); // Reset for next plan
+
+    if (!memory_->commitReinforcedPlan(
+            reinforced, activePlanRecordFrom(durable, session_id_, state_to_name(state_)))) {
+        return false;
+    }
+
+    current_plan_ = durable;
+    if (reflection_handoff_) {
+        reflection_count_ = durable.reflection_count;
+    }
+    active_sets_.clear();
+    retrieval_sets_memory_authoritative_ = true;
+    return true;
+}
+
+bool ExecutiveController::commit_history_aging_unlocked() {
+    if (!memory_ || current_plan_.plan_id.empty()) return false;
+    if (current_plan_.history_aging_done) return true;
+
+    Plan durable = current_plan_;
+    durable.history_aging_done = true;
+    durable.graph_reinforced = true;
+    durable.retrieval_sets.clear();
+    durable.retrieval_sets_present = true;
+    durable.updated_at_ms = nowMs();
+    if (!memory_->commitHistoryStoreAging(
+            activePlanRecordFrom(durable, session_id_, state_to_name(state_)))) {
+        return false;
+    }
+    current_plan_.history_aging_done = true;
+    current_plan_.updated_at_ms = durable.updated_at_ms;
+    return true;
+}
+
+void ExecutiveController::continue_pending_reflection() {
+    std::string reflection_goal;
+    std::string plannerSessionId;
+    std::string reflectionTask;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!current_plan_.reflection_pending || !current_plan_.graph_reinforced) {
+            return;
+        }
+        if (!current_plan_.history_aging_done && !commit_history_aging_unlocked()) {
+            return;
+        }
+        if (strategy_engine_) {
+            strategy_engine_->processTrajectories();
+        }
+        bool all_successful = !current_plan_.steps.empty();
+        for (const auto& step : current_plan_.steps) {
+            if (step.status != StepStatus::SUCCESS) {
+                all_successful = false;
+                break;
+            }
+        }
+        const float score = calculate_trajectory_score(all_successful);
+        reflection_goal = Thoth::cleanGoalForStorage(current_plan_.goal) +
+            " (Reflection: previous attempt had low success score " + std::to_string(score) + ")";
+        plannerSessionId = session_id_;
+        reflectionTask = mtcp_task_id_;
+    }
+
+    if (!planner_) return;
+    const auto planStart = nowMs();
+    Plan new_plan;
+    {
+        PlannerLogSessionGuard sessionGuard(plannerSessionId);
+        Thoth::GenerationCallContext scopeContext;
+        scopeContext.task_id = reflectionTask;
+        scopeContext.session_id = plannerSessionId;
+        scopeContext.call_type = "plan";
+        scopeContext.reflection = true;
+        Thoth::GenerationCallScope scope(scopeContext);
+        new_plan = planner_->create_plan(reflection_goal);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        planning_time_ms_ += nowMs() - planStart;
+        sync_planning_tokens_unlocked();
+        if (!current_plan_.reflection_pending) {
+            return;
+        }
+        const Plan previous = current_plan_;
+        const Trajectory previousTrajectory = current_trajectory_;
+        const int previousRevisions = revisions_count_;
+        const std::string retiredPlanId = previous.plan_id;
+        current_plan_ = new_plan;
+        current_plan_.created_at_ms = nowMs();
+        current_plan_.updated_at_ms = current_plan_.created_at_ms;
+        active_sets_.clear();
+        bind_active_sets_to_plan_unlocked(current_plan_.plan_id);
+        current_trajectory_ = Trajectory();
+        current_trajectory_.trajectory_id = "traj-" + current_plan_.plan_id;
+        current_trajectory_.goal = reflection_goal;
+        current_trajectory_.plan_initial = current_plan_;
+        current_trajectory_.created_at = current_plan_.created_at_ms;
+        current_trajectory_.embedding = goal_embedding_;
+        revisions_count_ = 0;
+        if (!persist_current_plan_unlocked()) {
+            current_plan_ = previous;
+            current_trajectory_ = previousTrajectory;
+            revisions_count_ = previousRevisions;
+            active_sets_.clear();
+            active_sets_plan_id_ = previous.plan_id;
+            retrieval_sets_memory_authoritative_ = false;
+            return;
+        }
+        if (memory_ && !retiredPlanId.empty() && retiredPlanId != current_plan_.plan_id) {
+            memory_->deleteActivePlan(retiredPlanId);
+        }
+        transition_to_unlocked(ControllerState::IDLE);
+        if (!stop_requested_ && !loop_thread_) {
+            running_ = true;
+            loop_thread_ = std::make_unique<std::thread>([this]() { run_loop(); });
+        }
+    }
+    emit_event(EventType::PLAN_CREATED);
 }
 
 void ExecutiveController::record_trajectory_step(const PlanStep& step, const Thoth::StepResult& result) {
@@ -1463,24 +1810,34 @@ float ExecutiveController::calculate_trajectory_score(bool plan_completed_succes
     return std::max(0.0f, std::min(1.0f, score));
 }
 
-void ExecutiveController::persist_current_plan_unlocked() {
-    if (!memory_ || current_plan_.plan_id.empty()) return;
+bool ExecutiveController::persist_current_plan_unlocked() {
+    if (!memory_ || current_plan_.plan_id.empty()) return false;
 
-    MemoryRepository::ActivePlanRecord rec;
-    rec.plan_id = current_plan_.plan_id;
-    rec.session_id = session_id_;
-    rec.goal = current_plan_.goal;
-    rec.steps_json = current_plan_.to_json().dump();
-    rec.current_index = static_cast<int>(current_plan_.current_index);
-    rec.controller_state = state_to_name(state_);
-    rec.created_at_ms = current_plan_.created_at_ms;
-    rec.updated_at_ms = current_plan_.updated_at_ms;
-    memory_->storeActivePlan(rec);
+    sync_retrieval_sets_into_plan_unlocked();
+
+    Plan stored = current_plan_;
+    if (!current_trajectory_.trajectory_id.empty()) {
+        stored.working_trajectory_present = true;
+        stored.working_trajectory = current_trajectory_.to_json();
+        stored.working_revisions_count = revisions_count_;
+    }
+    if (!memory_->storeActivePlan(
+            activePlanRecordFrom(stored, session_id_, state_to_name(state_)))) {
+        return false;
+    }
+
+    // A traj-<plan_id> row is written only after the finalized Cognate score.
+    // Later active-plan checkpoints must not replace that row with score 0.
+    // A computed score of 0 is valid history and is preserved the same way.
+    if (memory_->loadTrajectory("traj-" + current_plan_.plan_id)) {
+        return true;
+    }
 
     MemoryRepository::CognatePlanRecord cognateRec;
     cognatePlanRecordFromPlan(current_plan_, cognateRec);
     cognateRec.status = static_cast<int>(state_);
     memory_->saveCognatePlan(cognateRec);
+    return true;
 }
 
 std::string ExecutiveController::state_to_name(ControllerState state) const {
@@ -1682,8 +2039,61 @@ void ExecutiveController::clear_embeddings_unlocked() {
     }
 }
 
+namespace {
+
+bool graphCampaignHaltEnabled(const char* flag) {
+    const char* value = std::getenv(flag);
+    if (!value || std::string(value) != "1") {
+        return false;
+    }
+    const char* dir = std::getenv("THOTH_GRAPH_HALT_DIR");
+    if (!dir || std::string(dir).rfind("/tmp/thoth-e2e-graph-", 0) != 0) {
+        return false;
+    }
+    if (std::string(dir).find("..") != std::string::npos) {
+        return false;
+    }
+    return true;
+}
+
+// Test-only park. Both the flag and the disposable halt directory are required.
+// The parent supervisor observes SIGSTOP, reads the committed database, then
+// sends SIGKILL. Production runs leave the flag unset and never enter.
+void parkForGraphCampaignHalt(const char* boundary) {
+    const std::filesystem::path dir(std::getenv("THOTH_GRAPH_HALT_DIR"));
+    const std::filesystem::path marker = dir / "graph_halt.json";
+    const std::filesystem::path temporary = dir / "graph_halt.json.tmp";
+    nlohmann::json body = {
+        {"boundary", boundary},
+        {"pid", static_cast<int>(::getpid())}
+    };
+    {
+        std::ofstream out(temporary, std::ios::trunc);
+        if (!out) {
+            return;
+        }
+        out << body.dump(2);
+        out.flush();
+    }
+    std::error_code renameError;
+    std::filesystem::rename(temporary, marker, renameError);
+    if (renameError) {
+        return;
+    }
+    for (;;) {
+        ::raise(SIGSTOP);
+    }
+}
+
+} // namespace
+
 nlohmann::json ExecutiveController::store_plan_history(float success_score) {
-    if (!memory_ || current_plan_.plan_id.empty()) return nlohmann::json();
+    if (!memory_ || current_plan_.plan_id.empty()) {
+        active_sets_.clear();
+        active_sets_plan_id_.clear();
+        retrieval_sets_memory_authoritative_ = true;
+        return nlohmann::json();
+    }
 
     Memory::PastPlanRecord record;
     record.plan_id = current_plan_.plan_id;
@@ -1697,41 +2107,70 @@ nlohmann::json ExecutiveController::store_plan_history(float success_score) {
     }
     record.goal_embedding = goal_embedding_;
 
-    memory_->storePastPlan(record);
+    if (!current_plan_.graph_reinforced) {
+        // storePastPlan, saveCognatePlan, then saveTrajectory. Each returns
+        // before the next begins, so a committed traj-<plan_id> row means the
+        // past-plan and Cognate rows for this plan were already committed.
+        // Leave all three untouched. A replace would reset usage_count and tier.
+        const std::string stableTrajectoryId = "traj-" + current_plan_.plan_id;
+        const auto existingTrajectory = memory_->loadTrajectory(stableTrajectoryId);
+        if (!existingTrajectory) {
+            if (current_trajectory_.trajectory_id.empty()) {
+                current_trajectory_.trajectory_id = stableTrajectoryId;
+            }
+            if (graphCampaignHaltEnabled("THOTH_HALT_BEFORE_HISTORY_WRITE")) {
+                parkForGraphCampaignHalt("before_history_write");
+            }
+            if (!memory_->storePastPlan(record)) return nlohmann::json();
+            if (graphCampaignHaltEnabled("THOTH_HALT_AFTER_PAST_PLAN")) {
+                parkForGraphCampaignHalt("after_past_plan");
+            }
 
-    nlohmann::json history_meta = log_plan_history_persisted(success_score, record);
+            MemoryRepository::CognatePlanRecord cognateRec;
+            cognatePlanRecordFromPlan(current_plan_, cognateRec);
+            cognateRec.status = static_cast<int>(state_);
+            cognateRec.success_score = success_score;
+            if (!memory_->saveCognatePlan(cognateRec)) return nlohmann::json();
 
-    // Phase 5.6: Reinforce Graph Memory
-    reinforce_plan_graph();
-    
-    MemoryRepository::CognatePlanRecord cognateRec;
-    cognatePlanRecordFromPlan(current_plan_, cognateRec);
-    cognateRec.status = static_cast<int>(state_);
-    cognateRec.success_score = success_score;
-    memory_->saveCognatePlan(cognateRec);
+            current_trajectory_.final_status = current_plan_.status;
+            current_trajectory_.success_score = success_score;
+            current_trajectory_.results = current_plan_.steps.empty()
+                ? nlohmann::json::object()
+                : current_plan_.steps.back().result;
 
-    current_trajectory_.final_status = current_plan_.status;
-    current_trajectory_.success_score = success_score;
-    current_trajectory_.results = current_plan_.steps.empty() ? nlohmann::json::object() : current_plan_.steps.back().result;
-    
-    Memory::CognateTrajectoryRecord trajRec;
-    trajRec.trajectory_id = current_trajectory_.trajectory_id;
-    trajRec.goal = current_trajectory_.goal;
-    trajRec.trajectory_json = current_trajectory_.to_json().dump();
-    trajRec.success_score = success_score;
-    trajRec.embedding = current_trajectory_.embedding;
-    trajRec.created_at = current_trajectory_.created_at;
-    memory_->saveTrajectory(trajRec);
-    
-    memory_->processMemoryAging();
-    
+            Memory::CognateTrajectoryRecord trajRec;
+            trajRec.trajectory_id = current_trajectory_.trajectory_id;
+            trajRec.goal = current_trajectory_.goal;
+            trajRec.trajectory_json = current_trajectory_.to_json().dump();
+            trajRec.success_score = success_score;
+            trajRec.embedding = current_trajectory_.embedding;
+            trajRec.created_at = current_trajectory_.created_at;
+            if (!memory_->saveTrajectory(trajRec)) return nlohmann::json();
+
+            if (graphCampaignHaltEnabled("THOTH_HALT_AFTER_TRAJECTORY_COMMIT")) {
+                parkForGraphCampaignHalt("after_trajectory_commit");
+            }
+        }
+
+        if (!reinforce_plan_graph()) return nlohmann::json();
+    }
+
+    if (graphCampaignHaltEnabled("THOTH_HALT_AFTER_GRAPH_COMMIT")) {
+        parkForGraphCampaignHalt("after_graph_commit");
+    }
+
+    if (!current_plan_.history_aging_done && !commit_history_aging_unlocked()) {
+        return nlohmann::json();
+    }
+
+    if (graphCampaignHaltEnabled("THOTH_HALT_AFTER_AGING_COMMIT")) {
+        parkForGraphCampaignHalt("after_aging_commit");
+    }
     if (strategy_engine_) {
         strategy_engine_->processTrajectories();
     }
-    
-    if (success_score > 0.0f) {
-        reinforce_plan_graph();
-    }
+
+    nlohmann::json history_meta = log_plan_history_persisted(success_score, record);
     
     StructuredLogger::instance().log(LogLevel::Info, "controller", "plan_history_stored", "Plan history persisted", 
         {{"plan_id", record.plan_id}, {"success_score", success_score}});

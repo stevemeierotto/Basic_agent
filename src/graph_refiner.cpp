@@ -14,42 +14,49 @@ namespace Thoth {
 
 GraphRefiner::GraphRefiner(std::shared_ptr<Memory> memory) : memory_(memory) {}
 
+std::vector<Memory::Edge> GraphRefiner::computeReinforcedEdges(
+    const std::vector<Memory::Edge>& trajectory_edges,
+    float success_score) const {
+    std::vector<Memory::Edge> updated;
+    updated.reserve(trajectory_edges.size());
+    const bool is_success = (success_score >= 0.8f);
+    for (auto edge : trajectory_edges) {
+        const float old_w = edge.weight;
+        if (is_success) {
+            edge.weight = old_w + learning_rate * (1.0f - old_w);
+            edge.success_count++;
+        } else {
+            edge.weight = old_w - learning_rate * old_w;
+            edge.failure_count++;
+        }
+        if (edge.weight < 0.01f) edge.weight = 0.01f;
+        if (edge.weight > 1.0f) edge.weight = 1.0f;
+        updated.push_back(std::move(edge));
+    }
+    return updated;
+}
+
 void GraphRefiner::refineFromTrajectory(const std::vector<Memory::Edge>& trajectory_edges, float success_score) {
     if (!memory_ || trajectory_edges.empty()) return;
 
-    bool is_success = (success_score >= 0.8f);
-    
+    const bool is_success = (success_score >= 0.8f);
+    const std::vector<Memory::Edge> updated = computeReinforcedEdges(trajectory_edges, success_score);
+
     int edges_updated = 0;
     int edges_created = 0;
     float total_weight_delta = 0.0f;
     float min_weight = 1.0f;
     float max_weight = 0.0f;
-    
-    for (auto edge : trajectory_edges) {
-        float old_w = edge.weight;
-        bool was_new = (old_w == 0.1f && edge.success_count == 0 && edge.failure_count == 0);
-        
-        if (is_success) {
-            // Reward: Logistic update (Approaches 1.0 but never explodes)
-            edge.weight = old_w + learning_rate * (1.0f - old_w);
-            edge.success_count++;
-        } else {
-            // Penalty: Decrease weight
-            edge.weight = old_w - learning_rate * old_w;
-            edge.failure_count++;
-        }
 
-        // Clamp to prevent complete disappearance or negative values
-        if (edge.weight < 0.01f) edge.weight = 0.01f;
-        if (edge.weight > 1.0f) edge.weight = 1.0f;
-
-        float weight_delta = edge.weight - old_w;
+    for (size_t i = 0; i < updated.size(); ++i) {
+        const float old_w = trajectory_edges[i].weight;
+        const bool was_new = (old_w == 0.1f && trajectory_edges[i].success_count == 0 &&
+                              trajectory_edges[i].failure_count == 0);
+        const float weight_delta = updated[i].weight - old_w;
         total_weight_delta += weight_delta;
-        if (edge.weight < min_weight) min_weight = edge.weight;
-        if (edge.weight > max_weight) max_weight = edge.weight;
-        
-        memory_->addEdge(edge);
-        
+        if (updated[i].weight < min_weight) min_weight = updated[i].weight;
+        if (updated[i].weight > max_weight) max_weight = updated[i].weight;
+        memory_->addEdge(updated[i]);
         if (was_new) edges_created++;
         else edges_updated++;
     }

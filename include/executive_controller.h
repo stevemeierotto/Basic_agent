@@ -158,6 +158,7 @@ public:
 protected:
     friend class StandardExecutionMode;
     friend class ScientificExecutionMode;
+    friend struct ExecutiveControllerP0TestAccess;
     std::string state_to_name(ControllerState state) const;
     void transition_to_unlocked(ControllerState new_state);
     void update_goal_embedding_unlocked(const std::string& goal);
@@ -167,10 +168,16 @@ protected:
     void update_trajectory_embedding_unlocked();
     void clear_embeddings_unlocked();
     nlohmann::json store_plan_history(float success_score);
-    void reinforce_plan_graph();
+    bool reinforce_plan_graph();
+    bool commit_history_aging_unlocked();
+    void continue_pending_reflection();
+    void bind_active_sets_to_plan_unlocked(const std::string& plan_id);
+    void clear_owned_active_sets_unlocked();
+    void sync_retrieval_sets_into_plan_unlocked();
+    void adopt_resumed_retrieval_sets_unlocked();
     void record_trajectory_step(const PlanStep& step, const Thoth::StepResult& result);
     float calculate_trajectory_score(bool plan_completed_successfully);
-    void persist_current_plan_unlocked();
+    bool persist_current_plan_unlocked();
     /** Resume-only. Terminal plans are left unchanged. Returns true when an
      *  orphaned RUNNING step on an unfinished plan must fail closed. */
     bool reconcileOrphanedRunningSteps_unlocked(std::vector<std::string>& requeued_step_ids,
@@ -232,8 +239,27 @@ protected:
         std::vector<std::string> chunk_hashes;
     };
     std::vector<ActiveStepSet> active_sets_;
+    // Plan id that owns active_sets_. Empty means the vector is not owned.
+    std::string active_sets_plan_id_;
+    // When false, persist must not replace the plan's retrieval_sets from memory.
+    // Set for a consumed, terminal, or legacy finished plan whose sets must not
+    // be rewritten from an empty in-memory list.
+    bool retrieval_sets_memory_authoritative_ = true;
+
+    struct RetrievalCaptureResult {
+        ActiveStepSet set;
+        bool unusable = false;
+    };
+    RetrievalCaptureResult capture_retrieval_set_unlocked(const std::string& step_id,
+                                                          const nlohmann::json& result,
+                                                          bool register_nodes);
+    bool plan_has_unfinished_steps_unlocked() const;
+    void restore_legacy_retrieval_sets_unlocked();
+    void log_retrieval_set_diagnostic(const char* event, const std::string& detail) const;
+
     int revisions_count_ = 0;
     int reflection_count_ = 0;
+    bool reflection_handoff_ = false;
     int max_reflections_ = Reflection::kMaxReflections;
     std::string reflection_skip_reason_;
     std::string session_id_;

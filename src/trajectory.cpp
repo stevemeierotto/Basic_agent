@@ -36,7 +36,7 @@ RecordedStep RecordedStep::from_json(const nlohmann::json& j) {
     step.result = j.value("result", nlohmann::json::object());
     step.error = j.value("error", "");
     step.revision_note = j.value("revision_note", "");
-    step.timestamp = j.value("timestamp", 0);
+    step.timestamp = j.value("timestamp", static_cast<int64_t>(0));
     return step;
 }
 
@@ -93,7 +93,7 @@ Trajectory Trajectory::from_json(const nlohmann::json& j) {
     
     t.final_status = static_cast<PlanStatus>(j.value("final_status", 0));
     t.success_score = j.value("success_score", 0.0f);
-    t.created_at = j.value("created_at", 0);
+    t.created_at = j.value("created_at", static_cast<int64_t>(0));
     t.embedding = j.value("embedding", std::vector<float>());
     
     return t;

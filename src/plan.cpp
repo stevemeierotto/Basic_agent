@@ -123,6 +123,24 @@ nlohmann::json Plan::to_json() const {
     for (const auto& step : steps) {
         j["steps"].push_back(step.to_json());
     }
+    j["graph_reinforced"] = graph_reinforced;
+    j["reflection_pending"] = reflection_pending;
+    j["reflection_count"] = reflection_count;
+    j["history_aging_done"] = history_aging_done;
+    if (retrieval_sets_present) {
+        nlohmann::json sets = nlohmann::json::array();
+        for (const auto& set : retrieval_sets) {
+            sets.push_back({
+                {"step_id", set.step_id},
+                {"chunk_hashes", set.chunk_hashes}
+            });
+        }
+        j["retrieval_sets"] = std::move(sets);
+    }
+    if (working_trajectory_present) {
+        j["working_trajectory"] = working_trajectory;
+        j["working_revisions_count"] = working_revisions_count;
+    }
     return j;
 }
 
@@ -138,6 +156,41 @@ Plan Plan::from_json(const nlohmann::json& j) {
         for (const auto& step_j : j["steps"]) {
             plan.steps.push_back(PlanStep::from_json(step_j));
         }
+    }
+    if (j.contains("graph_reinforced") && j["graph_reinforced"].is_boolean()) {
+        plan.graph_reinforced = j["graph_reinforced"].get<bool>();
+    }
+    if (j.contains("reflection_pending") && j["reflection_pending"].is_boolean()) {
+        plan.reflection_pending = j["reflection_pending"].get<bool>();
+    }
+    if (j.contains("reflection_count") && j["reflection_count"].is_number_integer()) {
+        plan.reflection_count = j["reflection_count"].get<int>();
+    }
+    if (j.contains("history_aging_done") && j["history_aging_done"].is_boolean()) {
+        plan.history_aging_done = j["history_aging_done"].get<bool>();
+    }
+    if (j.contains("retrieval_sets") && j["retrieval_sets"].is_array()) {
+        plan.retrieval_sets_present = true;
+        for (const auto& set_j : j["retrieval_sets"]) {
+            if (!set_j.is_object()) {
+                continue;
+            }
+            RetrievalSetRecord set;
+            set.step_id = set_j.value("step_id", "");
+            if (set_j.contains("chunk_hashes") && set_j["chunk_hashes"].is_array()) {
+                for (const auto& hash_j : set_j["chunk_hashes"]) {
+                    if (hash_j.is_string()) {
+                        set.chunk_hashes.push_back(hash_j.get<std::string>());
+                    }
+                }
+            }
+            plan.retrieval_sets.push_back(std::move(set));
+        }
+    }
+    if (j.contains("working_trajectory") && j["working_trajectory"].is_object()) {
+        plan.working_trajectory_present = true;
+        plan.working_trajectory = j["working_trajectory"];
+        plan.working_revisions_count = j.value("working_revisions_count", 0);
     }
     return plan;
 }
