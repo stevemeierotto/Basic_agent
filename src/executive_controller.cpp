@@ -2298,6 +2298,15 @@ void ExecutiveController::emit_goal_cognitive_metrics_unlocked(const std::string
     record.reflection_skip_reason = reflection_skip_reason_;
     record.synthesis_prompt_chars = synthesis_prompt_chars_;
     record.synthesis_context_truncated = synthesis_context_truncated_;
+    record.plan_origin = current_plan_.plan_origin;
+    for (const auto& step : current_plan_.steps) {
+        record.step_ids.push_back(step.step_id);
+        if (record.retrieval_query.empty() && step.type == StepType::RETRIEVAL
+            && step.payload.is_object() && step.payload.contains("query")
+            && step.payload["query"].is_string()) {
+            record.retrieval_query = step.payload["query"].get<std::string>();
+        }
+    }
     if (!benchmark_attribution_.empty()) {
         record.run_id = benchmark_attribution_.run_id;
         record.env_hash = benchmark_attribution_.env_hash;

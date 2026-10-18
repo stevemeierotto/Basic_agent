@@ -87,6 +87,15 @@ nlohmann::json CognitiveMetricsLogger::toJson(const GoalCognitiveMetricsRecord& 
         {"synthesis_prompt_chars", record.synthesis_prompt_chars},
         {"synthesis_context_truncated", record.synthesis_context_truncated},
     };
+    if (!record.plan_origin.empty()) {
+        json["plan_origin"] = record.plan_origin;
+    }
+    if (!record.retrieval_query.empty()) {
+        json["retrieval_query"] = record.retrieval_query;
+    }
+    if (!record.step_ids.empty()) {
+        json["step_ids"] = record.step_ids;
+    }
     if (!record.run_id.empty()) {
         json["run_id"] = record.run_id;
     }

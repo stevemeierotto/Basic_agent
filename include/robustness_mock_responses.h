@@ -19,7 +19,9 @@ class RobustnessMockResponses {
 public:
     static void reset();
     static void push(std::string response);
+    static void push(std::string response, std::string finish_reason);
     static void pushAll(const std::vector<std::string>& responses);
+    static std::string lastFinishReason();
     /** Plan N N6 — next queryDetailed returns ok=false with this error (Class A). */
     static void pushFailure(std::string error);
     static std::optional<std::string> pop();

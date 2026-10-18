@@ -350,6 +350,7 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
         if (auto scripted = Thoth::RobustnessMockResponses::pop()) {
             result.ok = true;
             result.text = *scripted;
+            result.finish_reason = Thoth::RobustnessMockResponses::lastFinishReason();
             recordTokenUsage(estimateTokenUsage(prompt, result.text));
             return result;
         }

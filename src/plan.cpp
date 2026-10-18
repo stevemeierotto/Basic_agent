@@ -115,6 +115,9 @@ nlohmann::json Plan::to_json() const {
     nlohmann::json j;
     j["plan_id"] = plan_id;
     j["goal"] = goal;
+    if (!plan_origin.empty()) {
+        j["plan_origin"] = plan_origin;
+    }
     j["current_index"] = current_index;
     j["status"] = static_cast<int>(status);
     j["created_at_ms"] = created_at_ms;
@@ -148,6 +151,9 @@ Plan Plan::from_json(const nlohmann::json& j) {
     Plan plan;
     plan.plan_id = j.value("plan_id", "");
     plan.goal = j.value("goal", "");
+    if (j.contains("plan_origin") && j["plan_origin"].is_string()) {
+        plan.plan_origin = j["plan_origin"].get<std::string>();
+    }
     plan.current_index = j.value("current_index", 0);
     plan.status = static_cast<PlanStatus>(j.value("status", 0));
     plan.created_at_ms = j.value("created_at_ms", static_cast<std::int64_t>(0));

@@ -25,14 +25,39 @@ struct GeneratedPlanAssessment {
     bool depends_on_repaired = false;
 };
 
+enum class PlannerFailureClass {
+    None,
+    Length,
+    Parse,
+    Schema,
+    Provider
+};
+
+const char* plannerFailureClassLabel(PlannerFailureClass failure);
+
 GeneratedPlanAssessment assessGeneratedPlan(const std::string& llm_response,
                                             const std::string& plan_id,
                                             const std::string& prompt_goal,
                                             bool allow_tool_steps);
 
+PlannerFailureClass classifyPlannerFailure(bool provider_ok,
+                                           const std::string& finish_reason,
+                                           const std::string& assessment_reason,
+                                           bool plan_accepted);
+
 std::string buildPlannerRetryPrompt(const std::string& prompt,
                                     const std::string& validation_reason,
-                                    const std::string& previous_response);
+                                    const std::string& previous_response,
+                                    PlannerFailureClass failure);
+
+struct LibraryProvenance {
+    std::string path;
+    std::string sha256;
+    std::string build_id;
+};
+
+/** Provenance of the loaded libbasic_agent.so. Does not substitute a build-tree path. */
+LibraryProvenance loadedLibraryProvenance();
 
 }  // namespace Thoth
 
@@ -68,5 +93,9 @@ private:
     void logGeneration(const Thoth::GenerationOutcome& outcome,
                        bool validation_ok,
                        bool fallback_used,
-                       bool kept_existing_plan) const;
+                       bool kept_existing_plan,
+                       bool depends_on_repaired,
+                       Thoth::PlannerFailureClass failure,
+                       const std::string& attempt_disposition,
+                       const Plan& recorded_plan) const;
 };

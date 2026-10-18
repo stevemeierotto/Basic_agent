@@ -84,6 +84,8 @@ struct RetrievalSetRecord {
 struct Plan {
     std::string plan_id;             // UUID string
     std::string goal;
+    /** Empty on legacy rows. "model" or "fallback" after the planner selects a plan. */
+    std::string plan_origin;
     std::vector<PlanStep> steps;
     size_t current_index = 0;
     PlanStatus status = PlanStatus::ACTIVE;

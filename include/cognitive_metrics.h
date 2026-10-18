@@ -11,6 +11,7 @@
 #include "json.hpp"
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace Thoth {
 
@@ -61,6 +62,11 @@ struct GoalCognitiveMetricsRecord {
     /** C7: last LLM synthesis prompt size and whether retrieved context was capped. */
     int synthesis_prompt_chars = 0;
     bool synthesis_context_truncated = false;
+
+    /** Planner provenance joined to this goal. Empty when the plan did not record an origin. */
+    std::string plan_origin;
+    std::string retrieval_query;
+    std::vector<std::string> step_ids;
 };
 
 class CognitiveMetricsLogger {

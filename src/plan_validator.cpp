@@ -119,6 +119,22 @@ PlanValidationResult PlanValidator::validateAndRepair(Plan& plan, bool allow_too
         return result;
     }
 
+    if (!allow_tool_steps) {
+        for (const auto& step : plan.steps) {
+            if (step.type != StepType::RETRIEVAL) {
+                continue;
+            }
+            const bool queryOk = step.payload.is_object() && step.payload.contains("query")
+                && step.payload["query"].is_string()
+                && step.payload["query"].get<std::string>().find_first_not_of(" \t\n\r")
+                       != std::string::npos;
+            if (!queryOk) {
+                result.reason = "RETRIEVAL step requires a nonempty query";
+                return result;
+            }
+        }
+    }
+
     wireRetrievalLlmDependencies(plan, result.depends_on_repaired);
 
     // Phase A: LLM/synthesis steps do not retry under the shared step deadline.

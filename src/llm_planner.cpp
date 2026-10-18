@@ -19,9 +19,14 @@
 #include "../include/grag_scorer.h"
 #include "../include/embedding_engine.h"
 #include <chrono>
+#include <cstring>
+#include <dlfcn.h>
+#include <elf.h>
+#include <fstream>
 #include <sstream>
 #include <iomanip>
 #include <optional>
+#include <vector>
 
 namespace {
 
@@ -94,12 +99,88 @@ GeneratedPlanAssessment assessGeneratedPlan(const std::string& llm_response,
     return assessment;
 }
 
+const char* plannerFailureClassLabel(PlannerFailureClass failure) {
+    switch (failure) {
+        case PlannerFailureClass::Length: return "length";
+        case PlannerFailureClass::Parse: return "parse";
+        case PlannerFailureClass::Schema: return "schema";
+        case PlannerFailureClass::Provider: return "provider";
+        case PlannerFailureClass::None: return "none";
+    }
+    return "none";
+}
+
+bool isSchemaAssessmentReason(const std::string& reason) {
+    return reason.rfind("Step missing or invalid", 0) == 0
+        || reason.rfind("Invalid 'step_type'", 0) == 0
+        || reason.rfind("Plan step is not", 0) == 0
+        || reason == "Plan contains no steps."
+        || reason.rfind("Plan has no steps", 0) == 0
+        || reason.rfind("TOOL steps", 0) == 0
+        || reason.rfind("Corpus Q&A", 0) == 0
+        || reason.rfind("First executable step", 0) == 0
+        || reason.rfind("Plan must contain", 0) == 0
+        || reason.rfind("RETRIEVAL step requires", 0) == 0;
+}
+
+std::string capDiagnostic(const std::string& text) {
+    std::string capped = text.substr(0, std::min<std::size_t>(text.size(), 240));
+    for (char& ch : capped) {
+        if (ch == '\n' || ch == '\r') {
+            ch = ' ';
+        }
+    }
+    return capped;
+}
+
+PlannerFailureClass classifyPlannerFailure(bool provider_ok,
+                                           const std::string& finish_reason,
+                                           const std::string& assessment_reason,
+                                           bool plan_accepted) {
+    if (!provider_ok) {
+        return PlannerFailureClass::Provider;
+    }
+    if (plan_accepted) {
+        return PlannerFailureClass::None;
+    }
+    if (finish_reason == "length") {
+        return PlannerFailureClass::Length;
+    }
+    if (isSchemaAssessmentReason(assessment_reason)) {
+        return PlannerFailureClass::Schema;
+    }
+    return PlannerFailureClass::Parse;
+}
+
 std::string buildPlannerRetryPrompt(const std::string& prompt,
                                     const std::string& validation_reason,
-                                    const std::string& previous_response) {
-    return prompt + "\n\nERROR: " + validation_reason
-        + ". Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\nPrevious Response:\n"
-        + previous_response;
+                                    const std::string& previous_response,
+                                    PlannerFailureClass failure) {
+    std::string retry = prompt + "\n\nERROR: " + validation_reason + ". ";
+    switch (failure) {
+        case PlannerFailureClass::Length:
+            retry += "Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\n";
+            retry += "Previous response omitted because it hit the completion token limit.";
+            return retry;
+        case PlannerFailureClass::Parse:
+            retry += "Return one fresh, complete JSON plan. Do not continue or repair the previous text.\n";
+            return retry;
+        case PlannerFailureClass::Schema:
+            retry += "A required field is missing or invalid. Return a new JSON plan with a nonempty "
+                     "description on every step, a nonempty retrieval query, and depends_on on the LLM step. "
+                     "Do not repeat the rejected plan.\n";
+            return retry;
+        case PlannerFailureClass::Provider:
+            retry += "The model provider failed. This is not a schema error. Return one complete JSON plan.\n";
+            if (!previous_response.empty()) {
+                retry += "Provider detail: " + capDiagnostic(previous_response) + "\n";
+            }
+            return retry;
+        case PlannerFailureClass::None:
+            break;
+    }
+    retry += "Respond with JSON only. Step 1 MUST be RETRIEVAL, step 2 MUST be LLM with depends_on.\n";
+    return retry;
 }
 
 }  // namespace Thoth
@@ -133,6 +214,7 @@ Plan finalizePlanOrFallback(const std::string& plan_id,
                                    .count();
         plan.updated_at_ms = plan.created_at_ms;
         plan.status = PlanStatus::ACTIVE;
+        plan.plan_origin = "model";
         return plan;
     }
 
@@ -142,6 +224,7 @@ Plan finalizePlanOrFallback(const std::string& plan_id,
                                std::chrono::system_clock::now().time_since_epoch())
                                .count();
     plan.updated_at_ms = plan.created_at_ms;
+    plan.plan_origin = "fallback";
     return plan;
 }
 
@@ -268,32 +351,56 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
     call.attempt = 0;
     call.plan_id = plan.plan_id;
     const Thoth::GenerationOutcome first = llm_->generateCall(prompt, -1, {}, call);
-    std::string llm_response = first.ok ? first.text : std::string("Assistant: [Error] ") + first.error;
 
     bool depends_on_repaired = false;
     bool fallback_used = false;
     std::string validation_reason;
-    auto validated = parsePlanWithValidation(
-        llm_response, plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
-    logGeneration(first, validated.has_value(), false, false);
+    std::optional<Plan> validated;
+    Thoth::PlannerFailureClass first_failure = Thoth::PlannerFailureClass::None;
+    if (!first.ok) {
+        first_failure = Thoth::PlannerFailureClass::Provider;
+        validation_reason = first.error;
+    } else {
+        validated = parsePlanWithValidation(
+            first.text, plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
+        first_failure = Thoth::classifyPlannerFailure(
+            true, first.finish_reason, validation_reason, validated.has_value());
+    }
 
     if (!validated.has_value()) {
+        logGeneration(first, false, false, false, depends_on_repaired, first_failure, "retry", Plan{});
         StructuredLogger::instance().log(LogLevel::Warn, "planner", "plan_validation_failed",
             "First plan attempt failed (" + validation_reason + "), retrying...",
-            {{"reason", validation_reason}});
+            {{"reason", validation_reason},
+             {"failure_class", Thoth::plannerFailureClassLabel(first_failure)}});
 
-        std::string retry_prompt = Thoth::buildPlannerRetryPrompt(prompt, validation_reason, llm_response);
+        const std::string diagnostic = first.ok ? first.text : first.error;
+        std::string retry_prompt = Thoth::buildPlannerRetryPrompt(
+            prompt, validation_reason, diagnostic, first_failure);
         Thoth::GenerationCallContext retry = call;
         retry.call_type = "plan_retry";
         retry.attempt = 1;
         const Thoth::GenerationOutcome second = llm_->generateCall(retry_prompt, -1, {}, retry);
-        llm_response = second.ok ? second.text : std::string("Assistant: [Error] ") + second.error;
-        validated = parsePlanWithValidation(
-            llm_response, plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
-        logGeneration(second, validated.has_value(), !validated.has_value(), false);
+        Thoth::PlannerFailureClass second_failure = Thoth::PlannerFailureClass::None;
+        if (!second.ok) {
+            second_failure = Thoth::PlannerFailureClass::Provider;
+            validation_reason = second.error;
+            validated.reset();
+        } else {
+            validated = parsePlanWithValidation(
+                second.text, plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
+            second_failure = Thoth::classifyPlannerFailure(
+                true, second.finish_reason, validation_reason, validated.has_value());
+        }
+        plan = finalizePlanOrFallback(plan.plan_id, prompt_goal, validated, fallback_used);
+        logGeneration(second, validated.has_value(), fallback_used, false, depends_on_repaired,
+                      validated.has_value() ? Thoth::PlannerFailureClass::None : second_failure,
+                      validated.has_value() ? "accepted" : "fallback", plan);
+    } else {
+        plan = finalizePlanOrFallback(plan.plan_id, prompt_goal, validated, fallback_used);
+        logGeneration(first, true, false, false, depends_on_repaired, Thoth::PlannerFailureClass::None,
+                      "accepted", plan);
     }
-
-    plan = finalizePlanOrFallback(plan.plan_id, prompt_goal, validated, fallback_used);
 
     StructuredLogger::instance().log(
         LogLevel::Info,
@@ -305,6 +412,7 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
          {"step_count", plan.steps.size()},
          {"depends_on_repaired", depends_on_repaired},
          {"fallback_used", fallback_used},
+         {"plan_origin", plan.plan_origin},
          {"validation_reason", validation_reason}});
 
     save_plan(plan);
@@ -351,33 +459,56 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
     const Thoth::GenerationOutcome first_raw = llm_->generateCall(prompt, -1, {}, call);
     Thoth::GenerationOutcome first = first_raw;
     first.wrapper_sha256 = wrapper_hash;
-    std::string llm_response = first.ok ? first.text : std::string("Assistant: [Error] ") + first.error;
 
     bool depends_on_repaired = false;
     bool fallback_used = false;
     std::string validation_reason;
-    auto validated = parsePlanWithValidation(
-        llm_response, existing_plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
+    std::optional<Plan> validated;
+    std::optional<Thoth::GenerationOutcome> retryOutcome;
+    Thoth::PlannerFailureClass first_failure = Thoth::PlannerFailureClass::None;
+    if (!first.ok) {
+        first_failure = Thoth::PlannerFailureClass::Provider;
+        validation_reason = first.error;
+    } else {
+        validated = parsePlanWithValidation(
+            first.text, existing_plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
+        first_failure = Thoth::classifyPlannerFailure(
+            true, first.finish_reason, validation_reason, validated.has_value());
+    }
 
     if (!validated.has_value()) {
-        logGeneration(first, false, false, false);
+        logGeneration(first, false, false, false, depends_on_repaired, first_failure, "retry", Plan{});
         StructuredLogger::instance().log(LogLevel::Warn, "planner", "revision_validation_failed",
             "First revision attempt failed (" + validation_reason + "), retrying...",
-            {{"reason", validation_reason}});
+            {{"reason", validation_reason},
+             {"failure_class", Thoth::plannerFailureClassLabel(first_failure)}});
 
-        std::string retry_prompt = Thoth::buildPlannerRetryPrompt(prompt, validation_reason, llm_response);
+        const std::string diagnostic = first.ok ? first.text : first.error;
+        std::string retry_prompt = Thoth::buildPlannerRetryPrompt(
+            prompt, validation_reason, diagnostic, first_failure);
         Thoth::GenerationCallContext retry = call;
         retry.call_type = "revision_retry";
         retry.attempt = 1;
         const Thoth::GenerationOutcome second_raw = llm_->generateCall(retry_prompt, -1, {}, retry);
         Thoth::GenerationOutcome second = second_raw;
         second.wrapper_sha256 = wrapper_hash;
-        llm_response = second.ok ? second.text : std::string("Assistant: [Error] ") + second.error;
-        validated = parsePlanWithValidation(
-            llm_response, existing_plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used, validation_reason);
-        logGeneration(second, validated.has_value(), false, !validated.has_value());
-    } else {
-        logGeneration(first, true, false, false);
+        Thoth::PlannerFailureClass second_failure = Thoth::PlannerFailureClass::None;
+        if (!second.ok) {
+            second_failure = Thoth::PlannerFailureClass::Provider;
+            validation_reason = second.error;
+            validated.reset();
+        } else {
+            validated = parsePlanWithValidation(
+                second.text, existing_plan.plan_id, prompt_goal, false, depends_on_repaired, fallback_used,
+                validation_reason);
+            second_failure = Thoth::classifyPlannerFailure(
+                true, second.finish_reason, validation_reason, validated.has_value());
+        }
+        retryOutcome = second;
+        if (!validated.has_value()) {
+            logGeneration(second, false, false, true, depends_on_repaired, second_failure, "kept_existing",
+                          existing_plan);
+        }
     }
 
     if (validated.has_value()) {
@@ -387,6 +518,11 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
         revised.updated_at_ms = nowMs();
         revised.status = PlanStatus::ACTIVE;
         revised.current_index = 0;
+        revised.plan_origin = "model";
+        const Thoth::GenerationOutcome& acceptedOutcome = retryOutcome.has_value() ? *retryOutcome : first;
+
+        logGeneration(acceptedOutcome, true, false, false, depends_on_repaired,
+                      Thoth::PlannerFailureClass::None, "accepted", revised);
 
         StructuredLogger::instance().log(
             LogLevel::Info,
@@ -396,7 +532,8 @@ Plan LLMPlanner::revise_plan(const Plan& existing_plan,
             {{"plan_id", revised.plan_id},
              {"step_count", revised.steps.size()},
              {"depends_on_repaired", depends_on_repaired},
-             {"fallback_used", false}});
+             {"fallback_used", false},
+             {"plan_origin", revised.plan_origin}});
 
         save_plan(revised);
         return revised;
@@ -434,12 +571,32 @@ std::string LLMPlanner::revisionWrapperSha256(const Plan& existing_plan,
 void LLMPlanner::logGeneration(const Thoth::GenerationOutcome& outcome,
                                bool validation_ok,
                                bool fallback_used,
-                               bool kept_existing_plan) const {
+                               bool kept_existing_plan,
+                               bool depends_on_repaired,
+                               Thoth::PlannerFailureClass failure,
+                               const std::string& attempt_disposition,
+                               const Plan& recorded_plan) const {
     Thoth::GenerationRecordFields fields;
     fields.has_validation_ok = true;
     fields.validation_ok = validation_ok;
     fields.fallback_used = fallback_used;
     fields.kept_existing_plan = kept_existing_plan;
+    fields.has_depends_on_repaired = true;
+    fields.depends_on_repaired = depends_on_repaired;
+    fields.failure_class = Thoth::plannerFailureClassLabel(failure);
+    fields.attempt_disposition = attempt_disposition;
+    fields.completion_sha256 = Thoth::sha256Hex(outcome.text);
+    if (attempt_disposition != "retry") {
+        fields.plan_origin = recorded_plan.plan_origin;
+        for (const auto& step : recorded_plan.steps) {
+            fields.step_ids.push_back(step.step_id);
+            if (fields.retrieval_query.empty() && step.type == StepType::RETRIEVAL
+                && step.payload.is_object() && step.payload.contains("query")
+                && step.payload["query"].is_string()) {
+                fields.retrieval_query = step.payload["query"].get<std::string>();
+            }
+        }
+    }
     fields.associated_generation_id = outcome.generation_id;
     fields.context_overflow = reportedContextOverflow(outcome);
     Thoth::GenerationCallLog::append(outcome, fields);
@@ -474,4 +631,88 @@ void LLMPlanner::save_plan(const Plan& plan) {
             {"step_count", plan.steps.size()},
             {"has_embedding", !rec.embedding.empty()}
         });
+}
+
+namespace {
+
+std::string gnuBuildIdHex(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return "unavailable";
+    }
+    Elf64_Ehdr header{};
+    in.read(reinterpret_cast<char*>(&header), sizeof(header));
+    if (!in || std::memcmp(header.e_ident, ELFMAG, SELFMAG) != 0 || header.e_ident[EI_CLASS] != ELFCLASS64
+        || header.e_ident[EI_DATA] != ELFDATA2LSB) {
+        return "unavailable";
+    }
+    for (Elf64_Half i = 0; i < header.e_phnum; ++i) {
+        in.seekg(static_cast<std::streamoff>(header.e_phoff + static_cast<Elf64_Off>(i) * header.e_phentsize));
+        Elf64_Phdr program{};
+        in.read(reinterpret_cast<char*>(&program), sizeof(program));
+        if (!in || program.p_type != PT_NOTE) {
+            continue;
+        }
+        std::vector<char> notes(static_cast<std::size_t>(program.p_filesz));
+        in.seekg(static_cast<std::streamoff>(program.p_offset));
+        in.read(notes.data(), static_cast<std::streamsize>(notes.size()));
+        if (!in) {
+            return "unavailable";
+        }
+        std::size_t offset = 0;
+        while (offset + 12 <= notes.size()) {
+            std::uint32_t namesz = 0;
+            std::uint32_t descsz = 0;
+            std::uint32_t type = 0;
+            std::memcpy(&namesz, notes.data() + offset, 4);
+            std::memcpy(&descsz, notes.data() + offset + 4, 4);
+            std::memcpy(&type, notes.data() + offset + 8, 4);
+            const std::size_t nameOffset = offset + 12;
+            const std::size_t descOffset = nameOffset + ((static_cast<std::size_t>(namesz) + 3u) & ~3u);
+            const std::size_t next = descOffset + ((static_cast<std::size_t>(descsz) + 3u) & ~3u);
+            if (next > notes.size()) {
+                break;
+            }
+            if (type == NT_GNU_BUILD_ID && namesz >= 3
+                && std::string(notes.data() + nameOffset, 3) == "GNU") {
+                std::ostringstream hex;
+                hex << std::hex << std::setfill('0');
+                for (std::uint32_t byte = 0; byte < descsz; ++byte) {
+                    hex << std::setw(2)
+                        << static_cast<int>(static_cast<unsigned char>(notes[descOffset + byte]));
+                }
+                return hex.str();
+            }
+            offset = next;
+        }
+    }
+    return "unavailable";
+}
+
+} // namespace
+
+Thoth::LibraryProvenance Thoth::loadedLibraryProvenance() {
+    LibraryProvenance provenance;
+    provenance.sha256 = "unavailable";
+    provenance.build_id = "unavailable";
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(&loadedLibraryProvenance), &info) == 0 || info.dli_fname == nullptr) {
+        return provenance;
+    }
+    const std::string loaded(info.dli_fname);
+    if (loaded.find("libbasic_agent.so") == std::string::npos) {
+        return provenance;
+    }
+    provenance.path = loaded;
+    std::ifstream libraryFile(loaded, std::ios::binary);
+    if (libraryFile) {
+        std::ostringstream bytes;
+        bytes << libraryFile.rdbuf();
+        const std::string hash = sha256Hex(bytes.str());
+        if (!hash.empty()) {
+            provenance.sha256 = hash;
+        }
+    }
+    provenance.build_id = gnuBuildIdHex(loaded);
+    return provenance;
 }

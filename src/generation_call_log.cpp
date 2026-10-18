@@ -90,6 +90,27 @@ bool GenerationCallLog::append(const GenerationOutcome& outcome, const Generatio
     if (fields.has_validation_ok) {
         line["validation_ok"] = fields.validation_ok;
     }
+    if (fields.has_depends_on_repaired) {
+        line["depends_on_repaired"] = fields.depends_on_repaired;
+    }
+    if (!fields.failure_class.empty()) {
+        line["failure_class"] = fields.failure_class;
+    }
+    if (!fields.attempt_disposition.empty()) {
+        line["attempt_disposition"] = fields.attempt_disposition;
+    }
+    if (!fields.plan_origin.empty()) {
+        line["plan_origin"] = fields.plan_origin;
+    }
+    if (!fields.completion_sha256.empty()) {
+        line["completion_sha256"] = fields.completion_sha256;
+    }
+    if (!fields.retrieval_query.empty()) {
+        line["retrieval_query"] = fields.retrieval_query;
+    }
+    if (!fields.step_ids.empty()) {
+        line["step_ids"] = fields.step_ids;
+    }
     if (!outcome.wrapper_sha256.empty()) {
         line["wrapper_sha256"] = outcome.wrapper_sha256;
     }

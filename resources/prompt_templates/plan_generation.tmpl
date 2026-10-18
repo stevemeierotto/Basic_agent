@@ -1,11 +1,10 @@
 Rules:
-- Generate a JSON plan using ONLY retrieval and synthesis.
-- Respond with JSON only (no markdown fences).
-- Minimum 2 steps.
-- Step 1 MUST be step_type RETRIEVAL with payload {"query": "<short query derived from goal>", "top_k": 5}.
-- Step 2 MUST be step_type LLM to synthesize the answer from retrieved context.
-- Step 2 MUST set depends_on to the RETRIEVAL step_id.
-- Do NOT emit TOOL steps.
+- Respond with one valid JSON object and no markdown fences.
+- The object must contain a root plan array.
+- Every step needs a nonempty string step_id, a string step_type, and a nonempty string description.
+- Step 1 must be step_type RETRIEVAL. Its payload needs a nonempty string query and top_k 5.
+- Step 2 must be step_type LLM, and depends_on must list the RETRIEVAL step_id.
+- Do not emit TOOL steps.
 Schema:
 {"plan":[{"step_id":"retrieve-context","step_type":"RETRIEVAL","description":"Retrieve relevant corpus context","payload":{"query":"...","top_k":5}},{"step_id":"synthesize","step_type":"LLM","description":"Summarize findings","depends_on":["retrieve-context"],"payload":{}}]}
 Goal: {{goal}}

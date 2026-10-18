@@ -74,6 +74,17 @@ struct GenerationRecordFields {
     bool has_validation_ok = false;
     bool fallback_used = false;
     bool kept_existing_plan = false;
+    bool depends_on_repaired = false;
+    bool has_depends_on_repaired = false;
+    /** none, length, parse, schema, or provider. Empty omits the field. */
+    std::string failure_class;
+    /** accepted, retry, fallback, or kept_existing. Empty omits the field. */
+    std::string attempt_disposition;
+    /** Set on the terminal planning record only. */
+    std::string plan_origin;
+    std::string completion_sha256;
+    std::string retrieval_query;
+    std::vector<std::string> step_ids;
     /** Provider generation this decision refers to. Same id as outcome.generation_id. */
     std::string associated_generation_id;
     bool context_overflow = false;

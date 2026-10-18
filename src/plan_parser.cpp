@@ -10,12 +10,82 @@
 #include "../include/decision_trace.h"
 #include "../include/json.hpp"
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace Thoth {
 
 using json = nlohmann::json;
+
+namespace {
+
+std::optional<std::string> balancedObject(const std::string& text, std::size_t open, std::size_t limit) {
+    if (open >= limit || text[open] != '{') {
+        return std::nullopt;
+    }
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (std::size_t i = open; i < limit; ++i) {
+        const char c = text[i];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '{') {
+            ++depth;
+        } else if (c == '}') {
+            --depth;
+            if (depth == 0) {
+                return text.substr(open, i - open + 1);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+/** Leftmost balanced object whose root has a plan array. Schema is checked by the caller. */
+std::optional<std::string> leftmostPlanObject(const std::string& raw) {
+    std::size_t begin = 0;
+    std::size_t end = raw.size();
+    const std::size_t fence = raw.find("```json");
+    if (fence != std::string::npos) {
+        begin = fence + std::string("```json").size();
+        const std::size_t close = raw.find("```", begin);
+        if (close != std::string::npos) {
+            end = close;
+        }
+    }
+
+    for (std::size_t i = begin; i < end; ++i) {
+        if (raw[i] != '{') {
+            continue;
+        }
+        const std::optional<std::string> slice = balancedObject(raw, i, end);
+        if (!slice.has_value()) {
+            continue;
+        }
+        try {
+            const json parsed = json::parse(*slice);
+            if (parsed.is_object() && parsed.contains("plan") && parsed["plan"].is_array()) {
+                return slice;
+            }
+        } catch (const json::exception&) {
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
 
 // Helper to safely get a value from json or a default if not present/wrong type
 template<typename T>
@@ -71,7 +141,8 @@ std::optional<Plan> PlanParser::parse(const std::string& raw_llm_output,
         failure_reason->clear();
     }
 
-    std::string json_str = extractJsonString(raw_llm_output);
+    const std::optional<std::string> plan_object = leftmostPlanObject(raw_llm_output);
+    std::string json_str = plan_object.has_value() ? *plan_object : extractJsonString(raw_llm_output);
     json parsed_json;
 
     try {
@@ -103,7 +174,9 @@ std::optional<Plan> PlanParser::parse(const std::string& raw_llm_output,
             log_failure("Step missing or invalid 'step_type'.", step_json.dump());
             return std::nullopt;
         }
-        if (!step_json.contains("description") || !step_json["description"].is_string()) {
+        if (!step_json.contains("description") || !step_json["description"].is_string()
+            || step_json["description"].get<std::string>().find_first_not_of(" \t\n\r")
+                   == std::string::npos) {
             log_failure("Step missing or invalid 'description'.", step_json.dump());
             return std::nullopt;
         }
