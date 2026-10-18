@@ -53,6 +53,7 @@ set(BASIC_AGENT_SOURCES
     src/flat_vector_store.cpp
     src/constraint_checker.cpp
     src/fact_store.cpp
+    src/fixed_evidence_containment.cpp
     src/store_fact_tool.cpp
     src/self_correct_tool.cpp
     src/executive_controller.cpp

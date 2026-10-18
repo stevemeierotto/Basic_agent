@@ -1,5 +1,6 @@
 #include "tools.h"
 #include "config.h"
+#include "../include/fixed_evidence_containment.h"
 #include "gmail_read_labels_tool.h"
 #include "summarize_text_tool.h"
 #include "project_analyze_tool.h"
@@ -48,6 +49,14 @@ void ToolRegistry::registerTool(std::unique_ptr<ITool> tool) {
 }
 
 nlohmann::json ToolRegistry::executeTool(const std::string& name, const nlohmann::json& input) const {
+    if (Thoth::FixedEvidenceContainment::enabled()) {
+        return {
+            {"status", "error"},
+            {"error_message", "fixed_evidence_containment"},
+            {"tool", name}
+        };
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = tools_.find(name);
     if (it == tools_.end()) {

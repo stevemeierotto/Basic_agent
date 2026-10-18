@@ -20,6 +20,7 @@
 #include "../include/generation_budget.h"
 #include "../include/generation_call_log.h"
 #include "../include/goal_text_utils.h"
+#include "../include/fixed_evidence_containment.h"
 #include "../include/grag_diagnostics.h"
 #include "../include/memory.h"
 #include "../include/step_metrics_repository.h"
@@ -66,6 +67,59 @@ nlohmann::json extractToolArgs(const nlohmann::json& payload) {
         args["operation"] = payload["operation"];
     }
     return args;
+}
+
+bool objectHasToolMarker(const nlohmann::json& value) {
+    return value.is_object() && (value.contains("tool") || value.contains("tool_name"));
+}
+
+std::string markerText(const nlohmann::json& value) {
+    if (value.is_string()) {
+        return value.get<std::string>();
+    }
+    return value.dump();
+}
+
+std::string markerLabel(const nlohmann::json& object) {
+    if (!object.is_object()) {
+        return {};
+    }
+    if (object.contains("tool")) {
+        return markerText(object["tool"]);
+    }
+    if (object.contains("tool_name")) {
+        return markerText(object["tool_name"]);
+    }
+    return {};
+}
+
+bool toolExecutionMarkerPresent(const PlanStep& step) {
+    if (objectHasToolMarker(step.payload)) {
+        return true;
+    }
+    if (step.tool.is_string()) {
+        return true;
+    }
+    if (objectHasToolMarker(step.tool)) {
+        return true;
+    }
+    return !step.tool.is_null() && !step.tool.is_object() && !step.tool.is_string();
+}
+
+std::string safeRequestedToolName(const PlanStep& step) {
+    if (objectHasToolMarker(step.payload)) {
+        return markerLabel(step.payload);
+    }
+    if (step.tool.is_string()) {
+        return step.tool.get<std::string>();
+    }
+    if (objectHasToolMarker(step.tool)) {
+        return markerLabel(step.tool);
+    }
+    if (!step.tool.is_null() && !step.tool.is_object() && !step.tool.is_string()) {
+        return step.tool.dump();
+    }
+    return {};
 }
 
 bool mockLLMEnabled() {
@@ -418,6 +472,15 @@ StepResult WorkflowEngine::executeTool(const PlanStep& step) {
             return result;
         }
 
+        if (Thoth::FixedEvidenceContainment::enabled()) {
+            const nlohmann::json toolOutput =
+                toolRegistry_->executeTool(safeRequestedToolName(step), nlohmann::json::object());
+            result.success = false;
+            result.error_message = toolOutput.value("error_message", "fixed_evidence_containment");
+            result.data = toolOutput;
+            return result;
+        }
+
         std::string toolName = extractToolName(step.payload);
         nlohmann::json toolArgs = extractToolArgs(step.payload);
         if (!toolArgs.contains("confirmed")) {
@@ -479,6 +542,10 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
                                             const StepExecutionContext& context) {
     StepResult result;
     try {
+        if (Thoth::FixedEvidenceContainment::enabled() && toolExecutionMarkerPresent(step)) {
+            return executeTool(step);
+        }
+
         if (!ragPipeline_) {
             result.success = false;
             result.error_message = "RAGPipeline not available";
