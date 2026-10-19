@@ -166,6 +166,7 @@ public:
         int64_t duration_ms;
         int failure_count;
         std::vector<float> goal_embedding;
+        std::string plan_origin = "unknown";
     };
 
     virtual bool storePastPlan(const PastPlanRecord& plan, int version) = 0;
@@ -262,6 +263,7 @@ public:
         int64_t created_at;
         int usage_count = 0; // Phase 7.7
         int tier = 0;        // Phase 7.7 (0: HOT, 1: WARM, 2: COLD)
+        std::string plan_origin = "unknown";
     };
 
     virtual bool saveTrajectory(const CognateTrajectoryRecord& record) = 0;
@@ -275,6 +277,8 @@ public:
         std::string step_pattern_json;
         float success_rate;
         int64_t created_at;
+        /** model when promoted from eligible trajectories. Legacy rows stay unknown. */
+        std::string experience_origin = "unknown";
     };
 
     virtual bool saveStrategy(const CognateStrategyRecord& record) = 0;
@@ -296,6 +300,43 @@ public:
     virtual bool storeEpisodeStep(const EpisodeStepRecord& step) = 0;
     virtual std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) = 0;
     virtual std::vector<EpisodeStepRecord> getAllEpisodeSteps() = 0;
+
+    /**
+     * Read-only census of episode_steps. duplicate_goal_step_groups counts
+     * repeated (goal_id, step_index) pairs. conflicting_goal_step_groups is
+     * the subset whose result, summary, or action differs. identical_duplicate_groups
+     * is the subset with the same observation repeated. Nothing is deleted.
+     */
+    struct EpisodeIdentityReport {
+        int row_count = 0;
+        int duplicate_goal_step_groups = 0;
+        int conflicting_goal_step_groups = 0;
+        int identical_duplicate_groups = 0;
+        bool observation_unique_index = false;
+    };
+    virtual EpisodeIdentityReport inspectEpisodeIdentity() = 0;
+
+    /**
+     * Active-plan checkpoint, optional cognate row, and optional episode
+     * observation commit together or not at all.
+     */
+    virtual bool commitStepCheckpoint(const ActivePlanRecord& plan,
+                                      const std::optional<CognatePlanRecord>& cognate,
+                                      const std::optional<EpisodeStepRecord>& episode) = 0;
+
+    /**
+     * One terminal cognitive-metrics record per plan. metrics_id is the
+     * plan_id. INSERT OR IGNORE keeps the first payload immutable.
+     */
+    struct CognitiveMetricsOutboxRow {
+        std::string metrics_id;
+        std::string plan_id;
+        std::string payload_json;
+    };
+    virtual bool enqueueCognitiveMetrics(const std::string& plan_id,
+                                         const std::string& payload_json) = 0;
+    virtual std::vector<CognitiveMetricsOutboxRow> pendingCognitiveMetrics() = 0;
+    virtual bool markCognitiveMetricsFlushed(const std::string& metrics_id) = 0;
 
     // Cognate Experiments (Scientific Mode Integration)
     struct CognateExperimentRecord {

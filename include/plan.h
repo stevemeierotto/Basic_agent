@@ -80,6 +80,34 @@ struct RetrievalSetRecord {
     std::vector<std::string> chunk_hashes;
 };
 
+// Counters checkpointed with the active plan. Absent on legacy rows.
+// Present means these values were durable at the last plan write, not that
+// they are a complete goal total after a later crash.
+struct GoalMetricsCheckpoint {
+    bool present = false;
+    bool window_assigned = false;
+    std::string window_id;
+    std::string protocol_version;
+    std::string metric_schema_version;
+    std::string environment_schema_version;
+    std::string cohort_fingerprint;
+    std::string run_id;
+    std::string env_hash;
+    int64_t goal_started_at_ms = 0;
+    int64_t planning_time_ms = 0;
+    int64_t retrieval_time_ms = 0;
+    int64_t llm_synthesis_time_ms = 0;
+    int retrieved_chunk_count = 0;
+    float grag_alpha = 0.0f;
+    std::string grag_routing_mode;
+    int synthesis_prompt_chars = 0;
+    bool synthesis_context_truncated = false;
+    int64_t planning_tokens = 0;
+    int64_t prompt_tokens = 0;
+    int64_t completion_tokens = 0;
+    int64_t total_tokens = 0;
+};
+
 // Plan — the full goal execution plan
 struct Plan {
     std::string plan_id;             // UUID string
@@ -98,6 +126,10 @@ struct Plan {
     // replacement plan. The stored status stays ACTIVE until that plan exists.
     bool reflection_pending = false;
     int reflection_count = 0;
+    // Absent on plans saved before reflection recovery. When present, resume
+    // uses this value instead of recalculating the reflection sentence.
+    bool recorded_trajectory_score_present = false;
+    float recorded_trajectory_score = 0.0f;
     // True only after history-store aging commits with this marker.
     bool history_aging_done = false;
     // False when `retrieval_sets` was absent. An empty present list is a real value.
@@ -108,6 +140,7 @@ struct Plan {
     bool working_trajectory_present = false;
     nlohmann::json working_trajectory = nlohmann::json::object();
     int working_revisions_count = 0;
+    GoalMetricsCheckpoint goal_metrics;
 
     nlohmann::json to_json() const;
     /** Planner-boundary view: root `plan` array and string `step_type`. Not the stored plan. */

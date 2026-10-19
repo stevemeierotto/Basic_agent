@@ -98,14 +98,16 @@ public:
      * an autocommit INSERT OR REPLACE into active_plans has reached
      * SQLITE_DONE and sqlite3_get_autocommit confirms the connection is no
      * longer inside a transaction, and only after sqlite3_finalize has
-     * destroyed the statement. The write is durable to the WAL before the
-     * callback. The callback is not invoked when the statement fails, and it
-     * is not invoked when the connection is inside an explicit transaction
-     * (that insert is not committed yet).
+     * destroyed the statement. commitStepCheckpoint invokes it after COMMIT
+     * returns and the connection is back in autocommit, so the active plan
+     * and its episode row are durable before the callback. The callback is
+     * not invoked when the statement fails, and it is not invoked while the
+     * connection is still inside an explicit transaction.
      *
      * The repository mutex that guards this pointer is not held during the
-     * callback. Memory::storeActivePlan may still hold its own mutex, so the
-     * callback must not re-enter Memory or this SQLite connection. Exceptions
+     * callback. Memory::storeActivePlan or Memory::commitStepCheckpoint may
+     * still hold its own mutex, so the callback must not re-enter Memory or
+     * this SQLite connection. Exceptions
      * from the callback are caught and do not change the true/false result of
      * the committed write.
      */
@@ -131,6 +133,14 @@ public:
     bool storeEpisodeStep(const EpisodeStepRecord& step) override;
     std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) override;
     std::vector<EpisodeStepRecord> getAllEpisodeSteps() override;
+    EpisodeIdentityReport inspectEpisodeIdentity() override;
+    bool commitStepCheckpoint(const ActivePlanRecord& plan,
+                              const std::optional<CognatePlanRecord>& cognate,
+                              const std::optional<EpisodeStepRecord>& episode) override;
+    bool enqueueCognitiveMetrics(const std::string& plan_id,
+                                 const std::string& payload_json) override;
+    std::vector<CognitiveMetricsOutboxRow> pendingCognitiveMetrics() override;
+    bool markCognitiveMetricsFlushed(const std::string& metrics_id) override;
 
     // Cognate Experiments
     bool saveExperiment(const CognateExperimentRecord& record) override;
@@ -156,6 +166,9 @@ private:
     static int authorizeConnection(void* user, int action, const char* arg1, const char* arg2,
                                    const char* db_name, const char* trigger);
     void clearTransactionOwnership();
+    void configureEpisodeIdentity();
+    bool episodeObservationExists(const EpisodeStepRecord& step);
+    bool observation_unique_ = false;
 };
 
 } // namespace Thoth

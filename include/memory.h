@@ -45,6 +45,7 @@ public:
         int64_t created_at;
         int usage_count;
         int tier;
+        std::string plan_origin = "unknown";
     };
 
     // Constructor / Destructor
@@ -155,13 +156,21 @@ public:
     bool commitReinforcedPlan(const std::vector<Thoth::MemoryRepository::Edge>& edges,
                               const Thoth::MemoryRepository::ActivePlanRecord& plan);
     // Existing aging formulas plus the history-aging marker, or neither.
-    bool commitHistoryStoreAging(const Thoth::MemoryRepository::ActivePlanRecord& plan);
+    bool commitHistoryStoreAging(const Thoth::MemoryRepository::ActivePlanRecord& plan,
+                                 const std::string* metrics_payload = nullptr);
+    bool commitCognitiveMetrics(const std::string& plan_id, const std::string& payload_json);
+    std::vector<Thoth::MemoryRepository::CognitiveMetricsOutboxRow> pendingCognitiveMetrics();
+    bool markCognitiveMetricsFlushed(const std::string& metrics_id);
 
     // Episode Steps (Phase 5, Step 5.5)
     using EpisodeStepRecord = Thoth::MemoryRepository::EpisodeStepRecord;
     void storeEpisodeStep(const EpisodeStepRecord& step);
     std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) const;
     std::vector<EpisodeStepRecord> getAllEpisodeSteps() const;
+    Thoth::MemoryRepository::EpisodeIdentityReport inspectEpisodeIdentity() const;
+    bool commitStepCheckpoint(const Thoth::MemoryRepository::ActivePlanRecord& plan,
+                              const std::optional<Thoth::MemoryRepository::CognatePlanRecord>& cognate,
+                              const std::optional<EpisodeStepRecord>& episode);
 
     std::shared_ptr<Thoth::MemoryRepository> getRepo() const;
 
@@ -217,7 +226,8 @@ public:
 private:
     void migrateEmbeddings(); // Step 2 migration path
     bool applyAgingLocked(bool transactional,
-                          const Thoth::MemoryRepository::ActivePlanRecord* marker);
+                          const Thoth::MemoryRepository::ActivePlanRecord* marker,
+                          const std::string* metrics_payload);
     void consolidateIfNeeded(const std::string& sessionId);
     void onSessionActivated(const std::string& sessionId);
     int64_t currentTimeMs() const;

@@ -7,6 +7,7 @@
  */
 
 #include "../include/strategy_engine.h"
+#include "../include/experience_provenance.h"
 #include "../include/logger.h"
 #include <unordered_map>
 #include <algorithm>
@@ -33,6 +34,9 @@ void StrategyEngine::processTrajectories() {
     std::unordered_map<std::string, PatternCandidate> candidates;
 
     for (const auto& rec : all_trajs) {
+        if (!learningEligibleOrigin(rec.plan_origin)) {
+            continue;
+        }
         try {
             nlohmann::json tj = nlohmann::json::parse(rec.trajectory_json);
             if (!tj.contains("steps") || !tj["steps"].is_array()) continue;
@@ -99,6 +103,17 @@ void StrategyEngine::processTrajectories() {
             nlohmann::json pattern_j = cand.steps;
             strategy.step_pattern_json = pattern_j.dump();
             strategy.success_rate = avg_success;
+            strategy.experience_origin = kPlanOriginModel;
+            if (auto existing = memory_->loadStrategy(strategy.strategy_id)) {
+                if (!learningEligibleOrigin(existing->experience_origin)) {
+                    StructuredLogger::instance().log(LogLevel::Info, "strategy_engine",
+                        "STRATEGY_PROMOTION_SKIPPED",
+                        "Left an unclassified strategy unchanged",
+                        {{"strategy_id", strategy.strategy_id},
+                         {"experience_origin", normalizePlanOrigin(existing->experience_origin)}});
+                    continue;
+                }
+            }
             strategy.created_at = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::system_clock::now().time_since_epoch()).count();
 
@@ -111,6 +126,8 @@ void StrategyEngine::processTrajectories() {
                     {"occurrences", cand.count}, 
                     {"success_rate", avg_success},
                     {"pattern", key},
+                    {"experience_origin", strategy.experience_origin},
+                    {"learning_eligible", true},
                     {"thesis_threshold_met", true}
                 });
         }

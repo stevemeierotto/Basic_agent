@@ -64,9 +64,23 @@ struct GoalCognitiveMetricsRecord {
     bool synthesis_context_truncated = false;
 
     /** Planner provenance joined to this goal. Empty when the plan did not record an origin. */
-    std::string plan_origin;
+    std::string plan_origin = "unknown";
     std::string retrieval_query;
     std::vector<std::string> step_ids;
+    bool learning_eligible = false;
+
+    /**
+     * True when the numeric counters are not an exact goal total.
+     * not_checkpointed: legacy plan, counters omitted.
+     * checkpoint_gap: values in available_counters are a lower bound. The
+     * interval after the last durable checkpoint until the crash is missing.
+     */
+    bool metrics_partial = false;
+    std::string metrics_partial_reason;
+    bool emit_exact_counters = true;
+    bool emit_available_counters = false;
+    bool emit_goal_started = true;
+    bool emit_wall_clock = true;
 };
 
 class CognitiveMetricsLogger {
@@ -74,6 +88,23 @@ public:
     static CognitiveMetricsLogger& instance();
 
     void logGoalMetrics(const GoalCognitiveMetricsRecord& record) const;
+
+    /**
+     * A JSONL line is a delivered metrics record only when it parses as a
+     * JSON object whose metrics_id string equals the requested id. Substring
+     * matches, malformed lines, and a truncated final line are not deliveries.
+     * The file is never rewritten: a truncated tail stays byte-for-byte, and
+     * a new record is appended after a separator newline only when the file
+     * does not already end in one.
+     *
+     * Writers serialize on <log path>.lock with an exclusive flock. The same
+     * lock covers the delivery scan and the append, and also direct
+     * logGoalMetrics appends. It protects two processes that share one
+     * database and two databases that target the same JSONL file.
+     */
+    bool metricsIdDelivered(const std::string& metrics_id) const;
+    bool appendStoredRecord(const nlohmann::json& payload) const;
+    bool appendIfNotDelivered(const std::string& metrics_id, const nlohmann::json& payload) const;
     static nlohmann::json toJson(const GoalCognitiveMetricsRecord& record);
 
     /**

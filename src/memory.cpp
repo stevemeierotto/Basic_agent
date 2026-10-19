@@ -1,4 +1,5 @@
 #include "../include/memory.h"
+#include "../include/experience_provenance.h"
 #include "../include/grag_scorer.h"
 #include "../include/plan_reuse_config.h"
 #include "../include/planner_injection_config.h"
@@ -214,13 +215,23 @@ std::vector<Memory::CognateTrajectoryRecord> Memory::retrieveSimilarTrajectories
     });
 
     std::vector<CognateTrajectoryRecord> results;
-    int count = std::min((int)ranked_ids.size(), limit);
-    for (int i = 0; i < count; ++i) {
-        if (ranked_ids[i].second < Thoth::PlannerTrajectory::kMinSimilarityFloor) {
+    for (const auto& ranked : ranked_ids) {
+        if (ranked.second < Thoth::PlannerTrajectory::kMinSimilarityFloor) {
             break;
         }
-        auto t = repo->loadTrajectory(ranked_ids[i].first);
-        if (t) results.push_back(std::move(*t));
+        const auto indexed = std::find_if(trajectory_index_.begin(), trajectory_index_.end(),
+            [&](const TrajectoryIndexEntry& entry) { return entry.trajectory_id == ranked.first; });
+        if (indexed == trajectory_index_.end() || !Thoth::learningEligibleOrigin(indexed->plan_origin)) {
+            continue;
+        }
+        auto t = repo->loadTrajectory(ranked.first);
+        if (!t || !Thoth::learningEligibleOrigin(t->plan_origin)) {
+            continue;
+        }
+        results.push_back(std::move(*t));
+        if (static_cast<int>(results.size()) >= limit) {
+            break;
+        }
     }
 
     return results;
@@ -228,11 +239,12 @@ std::vector<Memory::CognateTrajectoryRecord> Memory::retrieveSimilarTrajectories
 
 void Memory::processMemoryAging() {
     std::unique_lock lock(mtx);
-    applyAgingLocked(false, nullptr);
+    applyAgingLocked(false, nullptr, nullptr);
 }
 
 bool Memory::applyAgingLocked(bool transactional,
-                              const Thoth::MemoryRepository::ActivePlanRecord* marker) {
+                              const Thoth::MemoryRepository::ActivePlanRecord* marker,
+                              const std::string* metrics_payload) {
     if (!repo) return false;
     if (transactional && !repo->beginTransaction()) return false;
 
@@ -307,6 +319,10 @@ bool Memory::applyAgingLocked(bool transactional,
     if (ok && marker && !repo->storeActivePlan(*marker)) {
         ok = false;
     }
+    if (ok && marker && metrics_payload && !metrics_payload->empty()
+        && !repo->enqueueCognitiveMetrics(marker->plan_id, *metrics_payload)) {
+        ok = false;
+    }
     if (ok && transactional) {
         if (const char* env = std::getenv("THOTH_INJECT_AGING_COMMIT_FAIL")) {
             if (std::string(env) == "1") ok = false;
@@ -355,9 +371,33 @@ bool Memory::commitReinforcedPlan(const std::vector<Edge>& edges,
     return true;
 }
 
-bool Memory::commitHistoryStoreAging(const Thoth::MemoryRepository::ActivePlanRecord& plan) {
+bool Memory::commitHistoryStoreAging(const Thoth::MemoryRepository::ActivePlanRecord& plan,
+                                     const std::string* metrics_payload) {
     std::unique_lock lock(mtx);
-    return applyAgingLocked(true, &plan);
+    return applyAgingLocked(true, &plan, metrics_payload);
+}
+
+bool Memory::commitCognitiveMetrics(const std::string& plan_id, const std::string& payload_json) {
+    std::unique_lock lock(mtx);
+    if (!repo || plan_id.empty() || payload_json.empty()) return false;
+    if (!repo->beginTransaction()) return false;
+    if (!repo->enqueueCognitiveMetrics(plan_id, payload_json)) {
+        repo->rollback();
+        return false;
+    }
+    return repo->commit();
+}
+
+std::vector<Thoth::MemoryRepository::CognitiveMetricsOutboxRow> Memory::pendingCognitiveMetrics() {
+    std::unique_lock lock(mtx);
+    if (!repo) return {};
+    return repo->pendingCognitiveMetrics();
+}
+
+bool Memory::markCognitiveMetricsFlushed(const std::string& metrics_id) {
+    std::unique_lock lock(mtx);
+    if (!repo) return false;
+    return repo->markCognitiveMetricsFlushed(metrics_id);
 }
 
 void Memory::loadTrajectoryIndex() {
@@ -374,6 +414,7 @@ void Memory::loadTrajectoryIndex() {
         entry.created_at = t.created_at;
         entry.usage_count = t.usage_count;
         entry.tier = t.tier;
+        entry.plan_origin = t.plan_origin;
         trajectory_index_.push_back(std::move(entry));
     }
 }
@@ -391,6 +432,7 @@ void Memory::updateTrajectoryIndex(const CognateTrajectoryRecord& record) {
         it->success_score = record.success_score;
         it->usage_count = record.usage_count;
         it->tier = record.tier;
+        it->plan_origin = record.plan_origin;
     } else {
         TrajectoryIndexEntry entry;
         entry.trajectory_id = record.trajectory_id;
@@ -399,6 +441,7 @@ void Memory::updateTrajectoryIndex(const CognateTrajectoryRecord& record) {
         entry.created_at = record.created_at;
         entry.usage_count = record.usage_count;
         entry.tier = record.tier;
+        entry.plan_origin = record.plan_origin;
         trajectory_index_.push_back(std::move(entry));
     }
 }
@@ -446,6 +489,20 @@ std::string Memory::calculateContentHash(const std::string& text) {
 void Memory::storeEpisodeStep(const EpisodeStepRecord& step) {
     std::unique_lock lock(mtx);
     if (repo) repo->storeEpisodeStep(step);
+}
+
+Thoth::MemoryRepository::EpisodeIdentityReport Memory::inspectEpisodeIdentity() const {
+    std::shared_lock lock(mtx);
+    if (!repo) return {};
+    return repo->inspectEpisodeIdentity();
+}
+
+bool Memory::commitStepCheckpoint(const Thoth::MemoryRepository::ActivePlanRecord& plan,
+                                  const std::optional<Thoth::MemoryRepository::CognatePlanRecord>& cognate,
+                                  const std::optional<EpisodeStepRecord>& episode) {
+    std::unique_lock lock(mtx);
+    if (!repo) return false;
+    return repo->commitStepCheckpoint(plan, cognate, episode);
 }
 
 std::vector<Memory::EpisodeStepRecord> Memory::getRecentEpisodeSteps(const std::string& goal_id, int n) const {
@@ -823,13 +880,17 @@ std::vector<Memory::PastPlanRecord> Memory::retrieveSimilarPlans(
     });
 
     std::vector<PastPlanRecord> results;
-    const int count = std::min(static_cast<int>(ranked.size()), limit);
-    results.reserve(static_cast<std::size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        if (ranked[static_cast<std::size_t>(i)].second < Thoth::PlanReuse::kMinSimilarityFloor) {
+    for (auto& rankedPlan : ranked) {
+        if (rankedPlan.second < Thoth::PlanReuse::kMinSimilarityFloor) {
             break;
         }
-        results.push_back(std::move(ranked[static_cast<std::size_t>(i)].first));
+        if (!Thoth::learningEligibleOrigin(rankedPlan.first.plan_origin)) {
+            continue;
+        }
+        results.push_back(std::move(rankedPlan.first));
+        if (static_cast<int>(results.size()) >= limit) {
+            break;
+        }
     }
     return results;
 }

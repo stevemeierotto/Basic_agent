@@ -171,6 +171,7 @@ protected:
     bool reinforce_plan_graph();
     bool commit_history_aging_unlocked();
     void continue_pending_reflection();
+    void capture_working_trajectory_unlocked(Plan& plan) const;
     void bind_active_sets_to_plan_unlocked(const std::string& plan_id);
     void clear_owned_active_sets_unlocked();
     void sync_retrieval_sets_into_plan_unlocked();
@@ -178,6 +179,8 @@ protected:
     void record_trajectory_step(const PlanStep& step, const Thoth::StepResult& result);
     float calculate_trajectory_score(bool plan_completed_successfully);
     bool persist_current_plan_unlocked();
+    bool commit_completed_step_unlocked(int episode_index);
+    void backfill_durable_episode_steps_unlocked(const std::vector<int>& durable_indices);
     /** Resume-only. Terminal plans are left unchanged. Returns true when an
      *  orphaned RUNNING step on an unfinished plan must fail closed. */
     bool reconcileOrphanedRunningSteps_unlocked(std::vector<std::string>& requeued_step_ids,
@@ -198,8 +201,13 @@ protected:
     nlohmann::json log_reflection_replan(float score, int reflection_cycle);
 
     void reset_goal_metrics_unlocked();
+    void sync_goal_metrics_checkpoint_unlocked();
+    void restore_goal_metrics_unlocked();
     void record_step_metrics_unlocked(const PlanStep& step, const StepResult& result);
     void sync_planning_tokens_unlocked();
+    nlohmann::json goal_cognitive_metrics_payload_unlocked(const std::string& outcome,
+                                                           float trajectory_score);
+    bool flush_cognitive_metrics_outbox_unlocked();
     void emit_goal_cognitive_metrics_unlocked(const std::string& outcome, float trajectory_score);
     void publish_episode_completed_unlocked(bool goal_succeeded, float trajectory_score);
 
@@ -280,6 +288,13 @@ protected:
     int synthesis_prompt_chars_ = 0;
     bool synthesis_context_truncated_ = false;
     std::int64_t planning_tokens_ = 0;
+    std::int64_t planning_tokens_at_resume_ = 0;
+    std::int64_t token_base_prompt_ = 0;
+    std::int64_t token_base_completion_ = 0;
+    std::int64_t token_base_total_ = 0;
+    bool metrics_checkpoint_gap_ = false;
+    bool metrics_legacy_resume_ = false;
+    bool cognitive_metrics_emitted_ = false;
     float last_grag_alpha_ = 0.0f;
     std::string last_grag_routing_mode_;
     float final_trajectory_score_ = 0.0f;

@@ -18,6 +18,7 @@
 #include "../include/planner_injection_config.h"
 #include "../include/grag_scorer.h"
 #include "../include/embedding_engine.h"
+#include "../include/experience_provenance.h"
 #include <chrono>
 #include <cstring>
 #include <dlfcn.h>
@@ -42,6 +43,9 @@ std::optional<Memory::CognateStrategyRecord> selectRelevantStrategy(
     float bestScore = -1.0f;
     std::optional<Memory::CognateStrategyRecord> best;
     for (const auto& strategy : strategies) {
+        if (!Thoth::learningEligibleOrigin(strategy.experience_origin)) {
+            continue;
+        }
         const std::string embedText = strategy.description + " " + strategy.step_pattern_json;
         const auto strategyEmbedding = engine.embed(embedText);
         if (strategyEmbedding.empty()) {
@@ -302,7 +306,11 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
 
             StructuredLogger::instance().log(LogLevel::Info, "planner", "TRAJECTORY_INJECTION",
                 "Injected scored trajectory into planner prompt",
-                {{"goal", prompt_goal}, {"trajectory_count", trajectory_count}});
+                {{"goal", prompt_goal},
+                 {"trajectory_count", trajectory_count},
+                 {"trajectory_id", t.trajectory_id},
+                 {"plan_origin", Thoth::normalizePlanOrigin(t.plan_origin)},
+                 {"learning_eligible", true}});
         }
     }
 

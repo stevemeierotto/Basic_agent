@@ -129,6 +129,9 @@ nlohmann::json Plan::to_json() const {
     j["graph_reinforced"] = graph_reinforced;
     j["reflection_pending"] = reflection_pending;
     j["reflection_count"] = reflection_count;
+    if (recorded_trajectory_score_present) {
+        j["recorded_trajectory_score"] = recorded_trajectory_score;
+    }
     j["history_aging_done"] = history_aging_done;
     if (retrieval_sets_present) {
         nlohmann::json sets = nlohmann::json::array();
@@ -143,6 +146,31 @@ nlohmann::json Plan::to_json() const {
     if (working_trajectory_present) {
         j["working_trajectory"] = working_trajectory;
         j["working_revisions_count"] = working_revisions_count;
+    }
+    if (goal_metrics.present) {
+        j["goal_metrics"] = {
+            {"window_assigned", goal_metrics.window_assigned},
+            {"window_id", goal_metrics.window_id},
+            {"protocol_version", goal_metrics.protocol_version},
+            {"metric_schema_version", goal_metrics.metric_schema_version},
+            {"environment_schema_version", goal_metrics.environment_schema_version},
+            {"cohort_fingerprint", goal_metrics.cohort_fingerprint},
+            {"run_id", goal_metrics.run_id},
+            {"env_hash", goal_metrics.env_hash},
+            {"goal_started_at_ms", goal_metrics.goal_started_at_ms},
+            {"planning_time_ms", goal_metrics.planning_time_ms},
+            {"retrieval_time_ms", goal_metrics.retrieval_time_ms},
+            {"llm_synthesis_time_ms", goal_metrics.llm_synthesis_time_ms},
+            {"retrieved_chunk_count", goal_metrics.retrieved_chunk_count},
+            {"grag_alpha", goal_metrics.grag_alpha},
+            {"grag_routing_mode", goal_metrics.grag_routing_mode},
+            {"synthesis_prompt_chars", goal_metrics.synthesis_prompt_chars},
+            {"synthesis_context_truncated", goal_metrics.synthesis_context_truncated},
+            {"planning_tokens", goal_metrics.planning_tokens},
+            {"prompt_tokens", goal_metrics.prompt_tokens},
+            {"completion_tokens", goal_metrics.completion_tokens},
+            {"total_tokens", goal_metrics.total_tokens}
+        };
     }
     return j;
 }
@@ -172,6 +200,10 @@ Plan Plan::from_json(const nlohmann::json& j) {
     if (j.contains("reflection_count") && j["reflection_count"].is_number_integer()) {
         plan.reflection_count = j["reflection_count"].get<int>();
     }
+    if (j.contains("recorded_trajectory_score") && j["recorded_trajectory_score"].is_number()) {
+        plan.recorded_trajectory_score_present = true;
+        plan.recorded_trajectory_score = j["recorded_trajectory_score"].get<float>();
+    }
     if (j.contains("history_aging_done") && j["history_aging_done"].is_boolean()) {
         plan.history_aging_done = j["history_aging_done"].get<bool>();
     }
@@ -192,6 +224,31 @@ Plan Plan::from_json(const nlohmann::json& j) {
             }
             plan.retrieval_sets.push_back(std::move(set));
         }
+    }
+    if (j.contains("goal_metrics") && j["goal_metrics"].is_object()) {
+        const auto& metrics = j["goal_metrics"];
+        plan.goal_metrics.present = true;
+        plan.goal_metrics.window_assigned = metrics.value("window_assigned", false);
+        plan.goal_metrics.window_id = metrics.value("window_id", "");
+        plan.goal_metrics.protocol_version = metrics.value("protocol_version", "");
+        plan.goal_metrics.metric_schema_version = metrics.value("metric_schema_version", "");
+        plan.goal_metrics.environment_schema_version = metrics.value("environment_schema_version", "");
+        plan.goal_metrics.cohort_fingerprint = metrics.value("cohort_fingerprint", "");
+        plan.goal_metrics.run_id = metrics.value("run_id", "");
+        plan.goal_metrics.env_hash = metrics.value("env_hash", "");
+        plan.goal_metrics.goal_started_at_ms = metrics.value("goal_started_at_ms", static_cast<std::int64_t>(0));
+        plan.goal_metrics.planning_time_ms = metrics.value("planning_time_ms", static_cast<std::int64_t>(0));
+        plan.goal_metrics.retrieval_time_ms = metrics.value("retrieval_time_ms", static_cast<std::int64_t>(0));
+        plan.goal_metrics.llm_synthesis_time_ms = metrics.value("llm_synthesis_time_ms", static_cast<std::int64_t>(0));
+        plan.goal_metrics.retrieved_chunk_count = metrics.value("retrieved_chunk_count", 0);
+        plan.goal_metrics.grag_alpha = metrics.value("grag_alpha", 0.0f);
+        plan.goal_metrics.grag_routing_mode = metrics.value("grag_routing_mode", "");
+        plan.goal_metrics.synthesis_prompt_chars = metrics.value("synthesis_prompt_chars", 0);
+        plan.goal_metrics.synthesis_context_truncated = metrics.value("synthesis_context_truncated", false);
+        plan.goal_metrics.planning_tokens = metrics.value("planning_tokens", static_cast<std::int64_t>(0));
+        plan.goal_metrics.prompt_tokens = metrics.value("prompt_tokens", static_cast<std::int64_t>(0));
+        plan.goal_metrics.completion_tokens = metrics.value("completion_tokens", static_cast<std::int64_t>(0));
+        plan.goal_metrics.total_tokens = metrics.value("total_tokens", static_cast<std::int64_t>(0));
     }
     if (j.contains("working_trajectory") && j["working_trajectory"].is_object()) {
         plan.working_trajectory_present = true;
