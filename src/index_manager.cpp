@@ -53,6 +53,24 @@ bool isUnderAgentWorkspace(const std::string& normalizedPath) {
     return next == '/';
 }
 
+/** Exact bytes. Import copies the source into rag/ before Send reads it back. */
+bool fileBytesEqual(const fs::path& path, const std::string& content) {
+    std::error_code ec;
+    const auto size = fs::file_size(path, ec);
+    if (ec || size != content.size()) {
+        return false;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    std::string disk(content.size(), '\0');
+    in.read(disk.data(), static_cast<std::streamsize>(disk.size()));
+    return static_cast<bool>(in)
+        && static_cast<std::size_t>(in.gcount()) == content.size()
+        && disk == content;
+}
+
 /** Phase 5 + R2: pair INDEXING_STARTED with COMPLETED; COMPLETE carries outcome metadata. */
 struct IndexingCompletionGuard {
     IndexManager* manager = nullptr;
@@ -1708,17 +1726,53 @@ IndexManager::CreateCorpusDocumentResult IndexManager::createCorpusDocumentLegac
     }
 
     if (!replacing_session_attachment && fs::exists(final_path)) {
-        const std::string stem = ext_path.stem().string();
-        const std::string suffix_ext = ext.empty() ? std::string(".txt") : ext;
-        int attempt = 1;
-        do {
-            final_path = fs::path(rag_root)
-                / (stem + "_" + std::to_string(attempt) + suffix_ext);
-            ++attempt;
-        } while (fs::exists(final_path) && attempt < 10000);
-        if (fs::exists(final_path)) {
-            result.error = "could not allocate unique document name";
-            return result;
+        // Import already copied this session's bytes to the canonical name and
+        // indexed them. That copy has no owner yet. Reuse it. A different
+        // owner, or different bytes, still gets the suffix.
+        std::string existing_owner;
+        bool readable_regular = false;
+        try {
+            if (fs::is_regular_file(final_path)) {
+                readable_regular = true;
+                const std::string key =
+                    fs::absolute(final_path).lexically_normal().string();
+                std::shared_lock lock(chunksMutex);
+                const auto it = attachmentOwners_.find(key);
+                if (it != attachmentOwners_.end()) {
+                    existing_owner = it->second;
+                }
+            }
+        } catch (...) {
+        }
+
+        const bool owned_by_this_session =
+            !owner_context_id.empty() && existing_owner == owner_context_id;
+        const bool unowned_identical_copy =
+            existing_owner.empty() && readable_regular
+            && fileBytesEqual(final_path, content);
+
+        if (owned_by_this_session || unowned_identical_copy) {
+            replacing_session_attachment = true;
+            try {
+                const std::string normalized =
+                    fs::absolute(final_path).lexically_normal().string();
+                std::unique_lock lock(outcomesMutex_);
+                indexingFailureReasons_.erase(normalized);
+            } catch (...) {
+            }
+        } else {
+            const std::string stem = ext_path.stem().string();
+            const std::string suffix_ext = ext.empty() ? std::string(".txt") : ext;
+            int attempt = 1;
+            do {
+                final_path = fs::path(rag_root)
+                    / (stem + "_" + std::to_string(attempt) + suffix_ext);
+                ++attempt;
+            } while (fs::exists(final_path) && attempt < 10000);
+            if (fs::exists(final_path)) {
+                result.error = "could not allocate unique document name";
+                return result;
+            }
         }
     }
 
