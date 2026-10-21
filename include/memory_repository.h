@@ -3,6 +3,7 @@
 #include <vector>
 #include <optional>
 #include <cstdint>
+#include "cm1_telemetry.h"
 #include "memory_scope.h"
 
 namespace Thoth {
@@ -319,10 +320,37 @@ public:
     /**
      * Active-plan checkpoint, optional cognate row, and optional episode
      * observation commit together or not at all.
+     *
+     * Optional CM-1 Phase 1 rows use SAVEPOINT so a telemetry insert failure
+     * cannot discard the plan/episode commit. INSERT OR IGNORE keeps snapshot
+     * and answer-version rows immutable on checkpoint replay.
      */
-    virtual bool commitStepCheckpoint(const ActivePlanRecord& plan,
-                                      const std::optional<CognatePlanRecord>& cognate,
-                                      const std::optional<EpisodeStepRecord>& episode) = 0;
+    virtual bool commitStepCheckpoint(
+        const ActivePlanRecord& plan,
+        const std::optional<CognatePlanRecord>& cognate,
+        const std::optional<EpisodeStepRecord>& episode,
+        const std::optional<Cm1SnapshotRecord>& cm1_snapshot = std::nullopt,
+        const std::optional<Cm1AnswerVersionRecord>& cm1_answer = std::nullopt,
+        const std::optional<Cm1BreadthEstimate>& cm1_breadth = std::nullopt) = 0;
+
+    virtual bool insertCm1Snapshot(const Cm1SnapshotRecord& record) = 0;
+    virtual std::optional<Cm1SnapshotRecord> loadCm1Snapshot(const std::string& snapshot_id) = 0;
+    virtual std::vector<Cm1SnapshotRecord> listCm1SnapshotsForPlan(const std::string& plan_id) = 0;
+    virtual bool insertCm1AnswerVersion(const Cm1AnswerVersionRecord& record) = 0;
+    virtual std::optional<Cm1AnswerVersionRecord> loadCm1AnswerVersion(
+        const std::string& answer_id) = 0;
+    virtual bool insertCm1BreadthEstimate(const Cm1BreadthEstimate& record) = 0;
+    virtual std::optional<Cm1BreadthEstimate> loadCm1BreadthEstimate(
+        const std::string& estimate_id) = 0;
+    virtual bool insertCm1UserFeedback(const Cm1UserFeedback& record) = 0;
+    virtual std::optional<Cm1UserFeedback> latestCm1UserFeedback(
+        const std::string& answer_id) = 0;
+    virtual std::vector<Cm1UserFeedback> listCm1UserFeedback(const std::string& answer_id) = 0;
+    virtual bool insertCm1VerifiedLabel(const Cm1VerifiedLabel& record) = 0;
+    virtual std::optional<Cm1VerifiedLabel> latestCm1VerifiedLabel(
+        const std::string& answer_id, const std::string& protocol_id) = 0;
+    virtual std::vector<Cm1VerifiedLabel> listCm1VerifiedLabels(
+        const std::string& answer_id) = 0;
 
     /**
      * One terminal cognitive-metrics record per plan. metrics_id is the

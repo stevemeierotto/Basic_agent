@@ -497,12 +497,130 @@ Thoth::MemoryRepository::EpisodeIdentityReport Memory::inspectEpisodeIdentity() 
     return repo->inspectEpisodeIdentity();
 }
 
-bool Memory::commitStepCheckpoint(const Thoth::MemoryRepository::ActivePlanRecord& plan,
-                                  const std::optional<Thoth::MemoryRepository::CognatePlanRecord>& cognate,
-                                  const std::optional<EpisodeStepRecord>& episode) {
+bool Memory::commitStepCheckpoint(
+    const Thoth::MemoryRepository::ActivePlanRecord& plan,
+    const std::optional<Thoth::MemoryRepository::CognatePlanRecord>& cognate,
+    const std::optional<EpisodeStepRecord>& episode,
+    const std::optional<Thoth::Cm1SnapshotRecord>& cm1_snapshot,
+    const std::optional<Thoth::Cm1AnswerVersionRecord>& cm1_answer,
+    const std::optional<Thoth::Cm1BreadthEstimate>& cm1_breadth) {
     std::unique_lock lock(mtx);
     if (!repo) return false;
-    return repo->commitStepCheckpoint(plan, cognate, episode);
+    return repo->commitStepCheckpoint(plan, cognate, episode, cm1_snapshot, cm1_answer, cm1_breadth);
+}
+
+bool Memory::insertCm1Snapshot(const Thoth::Cm1SnapshotRecord& record) {
+    std::unique_lock lock(mtx);
+    if (!repo) return false;
+    return repo->insertCm1Snapshot(record);
+}
+
+std::optional<Thoth::Cm1SnapshotRecord> Memory::loadCm1Snapshot(const std::string& snapshot_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return std::nullopt;
+    return repo->loadCm1Snapshot(snapshot_id);
+}
+
+std::vector<Thoth::Cm1SnapshotRecord> Memory::listCm1SnapshotsForPlan(
+    const std::string& plan_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return {};
+    return repo->listCm1SnapshotsForPlan(plan_id);
+}
+
+bool Memory::insertCm1AnswerVersion(const Thoth::Cm1AnswerVersionRecord& record) {
+    std::unique_lock lock(mtx);
+    if (!repo) return false;
+    return repo->insertCm1AnswerVersion(record);
+}
+
+std::optional<Thoth::Cm1AnswerVersionRecord> Memory::loadCm1AnswerVersion(
+    const std::string& answer_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return std::nullopt;
+    return repo->loadCm1AnswerVersion(answer_id);
+}
+
+bool Memory::insertCm1BreadthEstimate(const Thoth::Cm1BreadthEstimate& record) {
+    std::unique_lock lock(mtx);
+    if (!repo) return false;
+    return repo->insertCm1BreadthEstimate(record);
+}
+
+std::optional<Thoth::Cm1BreadthEstimate> Memory::loadCm1BreadthEstimate(
+    const std::string& estimate_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return std::nullopt;
+    return repo->loadCm1BreadthEstimate(estimate_id);
+}
+
+Thoth::Cm1UserFeedbackDraft Memory::submitCm1UserFeedback(
+    const Thoth::Cm1FeedbackSubmission& submission, std::int64_t created_at_ms) {
+    std::unique_lock lock(mtx);
+    Thoth::Cm1UserFeedbackDraft rejected;
+    rejected.message = "Memory repository is unavailable.";
+    if (!repo) return rejected;
+    const auto answer = repo->loadCm1AnswerVersion(submission.answer_id);
+    const auto latest = repo->latestCm1UserFeedback(submission.answer_id);
+    const auto draft = Thoth::prepareCm1UserFeedback(
+        answer ? &*answer : nullptr,
+        latest ? &*latest : nullptr,
+        submission,
+        created_at_ms);
+    if (draft.disposition != Thoth::Cm1RecordDisposition::Insert) {
+        return draft;
+    }
+    if (!repo->insertCm1UserFeedback(draft.record)) {
+        Thoth::Cm1UserFeedbackDraft failed;
+        failed.message = "Feedback could not be stored.";
+        return failed;
+    }
+    return draft;
+}
+
+std::optional<Thoth::Cm1UserFeedback> Memory::latestCm1UserFeedback(
+    const std::string& answer_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return std::nullopt;
+    return repo->latestCm1UserFeedback(answer_id);
+}
+
+std::vector<Thoth::Cm1UserFeedback> Memory::listCm1UserFeedback(
+    const std::string& answer_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return {};
+    return repo->listCm1UserFeedback(answer_id);
+}
+
+Thoth::Cm1VerifiedLabelDraft Memory::submitCm1VerifiedLabel(
+    const Thoth::Cm1VerifiedLabelSubmission& submission, std::int64_t created_at_ms) {
+    std::unique_lock lock(mtx);
+    Thoth::Cm1VerifiedLabelDraft rejected;
+    rejected.message = "Memory repository is unavailable.";
+    if (!repo) return rejected;
+    const auto answer = repo->loadCm1AnswerVersion(submission.answer_id);
+    const auto latest = repo->latestCm1VerifiedLabel(submission.answer_id, submission.protocol_id);
+    const auto draft = Thoth::prepareCm1VerifiedLabel(
+        answer ? &*answer : nullptr,
+        latest ? &*latest : nullptr,
+        submission,
+        created_at_ms);
+    if (draft.disposition != Thoth::Cm1RecordDisposition::Insert) {
+        return draft;
+    }
+    if (!repo->insertCm1VerifiedLabel(draft.record)) {
+        Thoth::Cm1VerifiedLabelDraft failed;
+        failed.message = "Verified label could not be stored.";
+        return failed;
+    }
+    return draft;
+}
+
+std::optional<Thoth::Cm1VerifiedLabel> Memory::latestCm1VerifiedLabel(
+    const std::string& answer_id, const std::string& protocol_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return std::nullopt;
+    return repo->latestCm1VerifiedLabel(answer_id, protocol_id);
 }
 
 std::vector<Memory::EpisodeStepRecord> Memory::getRecentEpisodeSteps(const std::string& goal_id, int n) const {

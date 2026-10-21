@@ -87,6 +87,10 @@ public:
     std::vector<Memory::CognateExperimentRecord> getAllExperiments() const;
     bool saveExperiment(const Memory::CognateExperimentRecord& record);
     Memory::GraphStatistics getGraphStatistics() const;
+    Thoth::Cm1UserFeedbackDraft submitCm1UserFeedback(
+        const Thoth::Cm1FeedbackSubmission& submission);
+    std::optional<Thoth::Cm1UserFeedback> latestCm1UserFeedback(
+        const std::string& answer_id) const;
 
     /** Phase 12A — Engine-owned graph statistics singleton resource. */
     nlohmann::json getGraphStatisticsResource() const;

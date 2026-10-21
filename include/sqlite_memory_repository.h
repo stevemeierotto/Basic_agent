@@ -134,9 +134,29 @@ public:
     std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) override;
     std::vector<EpisodeStepRecord> getAllEpisodeSteps() override;
     EpisodeIdentityReport inspectEpisodeIdentity() override;
-    bool commitStepCheckpoint(const ActivePlanRecord& plan,
-                              const std::optional<CognatePlanRecord>& cognate,
-                              const std::optional<EpisodeStepRecord>& episode) override;
+    bool commitStepCheckpoint(
+        const ActivePlanRecord& plan,
+        const std::optional<CognatePlanRecord>& cognate,
+        const std::optional<EpisodeStepRecord>& episode,
+        const std::optional<Cm1SnapshotRecord>& cm1_snapshot = std::nullopt,
+        const std::optional<Cm1AnswerVersionRecord>& cm1_answer = std::nullopt,
+        const std::optional<Cm1BreadthEstimate>& cm1_breadth = std::nullopt) override;
+    bool insertCm1Snapshot(const Cm1SnapshotRecord& record) override;
+    std::optional<Cm1SnapshotRecord> loadCm1Snapshot(const std::string& snapshot_id) override;
+    std::vector<Cm1SnapshotRecord> listCm1SnapshotsForPlan(const std::string& plan_id) override;
+    bool insertCm1AnswerVersion(const Cm1AnswerVersionRecord& record) override;
+    std::optional<Cm1AnswerVersionRecord> loadCm1AnswerVersion(
+        const std::string& answer_id) override;
+    bool insertCm1BreadthEstimate(const Cm1BreadthEstimate& record) override;
+    std::optional<Cm1BreadthEstimate> loadCm1BreadthEstimate(
+        const std::string& estimate_id) override;
+    bool insertCm1UserFeedback(const Cm1UserFeedback& record) override;
+    std::optional<Cm1UserFeedback> latestCm1UserFeedback(const std::string& answer_id) override;
+    std::vector<Cm1UserFeedback> listCm1UserFeedback(const std::string& answer_id) override;
+    bool insertCm1VerifiedLabel(const Cm1VerifiedLabel& record) override;
+    std::optional<Cm1VerifiedLabel> latestCm1VerifiedLabel(
+        const std::string& answer_id, const std::string& protocol_id) override;
+    std::vector<Cm1VerifiedLabel> listCm1VerifiedLabels(const std::string& answer_id) override;
     bool enqueueCognitiveMetrics(const std::string& plan_id,
                                  const std::string& payload_json) override;
     std::vector<CognitiveMetricsOutboxRow> pendingCognitiveMetrics() override;

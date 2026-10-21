@@ -92,6 +92,9 @@ struct GenerationRecordFields {
     bool synthesis_observed_empty = false;
 };
 
+/** Unique across process restarts. Not a provider id. */
+std::string makeGenerationId();
+
 inline bool reportedContextOverflow(const GenerationOutcome& outcome) {
     return outcome.provider_usage_reported
         && outcome.prompt_tokens + static_cast<std::int64_t>(outcome.requested_max_tokens) > 8192;

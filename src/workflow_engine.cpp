@@ -21,6 +21,7 @@
 #include "../include/generation_call_log.h"
 #include "../include/goal_text_utils.h"
 #include "../include/fixed_evidence_containment.h"
+#include "../include/alp_sha256.h"
 #include "../include/grag_diagnostics.h"
 #include "../include/memory.h"
 #include "../include/step_metrics_repository.h"
@@ -189,9 +190,13 @@ bool priorRetrievalContainsToken(const std::vector<PriorStepContext>& priorSteps
 
 std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorSteps,
                                   std::size_t maxChars,
-                                  bool* truncatedOut) {
+                                  bool* truncatedOut,
+                                  std::vector<std::string>* includedContentSha256Out) {
     if (truncatedOut) {
         *truncatedOut = false;
+    }
+    if (includedContentSha256Out) {
+        includedContentSha256Out->clear();
     }
     std::ostringstream oss;
     std::size_t used = 0;
@@ -229,19 +234,20 @@ std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorStep
             }
             oss << piece;
             used += piece.size();
+            // Observation only: same inclusion decision as the prompt text above.
+            if (includedContentSha256Out) {
+                includedContentSha256Out->push_back(Thoth::sha256Hex(content));
+            }
         }
     }
     return oss.str();
 }
 
-std::string buildRetrievedContext(const std::vector<PriorStepContext>& priorSteps) {
-    return buildRetrievedContext(priorSteps, 0, nullptr);
-}
-
 std::string buildLLMSynthesisPrompt(const PlanStep& step,
                                     const StepExecutionContext& context,
                                     Config* config,
-                                    bool* contextTruncatedOut) {
+                                    bool* contextTruncatedOut,
+                                    std::vector<std::string>* includedContentSha256Out) {
     std::ostringstream prompt;
 
     std::string goal = context.goal;
@@ -270,7 +276,8 @@ std::string buildLLMSynthesisPrompt(const PlanStep& step,
         maxContext = static_cast<std::size_t>(config->synthesis_max_context_chars);
     }
     bool truncated = false;
-    const std::string retrieved = buildRetrievedContext(context.prior_steps, maxContext, &truncated);
+    const std::string retrieved = buildRetrievedContext(
+        context.prior_steps, maxContext, &truncated, includedContentSha256Out);
     if (contextTruncatedOut) {
         *contextTruncatedOut = truncated;
     }
@@ -724,8 +731,9 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
 
     try {
         bool contextTruncated = false;
-        const std::string prompt =
-            buildLLMSynthesisPrompt(step, context, config_, &contextTruncated);
+        std::vector<std::string> includedContentSha256;
+        const std::string prompt = buildLLMSynthesisPrompt(
+            step, context, config_, &contextTruncated, &includedContentSha256);
         if (prompt.empty()) {
             result.success = false;
             result.error_message = "Empty LLM synthesis prompt";
@@ -758,6 +766,8 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
                 {"status", "success"},
                 {"synthesis_prompt_chars", static_cast<int>(prompt.size())},
                 {"synthesis_context_truncated", contextTruncated},
+                {"cm1_included_content_sha256", includedContentSha256},
+                {"cm1_included_in_synthesis_available", true},
                 {"data", {{"response", "Mock LLM synthesis for tests"},
                           {"prompt_chars", prompt.size()},
                           {"synthesis_prompt", prompt}}}};
@@ -804,6 +814,9 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
             {"status", "success"},
             {"synthesis_prompt_chars", static_cast<int>(prompt.size())},
             {"synthesis_context_truncated", contextTruncated},
+            {"generation_id", generated.generation_id},
+            {"cm1_included_content_sha256", includedContentSha256},
+            {"cm1_included_in_synthesis_available", true},
             {"data", {{"response", response}, {"prompt_chars", prompt.size()}}}};
     } catch (const std::exception& e) {
         result.success = false;

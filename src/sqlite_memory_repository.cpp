@@ -243,6 +243,58 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             "  plan_id TEXT NOT NULL,"
             "  payload_json TEXT NOT NULL,"
             "  flushed INTEGER NOT NULL DEFAULT 0"
+            ");"
+            "CREATE TABLE IF NOT EXISTS cm1_confidence_snapshots ("
+            "  snapshot_id TEXT PRIMARY KEY,"
+            "  plan_id TEXT NOT NULL,"
+            "  step_id TEXT NOT NULL,"
+            "  snapshot_type TEXT NOT NULL,"
+            "  lifecycle_stage TEXT NOT NULL,"
+            "  features_json TEXT NOT NULL,"
+            "  measurement_status TEXT NOT NULL,"
+            "  schema_version TEXT NOT NULL,"
+            "  estimator_status TEXT NOT NULL,"
+            "  created_at_ms INTEGER NOT NULL"
+            ");"
+            "CREATE TABLE IF NOT EXISTS cm1_answer_versions ("
+            "  answer_id TEXT PRIMARY KEY,"
+            "  plan_id TEXT NOT NULL,"
+            "  step_id TEXT NOT NULL,"
+            "  generation_id TEXT NOT NULL,"
+            "  content_sha256 TEXT NOT NULL,"
+            "  created_at_ms INTEGER NOT NULL"
+            ");"
+            "CREATE TABLE IF NOT EXISTS cm1_breadth_estimates ("
+            "  estimate_id TEXT PRIMARY KEY,"
+            "  snapshot_id TEXT NOT NULL,"
+            "  plan_id TEXT NOT NULL,"
+            "  step_id TEXT NOT NULL,"
+            "  estimator_version TEXT NOT NULL,"
+            "  payload_json TEXT NOT NULL,"
+            "  created_at_ms INTEGER NOT NULL"
+            ");"
+            "CREATE TABLE IF NOT EXISTS cm1_answer_feedback ("
+            "  feedback_id TEXT PRIMARY KEY,"
+            "  answer_id TEXT NOT NULL,"
+            "  content_sha256 TEXT NOT NULL,"
+            "  thumbs_status TEXT NOT NULL,"
+            "  quality_rating_status TEXT NOT NULL,"
+            "  quality_rating INTEGER,"
+            "  explanation TEXT NOT NULL,"
+            "  supersedes_feedback_id TEXT NOT NULL,"
+            "  revision_index INTEGER NOT NULL,"
+            "  created_at_ms INTEGER NOT NULL"
+            ");"
+            "CREATE TABLE IF NOT EXISTS cm1_verified_labels ("
+            "  label_id TEXT PRIMARY KEY,"
+            "  answer_id TEXT NOT NULL,"
+            "  content_sha256 TEXT NOT NULL,"
+            "  protocol_id TEXT NOT NULL,"
+            "  reviewer_id TEXT NOT NULL,"
+            "  factual_bin INTEGER NOT NULL,"
+            "  supersedes_label_id TEXT NOT NULL,"
+            "  revision_index INTEGER NOT NULL,"
+            "  created_at_ms INTEGER NOT NULL"
             ");";
 
         char* errMsg = nullptr;
@@ -2061,9 +2113,13 @@ MemoryRepository::EpisodeIdentityReport SQLiteMemoryRepository::inspectEpisodeId
     return report;
 }
 
-bool SQLiteMemoryRepository::commitStepCheckpoint(const ActivePlanRecord& plan,
-                                                  const std::optional<CognatePlanRecord>& cognate,
-                                                  const std::optional<EpisodeStepRecord>& episode) {
+bool SQLiteMemoryRepository::commitStepCheckpoint(
+    const ActivePlanRecord& plan,
+    const std::optional<CognatePlanRecord>& cognate,
+    const std::optional<EpisodeStepRecord>& episode,
+    const std::optional<Cm1SnapshotRecord>& cm1_snapshot,
+    const std::optional<Cm1AnswerVersionRecord>& cm1_answer,
+    const std::optional<Cm1BreadthEstimate>& cm1_breadth) {
     if (!beginTransaction()) return false;
     if (!storeActivePlan(plan)) {
         rollback();
@@ -2081,6 +2137,49 @@ bool SQLiteMemoryRepository::commitStepCheckpoint(const ActivePlanRecord& plan,
         if (std::string(env) == "1") {
             rollback();
             return false;
+        }
+    }
+    // CM-1 is observational. A telemetry insert failure must not discard the
+    // plan/episode checkpoint. SAVEPOINT isolates that failure.
+    if (cm1_snapshot && !cm1_snapshot->snapshot_id.empty()) {
+        if (sqlite3_exec(db_->handle, "SAVEPOINT cm1_snapshot;", nullptr, nullptr, nullptr)
+            == SQLITE_OK) {
+            if (!insertCm1Snapshot(*cm1_snapshot)) {
+                sqlite3_exec(db_->handle, "ROLLBACK TO cm1_snapshot;", nullptr, nullptr, nullptr);
+                std::cerr << "[SQLiteMemoryRepository] CM-1 snapshot insert failed; "
+                             "step checkpoint preserved without telemetry\n";
+            }
+            sqlite3_exec(db_->handle, "RELEASE cm1_snapshot;", nullptr, nullptr, nullptr);
+        }
+    }
+    if (cm1_answer && !cm1_answer->answer_id.empty()) {
+        if (sqlite3_exec(db_->handle, "SAVEPOINT cm1_answer;", nullptr, nullptr, nullptr)
+            == SQLITE_OK) {
+            if (!insertCm1AnswerVersion(*cm1_answer)) {
+                sqlite3_exec(db_->handle, "ROLLBACK TO cm1_answer;", nullptr, nullptr, nullptr);
+                std::cerr << "[SQLiteMemoryRepository] CM-1 answer-version insert failed; "
+                             "step checkpoint preserved without answer provenance\n";
+            }
+            sqlite3_exec(db_->handle, "RELEASE cm1_answer;", nullptr, nullptr, nullptr);
+        }
+    }
+    if (cm1_breadth && !cm1_breadth->estimate_id.empty()) {
+        if (sqlite3_exec(db_->handle, "SAVEPOINT cm1_breadth;", nullptr, nullptr, nullptr)
+            == SQLITE_OK) {
+            if (!insertCm1BreadthEstimate(*cm1_breadth)) {
+                sqlite3_exec(db_->handle, "ROLLBACK TO cm1_breadth;", nullptr, nullptr, nullptr);
+                std::cerr << "[SQLiteMemoryRepository] CM-1 breadth insert failed; "
+                             "step checkpoint and raw snapshot preserved\n";
+            }
+            sqlite3_exec(db_->handle, "RELEASE cm1_breadth;", nullptr, nullptr, nullptr);
+        }
+    }
+    if (const char* inj = std::getenv("THOTH_INJECT_CM1_CHECKPOINT_FAIL")) {
+        if (std::string(inj) == "1" && cm1_snapshot) {
+            // Test hook: force the telemetry savepoint path without failing the step.
+            sqlite3_exec(db_->handle, "SAVEPOINT cm1_inject;", nullptr, nullptr, nullptr);
+            sqlite3_exec(db_->handle, "ROLLBACK TO cm1_inject;", nullptr, nullptr, nullptr);
+            sqlite3_exec(db_->handle, "RELEASE cm1_inject;", nullptr, nullptr, nullptr);
         }
     }
     if (!commit()) return false;
@@ -2101,6 +2200,399 @@ bool SQLiteMemoryRepository::commitStepCheckpoint(const ActivePlanRecord& plan,
         std::cerr << "[SQLiteMemoryRepository] active-plan commit observer failed\n";
     }
     return true;
+}
+
+bool SQLiteMemoryRepository::insertCm1Snapshot(const Cm1SnapshotRecord& record) {
+    try {
+        if (!db_ || !db_->handle || record.snapshot_id.empty()) return false;
+        if (const char* inj = std::getenv("THOTH_INJECT_CM1_WRITE_FAIL")) {
+            if (std::string(inj) == "1") return false;
+        }
+        const char* sql =
+            "INSERT OR IGNORE INTO cm1_confidence_snapshots "
+            "(snapshot_id, plan_id, step_id, snapshot_type, lifecycle_stage, features_json, "
+            "measurement_status, schema_version, estimator_status, created_at_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, record.snapshot_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, record.plan_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, record.step_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, record.snapshot_type.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, record.lifecycle_stage.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, record.features_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 7, record.measurement_status.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 8, record.schema_version.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 9, record.estimator_status.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 10, record.created_at_ms);
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<Cm1SnapshotRecord> SQLiteMemoryRepository::loadCm1Snapshot(
+    const std::string& snapshot_id) {
+    try {
+        if (!db_ || !db_->handle || snapshot_id.empty()) return std::nullopt;
+        const char* sql =
+            "SELECT snapshot_id, plan_id, step_id, snapshot_type, lifecycle_stage, features_json, "
+            "measurement_status, schema_version, estimator_status, created_at_ms "
+            "FROM cm1_confidence_snapshots WHERE snapshot_id = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+        sqlite3_bind_text(stmt, 1, snapshot_id.c_str(), -1, SQLITE_TRANSIENT);
+        std::optional<Cm1SnapshotRecord> out;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            Cm1SnapshotRecord record;
+            record.snapshot_id = safe_col_text(stmt, 0);
+            record.plan_id = safe_col_text(stmt, 1);
+            record.step_id = safe_col_text(stmt, 2);
+            record.snapshot_type = safe_col_text(stmt, 3);
+            record.lifecycle_stage = safe_col_text(stmt, 4);
+            record.features_json = safe_col_text(stmt, 5);
+            record.measurement_status = safe_col_text(stmt, 6);
+            record.schema_version = safe_col_text(stmt, 7);
+            record.estimator_status = safe_col_text(stmt, 8);
+            record.created_at_ms = sqlite3_column_int64(stmt, 9);
+            out = std::move(record);
+        }
+        sqlite3_finalize(stmt);
+        return out;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::vector<Cm1SnapshotRecord> SQLiteMemoryRepository::listCm1SnapshotsForPlan(
+    const std::string& plan_id) {
+    std::vector<Cm1SnapshotRecord> rows;
+    try {
+        if (!db_ || !db_->handle || plan_id.empty()) return rows;
+        const char* sql =
+            "SELECT snapshot_id, plan_id, step_id, snapshot_type, lifecycle_stage, features_json, "
+            "measurement_status, schema_version, estimator_status, created_at_ms "
+            "FROM cm1_confidence_snapshots WHERE plan_id = ? ORDER BY created_at_ms, snapshot_id;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return rows;
+        sqlite3_bind_text(stmt, 1, plan_id.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Cm1SnapshotRecord record;
+            record.snapshot_id = safe_col_text(stmt, 0);
+            record.plan_id = safe_col_text(stmt, 1);
+            record.step_id = safe_col_text(stmt, 2);
+            record.snapshot_type = safe_col_text(stmt, 3);
+            record.lifecycle_stage = safe_col_text(stmt, 4);
+            record.features_json = safe_col_text(stmt, 5);
+            record.measurement_status = safe_col_text(stmt, 6);
+            record.schema_version = safe_col_text(stmt, 7);
+            record.estimator_status = safe_col_text(stmt, 8);
+            record.created_at_ms = sqlite3_column_int64(stmt, 9);
+            rows.push_back(std::move(record));
+        }
+        sqlite3_finalize(stmt);
+    } catch (...) {}
+    return rows;
+}
+
+bool SQLiteMemoryRepository::insertCm1AnswerVersion(const Cm1AnswerVersionRecord& record) {
+    try {
+        if (!db_ || !db_->handle || record.answer_id.empty()) return false;
+        if (record.generation_id.empty() || record.content_sha256.empty()) return false;
+        if (const char* inj = std::getenv("THOTH_INJECT_CM1_WRITE_FAIL")) {
+            if (std::string(inj) == "1") return false;
+        }
+        const char* sql =
+            "INSERT OR IGNORE INTO cm1_answer_versions "
+            "(answer_id, plan_id, step_id, generation_id, content_sha256, created_at_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, record.answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, record.plan_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, record.step_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, record.generation_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, record.content_sha256.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 6, record.created_at_ms);
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool SQLiteMemoryRepository::insertCm1BreadthEstimate(const Cm1BreadthEstimate& record) {
+    try {
+        if (!db_ || !db_->handle || record.estimate_id.empty()) return false;
+        if (const char* inj = std::getenv("THOTH_INJECT_CM1_WRITE_FAIL")) {
+            if (std::string(inj) == "1") return false;
+        }
+        const char* sql =
+            "INSERT OR IGNORE INTO cm1_breadth_estimates "
+            "(estimate_id, snapshot_id, plan_id, step_id, estimator_version, payload_json, "
+            "created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, record.estimate_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, record.snapshot_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, record.plan_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, record.step_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, record.estimator_version.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, record.payload_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 7, record.created_at_ms);
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<Cm1BreadthEstimate> SQLiteMemoryRepository::loadCm1BreadthEstimate(
+    const std::string& estimate_id) {
+    try {
+        if (!db_ || !db_->handle || estimate_id.empty()) return std::nullopt;
+        const char* sql =
+            "SELECT estimate_id, snapshot_id, plan_id, step_id, estimator_version, payload_json, "
+            "created_at_ms FROM cm1_breadth_estimates WHERE estimate_id = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return std::nullopt;
+        }
+        sqlite3_bind_text(stmt, 1, estimate_id.c_str(), -1, SQLITE_TRANSIENT);
+        std::optional<Cm1BreadthEstimate> out;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            Cm1BreadthEstimate record;
+            record.estimate_id = safe_col_text(stmt, 0);
+            record.snapshot_id = safe_col_text(stmt, 1);
+            record.plan_id = safe_col_text(stmt, 2);
+            record.step_id = safe_col_text(stmt, 3);
+            record.estimator_version = safe_col_text(stmt, 4);
+            record.payload_json = safe_col_text(stmt, 5);
+            record.created_at_ms = sqlite3_column_int64(stmt, 6);
+            out = std::move(record);
+        }
+        sqlite3_finalize(stmt);
+        return out;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+namespace {
+
+Cm1UserFeedback feedbackFromRow(sqlite3_stmt* stmt) {
+    Cm1UserFeedback record;
+    record.feedback_id = safe_col_text(stmt, 0);
+    record.answer_id = safe_col_text(stmt, 1);
+    record.content_sha256 = safe_col_text(stmt, 2);
+    record.thumbs_status = safe_col_text(stmt, 3);
+    record.quality_rating_status = safe_col_text(stmt, 4);
+    if (sqlite3_column_type(stmt, 5) != SQLITE_NULL) {
+        record.quality_rating = sqlite3_column_int(stmt, 5);
+    }
+    record.explanation = safe_col_text(stmt, 6);
+    record.supersedes_feedback_id = safe_col_text(stmt, 7);
+    record.revision_index = sqlite3_column_int(stmt, 8);
+    record.created_at_ms = sqlite3_column_int64(stmt, 9);
+    return record;
+}
+
+Cm1VerifiedLabel labelFromRow(sqlite3_stmt* stmt) {
+    Cm1VerifiedLabel record;
+    record.label_id = safe_col_text(stmt, 0);
+    record.answer_id = safe_col_text(stmt, 1);
+    record.content_sha256 = safe_col_text(stmt, 2);
+    record.protocol_id = safe_col_text(stmt, 3);
+    record.reviewer_id = safe_col_text(stmt, 4);
+    record.factual_bin = sqlite3_column_int(stmt, 5);
+    record.supersedes_label_id = safe_col_text(stmt, 6);
+    record.revision_index = sqlite3_column_int(stmt, 7);
+    record.created_at_ms = sqlite3_column_int64(stmt, 8);
+    return record;
+}
+
+} // namespace
+
+bool SQLiteMemoryRepository::insertCm1UserFeedback(const Cm1UserFeedback& record) {
+    try {
+        if (!db_ || !db_->handle || record.feedback_id.empty() || record.answer_id.empty()) {
+            return false;
+        }
+        const char* sql =
+            "INSERT OR IGNORE INTO cm1_answer_feedback "
+            "(feedback_id, answer_id, content_sha256, thumbs_status, quality_rating_status, "
+            "quality_rating, explanation, supersedes_feedback_id, revision_index, created_at_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, record.feedback_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, record.answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, record.content_sha256.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, record.thumbs_status.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, record.quality_rating_status.c_str(), -1, SQLITE_TRANSIENT);
+        if (record.quality_rating_status == "present") {
+            sqlite3_bind_int(stmt, 6, record.quality_rating);
+        } else {
+            sqlite3_bind_null(stmt, 6);
+        }
+        sqlite3_bind_text(stmt, 7, record.explanation.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 8, record.supersedes_feedback_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 9, record.revision_index);
+        sqlite3_bind_int64(stmt, 10, record.created_at_ms);
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<Cm1UserFeedback> SQLiteMemoryRepository::latestCm1UserFeedback(
+    const std::string& answer_id) {
+    try {
+        if (!db_ || !db_->handle || answer_id.empty()) return std::nullopt;
+        const char* sql =
+            "SELECT feedback_id, answer_id, content_sha256, thumbs_status, quality_rating_status, "
+            "quality_rating, explanation, supersedes_feedback_id, revision_index, created_at_ms "
+            "FROM cm1_answer_feedback WHERE answer_id = ? "
+            "ORDER BY revision_index DESC LIMIT 1;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+        sqlite3_bind_text(stmt, 1, answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        std::optional<Cm1UserFeedback> out;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            out = feedbackFromRow(stmt);
+        }
+        sqlite3_finalize(stmt);
+        return out;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::vector<Cm1UserFeedback> SQLiteMemoryRepository::listCm1UserFeedback(
+    const std::string& answer_id) {
+    std::vector<Cm1UserFeedback> rows;
+    try {
+        if (!db_ || !db_->handle || answer_id.empty()) return rows;
+        const char* sql =
+            "SELECT feedback_id, answer_id, content_sha256, thumbs_status, quality_rating_status, "
+            "quality_rating, explanation, supersedes_feedback_id, revision_index, created_at_ms "
+            "FROM cm1_answer_feedback WHERE answer_id = ? ORDER BY revision_index;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return rows;
+        sqlite3_bind_text(stmt, 1, answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            rows.push_back(feedbackFromRow(stmt));
+        }
+        sqlite3_finalize(stmt);
+    } catch (...) {}
+    return rows;
+}
+
+bool SQLiteMemoryRepository::insertCm1VerifiedLabel(const Cm1VerifiedLabel& record) {
+    try {
+        if (!db_ || !db_->handle || record.label_id.empty() || record.answer_id.empty()) {
+            return false;
+        }
+        const char* sql =
+            "INSERT OR IGNORE INTO cm1_verified_labels "
+            "(label_id, answer_id, content_sha256, protocol_id, reviewer_id, factual_bin, "
+            "supersedes_label_id, revision_index, created_at_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, record.label_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, record.answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, record.content_sha256.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, record.protocol_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, record.reviewer_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 6, record.factual_bin);
+        sqlite3_bind_text(stmt, 7, record.supersedes_label_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 8, record.revision_index);
+        sqlite3_bind_int64(stmt, 9, record.created_at_ms);
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<Cm1VerifiedLabel> SQLiteMemoryRepository::latestCm1VerifiedLabel(
+    const std::string& answer_id, const std::string& protocol_id) {
+    try {
+        if (!db_ || !db_->handle || answer_id.empty() || protocol_id.empty()) return std::nullopt;
+        const char* sql =
+            "SELECT label_id, answer_id, content_sha256, protocol_id, reviewer_id, factual_bin, "
+            "supersedes_label_id, revision_index, created_at_ms "
+            "FROM cm1_verified_labels WHERE answer_id = ? AND protocol_id = ? "
+            "ORDER BY revision_index DESC LIMIT 1;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+        sqlite3_bind_text(stmt, 1, answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, protocol_id.c_str(), -1, SQLITE_TRANSIENT);
+        std::optional<Cm1VerifiedLabel> out;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            out = labelFromRow(stmt);
+        }
+        sqlite3_finalize(stmt);
+        return out;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::vector<Cm1VerifiedLabel> SQLiteMemoryRepository::listCm1VerifiedLabels(
+    const std::string& answer_id) {
+    std::vector<Cm1VerifiedLabel> rows;
+    try {
+        if (!db_ || !db_->handle || answer_id.empty()) return rows;
+        const char* sql =
+            "SELECT label_id, answer_id, content_sha256, protocol_id, reviewer_id, factual_bin, "
+            "supersedes_label_id, revision_index, created_at_ms "
+            "FROM cm1_verified_labels WHERE answer_id = ? ORDER BY revision_index;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return rows;
+        sqlite3_bind_text(stmt, 1, answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            rows.push_back(labelFromRow(stmt));
+        }
+        sqlite3_finalize(stmt);
+    } catch (...) {}
+    return rows;
+}
+
+std::optional<Cm1AnswerVersionRecord> SQLiteMemoryRepository::loadCm1AnswerVersion(
+    const std::string& answer_id) {
+    try {
+        if (!db_ || !db_->handle || answer_id.empty()) return std::nullopt;
+        const char* sql =
+            "SELECT answer_id, plan_id, step_id, generation_id, content_sha256, created_at_ms "
+            "FROM cm1_answer_versions WHERE answer_id = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+        sqlite3_bind_text(stmt, 1, answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        std::optional<Cm1AnswerVersionRecord> out;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            Cm1AnswerVersionRecord record;
+            record.answer_id = safe_col_text(stmt, 0);
+            record.plan_id = safe_col_text(stmt, 1);
+            record.step_id = safe_col_text(stmt, 2);
+            record.generation_id = safe_col_text(stmt, 3);
+            record.content_sha256 = safe_col_text(stmt, 4);
+            record.created_at_ms = sqlite3_column_int64(stmt, 5);
+            out = std::move(record);
+        }
+        sqlite3_finalize(stmt);
+        return out;
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 bool SQLiteMemoryRepository::enqueueCognitiveMetrics(const std::string& plan_id,

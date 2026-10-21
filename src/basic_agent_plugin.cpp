@@ -402,6 +402,19 @@ Memory::GraphStatistics BasicAgentPlugin::getGraphStatistics() const {
     return memory.getGraphStatistics();
 }
 
+Thoth::Cm1UserFeedbackDraft BasicAgentPlugin::submitCm1UserFeedback(
+    const Thoth::Cm1FeedbackSubmission& submission) {
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    return memory.submitCm1UserFeedback(submission, now);
+}
+
+std::optional<Thoth::Cm1UserFeedback> BasicAgentPlugin::latestCm1UserFeedback(
+    const std::string& answer_id) const {
+    return memory.latestCm1UserFeedback(answer_id);
+}
+
 nlohmann::json BasicAgentPlugin::getGraphStatisticsResource() const {
     const auto stats = getGraphStatistics();
     const int64_t generated_at =

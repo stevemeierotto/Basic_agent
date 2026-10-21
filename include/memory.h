@@ -168,9 +168,31 @@ public:
     std::vector<EpisodeStepRecord> getRecentEpisodeSteps(const std::string& goal_id, int n) const;
     std::vector<EpisodeStepRecord> getAllEpisodeSteps() const;
     Thoth::MemoryRepository::EpisodeIdentityReport inspectEpisodeIdentity() const;
-    bool commitStepCheckpoint(const Thoth::MemoryRepository::ActivePlanRecord& plan,
-                              const std::optional<Thoth::MemoryRepository::CognatePlanRecord>& cognate,
-                              const std::optional<EpisodeStepRecord>& episode);
+    bool commitStepCheckpoint(
+        const Thoth::MemoryRepository::ActivePlanRecord& plan,
+        const std::optional<Thoth::MemoryRepository::CognatePlanRecord>& cognate,
+        const std::optional<EpisodeStepRecord>& episode,
+        const std::optional<Thoth::Cm1SnapshotRecord>& cm1_snapshot = std::nullopt,
+        const std::optional<Thoth::Cm1AnswerVersionRecord>& cm1_answer = std::nullopt,
+        const std::optional<Thoth::Cm1BreadthEstimate>& cm1_breadth = std::nullopt);
+    bool insertCm1Snapshot(const Thoth::Cm1SnapshotRecord& record);
+    std::optional<Thoth::Cm1SnapshotRecord> loadCm1Snapshot(const std::string& snapshot_id) const;
+    std::vector<Thoth::Cm1SnapshotRecord> listCm1SnapshotsForPlan(const std::string& plan_id) const;
+    bool insertCm1AnswerVersion(const Thoth::Cm1AnswerVersionRecord& record);
+    std::optional<Thoth::Cm1AnswerVersionRecord> loadCm1AnswerVersion(
+        const std::string& answer_id) const;
+    bool insertCm1BreadthEstimate(const Thoth::Cm1BreadthEstimate& record);
+    std::optional<Thoth::Cm1BreadthEstimate> loadCm1BreadthEstimate(
+        const std::string& estimate_id) const;
+    Thoth::Cm1UserFeedbackDraft submitCm1UserFeedback(
+        const Thoth::Cm1FeedbackSubmission& submission, std::int64_t created_at_ms);
+    std::optional<Thoth::Cm1UserFeedback> latestCm1UserFeedback(
+        const std::string& answer_id) const;
+    std::vector<Thoth::Cm1UserFeedback> listCm1UserFeedback(const std::string& answer_id) const;
+    Thoth::Cm1VerifiedLabelDraft submitCm1VerifiedLabel(
+        const Thoth::Cm1VerifiedLabelSubmission& submission, std::int64_t created_at_ms);
+    std::optional<Thoth::Cm1VerifiedLabel> latestCm1VerifiedLabel(
+        const std::string& answer_id, const std::string& protocol_id) const;
 
     std::shared_ptr<Thoth::MemoryRepository> getRepo() const;
 

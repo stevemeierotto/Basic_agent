@@ -20,11 +20,15 @@
 #include "../include/goal_text_utils.h"
 #include "../include/c64_window_attribution.h"
 #include "../include/cognitive_metrics.h"
+#include "../include/cm1_telemetry.h"
 #include "../include/runtime_latency_config.h"
 #include "../include/config.h"
 #include "../include/reflection_utils.h"
 #include "../include/llm_timeout_policy.h"
 #include "../include/graph_refiner.h"
+#include "../include/grag_diagnostics.h"
+#include "../include/index_manager.h"
+#include "../include/rag.h"
 #include <chrono>
 #include <thread>
 #include <iostream>
@@ -32,7 +36,10 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
 #include <cstdlib>
+#include <limits>
+#include <unordered_map>
 #include <csignal>
 #include <filesystem>
 #include <unistd.h>
@@ -1915,6 +1922,88 @@ bool ExecutiveController::persist_current_plan_unlocked() {
     return true;
 }
 
+namespace {
+
+std::unordered_map<std::string, int> cm1IndexedCountsByFile(IndexManager* index) {
+    std::unordered_map<std::string, int> counts;
+    if (!index) return counts;
+    for (const auto& chunk : index->getChunks()) {
+        if (chunk.fileName.empty()) continue;
+        counts[chunk.fileName] += 1;
+    }
+    return counts;
+}
+
+std::vector<std::pair<std::string, std::string>> cm1SelectedChunksFromResult(
+    const nlohmann::json& step_result) {
+    std::vector<std::pair<std::string, std::string>> selected;
+    if (!step_result.is_object()) return selected;
+    const nlohmann::json* data = nullptr;
+    if (step_result.contains("data") && step_result["data"].is_object()) {
+        if (step_result["data"].contains("chunks")) {
+            data = &step_result["data"];
+        } else if (step_result["data"].contains("data") && step_result["data"]["data"].is_object()
+                   && step_result["data"]["data"].contains("chunks")) {
+            data = &step_result["data"]["data"];
+        }
+    }
+    if (!data || !data->contains("chunks") || !(*data)["chunks"].is_array()) return selected;
+    for (const auto& chunk : (*data)["chunks"]) {
+        if (!chunk.is_object()) continue;
+        selected.emplace_back(chunk.value("file", ""), chunk.value("content", ""));
+    }
+    return selected;
+}
+
+std::optional<GragDiagnostics> cm1DiagnosticsFromResult(const nlohmann::json& step_result) {
+    if (!step_result.is_object() || !step_result.contains("diagnostics")
+        || !step_result["diagnostics"].is_object()) {
+        return std::nullopt;
+    }
+    const auto& d = step_result["diagnostics"];
+    GragDiagnostics out;
+    out.scoring_type = d.value("scoring_type", "");
+    out.routing_mode = d.value("routing_mode", "");
+    out.alpha = d.value("alpha", 0.0f);
+    out.direction_magnitude = d.value("direction_magnitude", 0.0f);
+    out.chunks_retrieved = d.value("chunks_retrieved", 0);
+    out.chunks_reranked = d.value("chunks_reranked", 0);
+    out.graph_total_nodes = d.value("graph_total_nodes", 0);
+    out.graph_total_edges = d.value("graph_total_edges", 0);
+    out.graph_avg_weight = d.value("graph_avg_weight", 0.0f);
+    out.graph_activations = d.value("graph_activations", 0);
+    out.graph_max_contribution = d.value("graph_max_contribution", 0.0f);
+    if (d.contains("final_scores") && d["final_scores"].is_array()) {
+        for (const auto& s : d["final_scores"]) {
+            if (s.is_number()) out.final_scores.push_back(s.get<float>());
+        }
+    }
+    if (d.contains("breakdowns") && d["breakdowns"].is_array()) {
+        for (const auto& b : d["breakdowns"]) {
+            if (!b.is_object()) continue;
+            ScoreBreakdown sb;
+            sb.file_name = b.value("file_name", "");
+            sb.symbol = b.value("symbol", "");
+            sb.code_text = b.value("code_text", "");
+            sb.source_node_id = b.value("source_node_id", "");
+            if (b.contains("query_sim") && b["query_sim"].is_number()) {
+                sb.query_sim = b["query_sim"].get<float>();
+            } else {
+                sb.query_sim = std::numeric_limits<float>::quiet_NaN();
+            }
+            sb.goal_sim = b.value("goal_sim", 0.0f);
+            sb.trajectory_sim = b.value("trajectory_sim", 0.0f);
+            sb.keyword_score = b.value("keyword_score", 0.0f);
+            sb.graph_score = b.value("graph_score", 0.0f);
+            sb.final_score = b.value("final_score", 0.0f);
+            out.breakdowns.push_back(std::move(sb));
+        }
+    }
+    return out;
+}
+
+} // namespace
+
 bool ExecutiveController::commit_completed_step_unlocked(int episode_index) {
     if (!memory_ || current_plan_.plan_id.empty()) return false;
     const auto episode = episodeFromDurableStep(current_plan_, episode_index);
@@ -1937,10 +2026,130 @@ bool ExecutiveController::commit_completed_step_unlocked(int episode_index) {
         cognateRec.status = static_cast<int>(state_);
         cognate = cognateRec;
     }
+
+    std::optional<Thoth::Cm1SnapshotRecord> cm1_snapshot;
+    std::optional<Thoth::Cm1AnswerVersionRecord> cm1_answer;
+    if (Thoth::cm1TelemetryEnabled()
+        && episode_index >= 0
+        && episode_index < static_cast<int>(current_plan_.steps.size())) {
+        const PlanStep& step = current_plan_.steps[static_cast<std::size_t>(episode_index)];
+        try {
+            if (step.type == StepType::RETRIEVAL) {
+                Thoth::Cm1SnapshotBuildInput input;
+                input.plan_id = current_plan_.plan_id;
+                input.step_id = step.step_id;
+                input.snapshot_type = "retrieval_observed";
+                input.lifecycle_stage = "after_retrieval";
+                input.observed_at_ms = nowMs();
+                const auto diagnostics = cm1DiagnosticsFromResult(step.result);
+                if (diagnostics) {
+                    input.diagnostics = &(*diagnostics);
+                }
+                IndexManager* index =
+                    rag_ ? rag_->getIndexManager() : nullptr;
+                auto counts = cm1IndexedCountsByFile(index);
+                if (index) {
+                    input.indexed_counts_available = true;
+                    input.indexed_counts_by_file = std::move(counts);
+                }
+                input.selected_chunks = cm1SelectedChunksFromResult(step.result);
+                cm1_snapshot = Thoth::buildCm1Snapshot(input);
+            } else if (step.type == StepType::LLM && step.status == StepStatus::SUCCESS) {
+                Thoth::Cm1SnapshotBuildInput input;
+                input.plan_id = current_plan_.plan_id;
+                input.step_id = step.step_id;
+                input.snapshot_type = "synthesis_observed";
+                input.lifecycle_stage = "after_synthesis";
+                input.observed_at_ms = nowMs();
+                std::optional<GragDiagnostics> held_diagnostics;
+                for (const auto& prior : current_plan_.steps) {
+                    if (prior.type != StepType::RETRIEVAL) continue;
+                    auto selected = cm1SelectedChunksFromResult(prior.result);
+                    input.selected_chunks.insert(
+                        input.selected_chunks.end(), selected.begin(), selected.end());
+                }
+                for (auto it = current_plan_.steps.rbegin(); it != current_plan_.steps.rend();
+                     ++it) {
+                    if (it->type != StepType::RETRIEVAL) continue;
+                    held_diagnostics = cm1DiagnosticsFromResult(it->result);
+                    if (held_diagnostics) {
+                        input.diagnostics = &(*held_diagnostics);
+                        break;
+                    }
+                }
+                IndexManager* index = rag_ ? rag_->getIndexManager() : nullptr;
+                if (index) {
+                    input.indexed_counts_available = true;
+                    input.indexed_counts_by_file = cm1IndexedCountsByFile(index);
+                }
+                if (step.result.is_object()) {
+                    if (step.result.contains("synthesis_context_truncated")) {
+                        input.synthesis_context_truncated_available = true;
+                        input.synthesis_context_truncated =
+                            step.result.value("synthesis_context_truncated", false);
+                    }
+                    if (step.result.value("cm1_included_in_synthesis_available", false)
+                        && step.result.contains("cm1_included_content_sha256")
+                        && step.result["cm1_included_content_sha256"].is_array()) {
+                        input.included_in_synthesis_available = true;
+                        for (const auto& h : step.result["cm1_included_content_sha256"]) {
+                            if (h.is_string()) input.included_content_sha256.push_back(h.get<std::string>());
+                        }
+                    }
+                }
+                cm1_snapshot = Thoth::buildCm1Snapshot(input);
+
+                std::string generation_id;
+                std::string answer_text;
+                if (step.result.is_object()) {
+                    generation_id = step.result.value("generation_id", "");
+                    if (step.result.contains("data") && step.result["data"].is_object()) {
+                        answer_text = step.result["data"].value("response", "");
+                    }
+                }
+                if (!generation_id.empty() && !answer_text.empty()) {
+                    cm1_answer = Thoth::buildCm1AnswerVersion(
+                        current_plan_.plan_id,
+                        step.step_id,
+                        generation_id,
+                        answer_text,
+                        nowMs());
+                }
+            }
+        } catch (const std::exception& ex) {
+            std::cerr << "[ExecutiveController] CM-1 telemetry build failed: " << ex.what()
+                      << " — continuing without telemetry\n";
+            cm1_snapshot.reset();
+            cm1_answer.reset();
+        } catch (...) {
+            std::cerr << "[ExecutiveController] CM-1 telemetry build failed — "
+                         "continuing without telemetry\n";
+            cm1_snapshot.reset();
+            cm1_answer.reset();
+        }
+    }
+
+    std::optional<Thoth::Cm1BreadthEstimate> cm1_breadth;
+    if (cm1_snapshot && Thoth::cm1BreadthEnabled()) {
+        try {
+            const auto prior = memory_->listCm1SnapshotsForPlan(current_plan_.plan_id);
+            cm1_breadth = Thoth::buildCm1BreadthEstimate(*cm1_snapshot, prior);
+        } catch (const std::exception& ex) {
+            std::cerr << "[ExecutiveController] CM-1 breadth estimate failed: " << ex.what()
+                      << " — snapshot kept, estimate omitted\n";
+        } catch (...) {
+            std::cerr << "[ExecutiveController] CM-1 breadth estimate failed — "
+                         "snapshot kept, estimate omitted\n";
+        }
+    }
+
     return memory_->commitStepCheckpoint(
         activePlanRecordFrom(stored, session_id_, state_to_name(state_)),
         cognate,
-        episode);
+        episode,
+        cm1_snapshot,
+        cm1_answer,
+        cm1_breadth);
 }
 
 void ExecutiveController::backfill_durable_episode_steps_unlocked(const std::vector<int>& durable_indices) {

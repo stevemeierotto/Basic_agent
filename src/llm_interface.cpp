@@ -6,7 +6,6 @@
 #include "../include/inference_endpoint.h"
 #include "../include/test_suite_dev.h"
 #include "../include/robustness_mock_responses.h"
-#include <atomic>
 #include <chrono>
 #include <../include/json.hpp>
 #include <curl/curl.h>
@@ -72,8 +71,7 @@ void applyConfiguredSeed(std::optional<int>& seed_field) {
 }
 
 std::string nextGenerationId() {
-    static std::atomic<std::uint64_t> counter{1};
-    return "gen-" + std::to_string(counter.fetch_add(1));
+    return Thoth::makeGenerationId();
 }
 
 } // namespace

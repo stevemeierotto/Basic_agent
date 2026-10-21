@@ -6,11 +6,16 @@
  * Licensed under the MIT License (see LICENSE in project root)
  */
 #include "../include/generation_call.h"
+#include "../include/alp_uuid.h"
 
 #include <mutex>
 #include <unordered_map>
 
 namespace Thoth {
+
+std::string makeGenerationId() {
+    return std::string("gen-") + AlpUuid::generateV4();
+}
 
 std::vector<GenerationCallContext>& GenerationCallScope::stack() {
     thread_local std::vector<GenerationCallContext> value;

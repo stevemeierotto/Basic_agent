@@ -130,6 +130,7 @@ set(BASIC_AGENT_SOURCES
     src/ollama_snapshot.cpp
     src/benchmark_context.cpp
     src/cognitive_metrics_logger.cpp
+    src/cm1_telemetry.cpp
     src/episode_events.cpp
     src/episode_event_channel.cpp
     src/replay_subscriber.cpp
