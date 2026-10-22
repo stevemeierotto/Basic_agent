@@ -36,11 +36,11 @@ std::string normalizeBackendToken(std::string value) {
 std::optional<InferenceBackend> tryResolveInferenceBackend(std::string& error_out) {
     error_out.clear();
     const std::string backend = normalizeBackendToken(envOrEmpty("THOTH_INFERENCE_BACKEND"));
-    if (backend.empty() || backend == "ollama") {
-        return InferenceBackend::Ollama;
-    }
-    if (backend == "llama_cpp") {
+    if (backend.empty() || backend == "llama_cpp") {
         return InferenceBackend::LlamaCpp;
+    }
+    if (backend == "ollama") {
+        return InferenceBackend::Ollama;
     }
     error_out = "Invalid THOTH_INFERENCE_BACKEND='" + backend
                 + "'. Expected 'ollama' or 'llama_cpp'.";

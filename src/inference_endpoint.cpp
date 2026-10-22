@@ -7,6 +7,7 @@
  */
 
 #include "../include/inference_endpoint.h"
+#include "../include/inference_client.h"
 #include "../include/config.h"
 
 #include <cstdlib>
@@ -16,7 +17,15 @@ namespace Thoth {
 
 namespace {
 
-constexpr const char* kDefaultBaseUrl = "http://127.0.0.1:11434";
+constexpr const char* kLlamaChatUrl = "http://127.0.0.1:8080";
+constexpr const char* kLlamaEmbedUrl = "http://127.0.0.1:8081";
+constexpr const char* kOllamaUrl = "http://127.0.0.1:11434";
+
+bool explicitOllamaBackend() {
+    std::string error;
+    const auto backend = tryResolveInferenceBackend(error);
+    return backend && *backend == InferenceBackend::Ollama;
+}
 
 std::string envOrEmpty(const char* key) {
     const char* value = std::getenv(key);
@@ -50,25 +59,33 @@ std::string normalizePath(std::string path) {
     return path;
 }
 
-std::string resolveBaseFromEnvAndConfig(const Config* config) {
+std::string resolveBaseFromEnvAndConfig(const Config* config, bool* usedDefault) {
     const std::string envInference = envOrEmpty("THOTH_INFERENCE_BASE_URL");
     if (!envInference.empty()) {
+        *usedDefault = false;
         return normalizeOrigin(ensureScheme(envInference));
     }
 
-    const std::string ollamaHost = envOrEmpty("OLLAMA_HOST");
-    if (!ollamaHost.empty()) {
-        return normalizeOrigin(ensureScheme(ollamaHost));
+    if (explicitOllamaBackend()) {
+        const std::string ollamaHost = envOrEmpty("OLLAMA_HOST");
+        if (!ollamaHost.empty()) {
+            *usedDefault = false;
+            return normalizeOrigin(ensureScheme(ollamaHost));
+        }
     }
 
     if (config && !config->inference_base_url.empty()) {
+        *usedDefault = false;
         return normalizeOrigin(ensureScheme(config->inference_base_url));
     }
 
-    return kDefaultBaseUrl;
+    *usedDefault = true;
+    return explicitOllamaBackend() ? kOllamaUrl : kLlamaChatUrl;
 }
 
-std::string resolveEmbedFromEnvAndConfig(const std::string& llmBase, const Config* config) {
+std::string resolveEmbedFromEnvAndConfig(const std::string& llmBase,
+                                         const Config* config,
+                                         bool chatUsedDefault) {
     const std::string envEmbed = envOrEmpty("THOTH_EMBED_BASE_URL");
     if (!envEmbed.empty()) {
         return normalizeOrigin(ensureScheme(envEmbed));
@@ -78,13 +95,19 @@ std::string resolveEmbedFromEnvAndConfig(const std::string& llmBase, const Confi
         return normalizeOrigin(ensureScheme(config->embed_base_url));
     }
 
+    if (chatUsedDefault && !explicitOllamaBackend()) {
+        return kLlamaEmbedUrl;
+    }
+
     return llmBase;
 }
 
 InferenceEndpointConfig buildEndpoints(const Config* config) {
     InferenceEndpointConfig endpoints;
-    endpoints.base_url = resolveBaseFromEnvAndConfig(config);
-    endpoints.embed_base_url = resolveEmbedFromEnvAndConfig(endpoints.base_url, config);
+    bool chatUsedDefault = false;
+    endpoints.base_url = resolveBaseFromEnvAndConfig(config, &chatUsedDefault);
+    endpoints.embed_base_url = resolveEmbedFromEnvAndConfig(
+        endpoints.base_url, config, chatUsedDefault);
     return endpoints;
 }
 
