@@ -336,7 +336,9 @@ std::string LLMInterface::query(const std::string& prompt,
 Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
     const std::string& prompt,
     int num_predict_override,
-    const std::vector<std::string>& stop_sequences) {
+    const std::vector<std::string>& stop_sequences,
+    std::optional<double> temperature_override,
+    std::optional<long> timeout_seconds) {
     Thoth::InferenceGenerateResult result;
     try {
         if (auto fail = Thoth::RobustnessMockResponses::popFailure()) {
@@ -383,6 +385,9 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
         }
 
         double temperature = config ? config->temperature : 0.7;
+        if (temperature_override.has_value()) {
+            temperature = *temperature_override;
+        }
         double topP = config ? config->top_p : 1.0;
         const int maxTokens = resolveRequestedMaxTokens(config, num_predict_override);
         std::string model = resolveOllamaModel();
@@ -401,6 +406,9 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
         request.max_tokens = maxTokens;
         request.stop_sequences = stop_sequences;
         applyConfiguredSeed(request.seed);
+        if (timeout_seconds.has_value()) {
+            request.timeout_seconds = timeout_seconds;
+        }
 
         const auto started = std::chrono::steady_clock::now();
         result = inference_client_->generate(request);
@@ -590,7 +598,9 @@ Thoth::GenerationOutcome LLMInterface::generateCall(
     const std::string& prompt,
     int num_predict_override,
     const std::vector<std::string>& stop_sequences,
-    const Thoth::GenerationCallContext& context) {
+    const Thoth::GenerationCallContext& context,
+    std::optional<double> temperature_override,
+    std::optional<long> timeout_seconds) {
     Thoth::GenerationOutcome outcome;
     outcome.generation_id = nextGenerationId();
     outcome.context = context;
@@ -614,8 +624,8 @@ Thoth::GenerationOutcome LLMInterface::generateCall(
     struct ClearProgressId {
         ~ClearProgressId() { Thoth::GenerationProgressIds::clear(); }
     } clear_progress_id;
-    const Thoth::InferenceGenerateResult detailed =
-        queryDetailed(prompt, outcome.requested_max_tokens, stop_sequences);
+    const Thoth::InferenceGenerateResult detailed = queryDetailed(
+        prompt, outcome.requested_max_tokens, stop_sequences, temperature_override, timeout_seconds);
     outcome.ok = detailed.ok;
     outcome.error = detailed.error;
     outcome.text = detailed.text;

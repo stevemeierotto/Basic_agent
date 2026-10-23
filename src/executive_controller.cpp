@@ -21,6 +21,8 @@
 #include "../include/c64_window_attribution.h"
 #include "../include/cognitive_metrics.h"
 #include "../include/cm1_telemetry.h"
+#include "../include/alp_sha256.h"
+#include "../include/generation_call_log.h"
 #include "../include/runtime_latency_config.h"
 #include "../include/config.h"
 #include "../include/reflection_utils.h"
@@ -1200,6 +1202,31 @@ void ExecutiveController::decide_transition() {
     }
 }
 
+namespace {
+
+struct PendingCm1Evidence {
+    bool run = false;
+    Cm1AnswerVersionRecord answer;
+    std::string answer_text;
+    std::vector<Cm1EvidenceChunk> included;
+    bool inclusion_known = false;
+    bool evidence_texts_complete = false;
+    bool mock_synthesis = false;
+    std::string task_id;
+    std::string session_id;
+    std::string plan_id;
+};
+
+PendingCm1Evidence collectCm1Evidence(const Plan& plan, const PlanStep& step);
+Cm1EvidenceCompletion callCm1EvidenceModel(LLMInterface* llm,
+                                           const std::string& prompt,
+                                           int timeout_seconds,
+                                           const std::string& task_id,
+                                           const std::string& session_id,
+                                           const std::string& plan_id);
+
+} // namespace
+
 void ExecutiveController::handle_step_completion(const Thoth::StepResult& result) {
     std::unique_lock<std::mutex> lock(mutex_);
     
@@ -1255,9 +1282,54 @@ void ExecutiveController::handle_step_completion(const Thoth::StepResult& result
         }
 
         update_trajectory_embedding_unlocked();
-        commit_completed_step_unlocked(episodeIndex);
-        
-        transition_to_unlocked(ControllerState::IDLE);
+        const bool committed = commit_completed_step_unlocked(episodeIndex);
+        PendingCm1Evidence pending = collectCm1Evidence(current_plan_, step);
+        pending.task_id = mtcp_task_id_;
+        pending.session_id = session_id_;
+        pending.plan_id = current_plan_.plan_id;
+        std::shared_ptr<Memory> evidence_memory = memory_;
+        LLMInterface* evidence_llm = llm_interface_;
+        if (committed && pending.run && evidence_memory) {
+            const int state_at_release = static_cast<int>(state_);
+            lock.unlock();
+            std::optional<Thoth::Cm1EvidenceJudgmentRecord> judgment;
+            try {
+                judgment = Thoth::runCm1EvidenceJudgment(
+                    pending.answer,
+                    pending.answer_text,
+                    pending.included,
+                    pending.inclusion_known,
+                    pending.evidence_texts_complete,
+                    pending.mock_synthesis,
+                    [&](const std::string& prompt, int timeout_seconds) {
+                        return callCm1EvidenceModel(
+                            evidence_llm, prompt, timeout_seconds, pending.task_id,
+                            pending.session_id, pending.plan_id);
+                    },
+                    nowMs(),
+                    static_cast<int>(LlmTimeoutPolicy::timeoutSeconds()));
+            } catch (const std::exception& ex) {
+                std::cerr << "[ExecutiveController] CM-1 evidence judgment failed: " << ex.what()
+                          << "\n";
+            } catch (...) {
+                std::cerr << "[ExecutiveController] CM-1 evidence judgment failed\n";
+            }
+            if (judgment) {
+                try {
+                    if (!evidence_memory->insertCm1EvidenceJudgment(*judgment)) {
+                        std::cerr << "[ExecutiveController] CM-1 evidence judgment insert failed\n";
+                    }
+                } catch (...) {
+                    std::cerr << "[ExecutiveController] CM-1 evidence judgment insert failed\n";
+                }
+            }
+            lock.lock();
+            if (cm1EvidenceStateUnchanged(state_at_release, static_cast<int>(state_))) {
+                transition_to_unlocked(ControllerState::IDLE);
+            }
+        } else {
+            transition_to_unlocked(ControllerState::IDLE);
+        }
     } else {
         current_plan_.updated_at_ms = nowMs();
         std::string err = result.error_message;
@@ -2000,6 +2072,105 @@ std::optional<GragDiagnostics> cm1DiagnosticsFromResult(const nlohmann::json& st
         }
     }
     return out;
+}
+
+bool cm1MockSynthesisEnabled() {
+    const char* mock = std::getenv("THOTH_MOCK_LLM");
+    return mock && (std::string(mock) == "1" || std::string(mock) == "true");
+}
+
+PendingCm1Evidence collectCm1Evidence(const Plan& plan, const PlanStep& step) {
+    PendingCm1Evidence pending;
+    if (step.type != StepType::LLM || step.status != StepStatus::SUCCESS) return pending;
+    if (!Thoth::cm1EvidenceEnabled() || !Thoth::cm1TelemetryEnabled()) return pending;
+    if (!step.result.is_object()) return pending;
+    const std::string generation_id = step.result.value("generation_id", "");
+    std::string answer_text;
+    if (step.result.contains("data") && step.result["data"].is_object()) {
+        answer_text = step.result["data"].value("response", "");
+    }
+    pending.answer = Thoth::buildCm1AnswerVersion(
+        plan.plan_id, step.step_id, generation_id, answer_text, 0);
+    if (pending.answer.answer_id.empty()) return pending;
+    pending.run = true;
+    pending.answer_text = std::move(answer_text);
+    pending.mock_synthesis = cm1MockSynthesisEnabled();
+    pending.inclusion_known = step.result.value("cm1_included_in_synthesis_available", false)
+        && step.result.contains("cm1_included_content_sha256")
+        && step.result["cm1_included_content_sha256"].is_array();
+    if (!pending.inclusion_known) return pending;
+
+    std::vector<std::string> hashes;
+    for (const auto& hash : step.result["cm1_included_content_sha256"]) {
+        if (hash.is_string()) hashes.push_back(hash.get<std::string>());
+    }
+    std::unordered_map<std::string, std::string> content_by_hash;
+    for (const auto& prior : plan.steps) {
+        if (prior.type != StepType::RETRIEVAL) continue;
+        for (const auto& selected : cm1SelectedChunksFromResult(prior.result)) {
+            if (selected.second.empty()) continue;
+            const std::string hash = Thoth::sha256Hex(selected.second);
+            if (!content_by_hash.count(hash)) {
+                content_by_hash.emplace(hash, selected.second);
+            }
+        }
+    }
+    pending.evidence_texts_complete = true;
+    std::unordered_map<std::string, bool> seen;
+    for (const auto& hash : hashes) {
+        if (seen.count(hash)) continue;
+        seen.emplace(hash, true);
+        const auto found = content_by_hash.find(hash);
+        if (found == content_by_hash.end()) {
+            pending.evidence_texts_complete = false;
+            pending.included.clear();
+            return pending;
+        }
+        Thoth::Cm1EvidenceChunk chunk;
+        chunk.content_sha256 = hash;
+        chunk.content = found->second;
+        pending.included.push_back(std::move(chunk));
+    }
+    return pending;
+}
+
+Thoth::Cm1EvidenceCompletion callCm1EvidenceModel(LLMInterface* llm,
+                                                  const std::string& prompt,
+                                                  int timeout_seconds,
+                                                  const std::string& task_id,
+                                                  const std::string& session_id,
+                                                  const std::string& plan_id) {
+    Thoth::Cm1EvidenceCompletion completion;
+    if (!llm) {
+        completion.ok = false;
+        completion.error = "llm_unavailable";
+        return completion;
+    }
+    Thoth::GenerationCallContext call;
+    call.task_id = task_id;
+    call.session_id = session_id;
+    call.plan_id = plan_id;
+    call.call_type = "evidence_judgment";
+    const Thoth::GenerationOutcome generated = llm->generateCall(
+        prompt, Thoth::kCm1EvidenceNumPredict, {}, call, 0.0,
+        static_cast<long>(std::max(1, timeout_seconds)));
+    completion.called = true;
+    completion.ok = generated.ok;
+    if (!generated.ok && generated.error.find("Timeout was reached") != std::string::npos) {
+        completion.error = "timeout";
+    } else {
+        completion.error = generated.error;
+    }
+    completion.text = generated.text;
+    completion.finish_reason = generated.finish_reason;
+    completion.generation_id = generated.generation_id;
+    try {
+        Thoth::GenerationRecordFields fields;
+        fields.associated_generation_id = generated.generation_id;
+        Thoth::GenerationCallLog::append(generated, fields);
+    } catch (...) {
+    }
+    return completion;
 }
 
 } // namespace

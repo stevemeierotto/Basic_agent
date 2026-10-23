@@ -150,6 +150,9 @@ public:
     bool insertCm1BreadthEstimate(const Cm1BreadthEstimate& record) override;
     std::optional<Cm1BreadthEstimate> loadCm1BreadthEstimate(
         const std::string& estimate_id) override;
+    bool insertCm1EvidenceJudgment(const Cm1EvidenceJudgmentRecord& record) override;
+    std::optional<Cm1EvidenceJudgmentRecord> loadCm1EvidenceJudgment(
+        const std::string& judgment_id) override;
     bool insertCm1UserFeedback(const Cm1UserFeedback& record) override;
     std::optional<Cm1UserFeedback> latestCm1UserFeedback(const std::string& answer_id) override;
     std::vector<Cm1UserFeedback> listCm1UserFeedback(const std::string& answer_id) override;

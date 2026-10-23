@@ -554,6 +554,19 @@ std::optional<Thoth::Cm1BreadthEstimate> Memory::loadCm1BreadthEstimate(
     return repo->loadCm1BreadthEstimate(estimate_id);
 }
 
+bool Memory::insertCm1EvidenceJudgment(const Thoth::Cm1EvidenceJudgmentRecord& record) {
+    std::unique_lock lock(mtx);
+    if (!repo) return false;
+    return repo->insertCm1EvidenceJudgment(record);
+}
+
+std::optional<Thoth::Cm1EvidenceJudgmentRecord> Memory::loadCm1EvidenceJudgment(
+    const std::string& judgment_id) const {
+    std::shared_lock lock(mtx);
+    if (!repo) return std::nullopt;
+    return repo->loadCm1EvidenceJudgment(judgment_id);
+}
+
 Thoth::Cm1UserFeedbackDraft Memory::submitCm1UserFeedback(
     const Thoth::Cm1FeedbackSubmission& submission, std::int64_t created_at_ms) {
     std::unique_lock lock(mtx);

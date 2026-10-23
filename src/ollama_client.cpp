@@ -126,7 +126,8 @@ InferenceGenerateResult OllamaClient::generate(const InferenceGenerateRequest& r
     }
 
     const std::string url = inferenceUrl(base_url_, "/api/generate");
-    const auto http = inferenceHttpPost(url, serializeGeneratePayload(request), LlmTimeoutPolicy::timeoutSeconds());
+    const auto http = inferenceHttpPost(
+        url, serializeGeneratePayload(request), LlmTimeoutPolicy::resolvedTimeoutSeconds(request.timeout_seconds));
     if (!http.ok) {
         result.error = http.error.empty() ? http.body : http.error;
         return result;

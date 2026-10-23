@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <string>
 
 namespace Thoth::LlmTimeoutPolicy {
@@ -33,6 +34,13 @@ inline long timeoutSeconds() {
         }
     }
     return kDefaultSeconds;
+}
+
+/** Per-call budget. Unset or non-positive keeps the shared timeout. A shorter override wins. */
+inline long resolvedTimeoutSeconds(const std::optional<long>& override_seconds) {
+    const long shared = timeoutSeconds();
+    if (!override_seconds.has_value() || *override_seconds <= 0) return shared;
+    return std::min(shared, *override_seconds);
 }
 
 inline int stepTimeoutMs(StepType type, int requestedMs) {

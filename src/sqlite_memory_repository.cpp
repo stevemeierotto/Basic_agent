@@ -295,6 +295,14 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             "  supersedes_label_id TEXT NOT NULL,"
             "  revision_index INTEGER NOT NULL,"
             "  created_at_ms INTEGER NOT NULL"
+            ");"
+            "CREATE TABLE IF NOT EXISTS cm1_evidence_judgments ("
+            "  judgment_id TEXT PRIMARY KEY,"
+            "  answer_id TEXT NOT NULL,"
+            "  content_sha256 TEXT NOT NULL,"
+            "  estimator_version TEXT NOT NULL,"
+            "  payload_json TEXT NOT NULL,"
+            "  created_at_ms INTEGER NOT NULL"
             ");";
 
         char* errMsg = nullptr;
@@ -2348,6 +2356,64 @@ bool SQLiteMemoryRepository::insertCm1BreadthEstimate(const Cm1BreadthEstimate& 
         return ok;
     } catch (...) {
         return false;
+    }
+}
+
+bool SQLiteMemoryRepository::insertCm1EvidenceJudgment(const Cm1EvidenceJudgmentRecord& record) {
+    try {
+        if (!db_ || !db_->handle || record.judgment_id.empty()) return false;
+        if (record.answer_id.empty() || record.content_sha256.empty()) return false;
+        if (record.estimator_version.empty() || record.payload_json.empty()) return false;
+        if (const char* inj = std::getenv("THOTH_INJECT_CM1_WRITE_FAIL")) {
+            if (std::string(inj) == "1") return false;
+        }
+        const char* sql =
+            "INSERT OR IGNORE INTO cm1_evidence_judgments "
+            "(judgment_id, answer_id, content_sha256, estimator_version, payload_json, "
+            "created_at_ms) VALUES (?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, record.judgment_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, record.answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, record.content_sha256.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, record.estimator_version.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, record.payload_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 6, record.created_at_ms);
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<Cm1EvidenceJudgmentRecord> SQLiteMemoryRepository::loadCm1EvidenceJudgment(
+    const std::string& judgment_id) {
+    try {
+        if (!db_ || !db_->handle || judgment_id.empty()) return std::nullopt;
+        const char* sql =
+            "SELECT judgment_id, answer_id, content_sha256, estimator_version, payload_json, "
+            "created_at_ms FROM cm1_evidence_judgments WHERE judgment_id = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return std::nullopt;
+        }
+        sqlite3_bind_text(stmt, 1, judgment_id.c_str(), -1, SQLITE_TRANSIENT);
+        std::optional<Cm1EvidenceJudgmentRecord> out;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            Cm1EvidenceJudgmentRecord record;
+            record.judgment_id = safe_col_text(stmt, 0);
+            record.answer_id = safe_col_text(stmt, 1);
+            record.content_sha256 = safe_col_text(stmt, 2);
+            record.estimator_version = safe_col_text(stmt, 3);
+            record.payload_json = safe_col_text(stmt, 4);
+            record.created_at_ms = sqlite3_column_int64(stmt, 5);
+            out = std::move(record);
+        }
+        sqlite3_finalize(stmt);
+        return out;
+    } catch (...) {
+        return std::nullopt;
     }
 }
 

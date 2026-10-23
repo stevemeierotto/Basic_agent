@@ -31,6 +31,11 @@ struct InferenceGenerateRequest {
     std::vector<std::string> stop_sequences;
     /** MTCP — present only when a characterization or operator seed is configured. */
     std::optional<int> seed;
+    /**
+     * Optional HTTP budget for this call, in seconds. Unset uses the shared
+     * generation timeout. A set value is capped by that shared timeout.
+     */
+    std::optional<long> timeout_seconds;
 };
 
 /** OpenAI-style chat message for /v1/chat/completions. */

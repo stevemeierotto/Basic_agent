@@ -184,6 +184,9 @@ public:
     bool insertCm1BreadthEstimate(const Thoth::Cm1BreadthEstimate& record);
     std::optional<Thoth::Cm1BreadthEstimate> loadCm1BreadthEstimate(
         const std::string& estimate_id) const;
+    bool insertCm1EvidenceJudgment(const Thoth::Cm1EvidenceJudgmentRecord& record);
+    std::optional<Thoth::Cm1EvidenceJudgmentRecord> loadCm1EvidenceJudgment(
+        const std::string& judgment_id) const;
     Thoth::Cm1UserFeedbackDraft submitCm1UserFeedback(
         const Thoth::Cm1FeedbackSubmission& submission, std::int64_t created_at_ms);
     std::optional<Thoth::Cm1UserFeedback> latestCm1UserFeedback(

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <map>
@@ -42,6 +43,12 @@ bool cm1TelemetryEnabled() {
 
 bool cm1BreadthEnabled() {
     const char* env = std::getenv("THOTH_CM1_BREADTH");
+    if (!env || !*env) return false;
+    return std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "off";
+}
+
+bool cm1EvidenceEnabled() {
+    const char* env = std::getenv("THOTH_CM1_EVIDENCE");
     if (!env || !*env) return false;
     return std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "off";
 }
@@ -748,6 +755,443 @@ Cm1VerifiedLabelDraft prepareCm1VerifiedLabel(
     draft.record.created_at_ms = created_at_ms;
     draft.message = "Verified label recorded.";
     return draft;
+}
+
+namespace {
+
+std::string trimEnds(const std::string& text) {
+    std::size_t begin = 0;
+    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) {
+        ++begin;
+    }
+    std::size_t end = text.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+        --end;
+    }
+    return text.substr(begin, end - begin);
+}
+
+bool isListMarkerLine(const std::string& line, std::size_t& content_begin) {
+    std::size_t i = 0;
+    while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) {
+        ++i;
+    }
+    if (i >= line.size()) return false;
+    if ((line[i] == '-' || line[i] == '*') && i + 1 < line.size()
+        && std::isspace(static_cast<unsigned char>(line[i + 1]))) {
+        content_begin = i + 2;
+        while (content_begin < line.size()
+               && std::isspace(static_cast<unsigned char>(line[content_begin]))) {
+            ++content_begin;
+        }
+        return true;
+    }
+    std::size_t j = i;
+    if (!std::isdigit(static_cast<unsigned char>(line[j]))) return false;
+    while (j < line.size() && std::isdigit(static_cast<unsigned char>(line[j]))) {
+        ++j;
+    }
+    if (j >= line.size() || (line[j] != '.' && line[j] != ')')) return false;
+    if (j + 1 >= line.size() || !std::isspace(static_cast<unsigned char>(line[j + 1]))) {
+        return false;
+    }
+    content_begin = j + 2;
+    while (content_begin < line.size()
+           && std::isspace(static_cast<unsigned char>(line[content_begin]))) {
+        ++content_begin;
+    }
+    return true;
+}
+
+bool abbreviationBeforePeriod(const std::string& text, std::size_t period_index) {
+    std::size_t begin = period_index;
+    while (begin > 0 && std::isalpha(static_cast<unsigned char>(text[begin - 1]))) {
+        --begin;
+    }
+    std::string token = text.substr(begin, period_index - begin);
+    for (char& ch : token) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (token.size() == 1) return true;
+    return token == "vs" || token == "fig" || token == "eq" || token == "eg" || token == "ie";
+}
+
+std::vector<std::string> splitClaimSentences(const std::string& block) {
+    std::vector<std::string> claims;
+    bool in_ticks = false;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < block.size(); ++i) {
+        const char ch = block[i];
+        if (ch == '`') {
+            in_ticks = !in_ticks;
+            continue;
+        }
+        if (in_ticks) continue;
+        if (ch != '.' && ch != '!' && ch != '?') continue;
+        const bool boundary = (i + 1 == block.size())
+            || std::isspace(static_cast<unsigned char>(block[i + 1]));
+        if (!boundary) continue;
+        if (ch == '.' && i > 0 && i + 1 < block.size()
+            && std::isdigit(static_cast<unsigned char>(block[i - 1]))
+            && std::isdigit(static_cast<unsigned char>(block[i + 1]))) {
+            continue;
+        }
+        if (ch == '.' && abbreviationBeforePeriod(block, i)) continue;
+        const std::string piece = trimEnds(block.substr(start, i + 1 - start));
+        if (!piece.empty()) claims.push_back(piece);
+        start = i + 1;
+    }
+    const std::string tail = trimEnds(block.substr(start));
+    if (!tail.empty()) claims.push_back(tail);
+    return claims;
+}
+
+std::optional<std::string> oneBalancedObject(const std::string& text) {
+    std::optional<std::string> found;
+    bool in_string = false;
+    bool escaped = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (ch == '"') {
+            in_string = true;
+            continue;
+        }
+        if (ch != '{') continue;
+        int depth = 0;
+        bool inner_string = false;
+        bool inner_escaped = false;
+        bool closed = false;
+        std::size_t end = i;
+        for (std::size_t j = i; j < text.size(); ++j) {
+            const char c = text[j];
+            if (inner_string) {
+                if (inner_escaped) {
+                    inner_escaped = false;
+                } else if (c == '\\') {
+                    inner_escaped = true;
+                } else if (c == '"') {
+                    inner_string = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inner_string = true;
+            } else if (c == '{') {
+                ++depth;
+            } else if (c == '}') {
+                --depth;
+                if (depth == 0) {
+                    closed = true;
+                    end = j;
+                    break;
+                }
+            }
+        }
+        // An unclosed brace is malformed. A second object is also rejected.
+        // Ordinary text around the one object is kept out of the parsed value.
+        if (!closed || found.has_value()) return std::nullopt;
+        found = text.substr(i, end - i + 1);
+        i = end;
+    }
+    return found;
+}
+
+nlohmann::json claimJson(int index,
+                         const std::string& answer_id,
+                         const std::string& claim_text,
+                         const std::string& evaluation_status,
+                         const std::string& unavailable_reason,
+                         const std::string& label,
+                         const std::string& evidence_quote,
+                         const std::string& evidence_chunk_sha256,
+                         const std::string& generation_id) {
+    const std::string claim_sha = sha256Hex(claim_text);
+    nlohmann::json claim = {
+        {"claim_index", index},
+        {"claim_id", answer_id + ":" + std::to_string(index) + ":" + claim_sha},
+        {"claim_sha256", claim_sha},
+        {"claim_text", claim_text},
+        {"evaluation_status", evaluation_status},
+    };
+    if (!generation_id.empty()) claim["generation_id"] = generation_id;
+    if (evaluation_status == "available") {
+        claim["label"] = label;
+        claim["evidence_quote"] = evidence_quote;
+        if (!evidence_chunk_sha256.empty()) {
+            claim["evidence_chunk_sha256"] = evidence_chunk_sha256;
+        }
+    } else {
+        claim["unavailable_reason"] = unavailable_reason;
+    }
+    return claim;
+}
+
+nlohmann::json unavailableClaim(int index,
+                                const std::string& answer_id,
+                                const std::string& claim_text,
+                                const std::string& reason,
+                                const std::string& generation_id) {
+    return claimJson(index, answer_id, claim_text, "unavailable", reason, "", "", "", generation_id);
+}
+
+} // namespace
+
+std::vector<std::string> segmentCm1EvidenceClaims(const std::string& answer_text) {
+    std::vector<std::string> blocks;
+    std::string current;
+    std::size_t line_begin = 0;
+    const auto flush = [&]() {
+        if (!current.empty()) blocks.push_back(current);
+        current.clear();
+    };
+    const auto take_line = [&](const std::string& line) {
+        if (trimEnds(line).empty()) {
+            flush();
+            return;
+        }
+        std::size_t content_begin = 0;
+        if (isListMarkerLine(line, content_begin)) {
+            flush();
+            blocks.push_back(line.substr(content_begin));
+            return;
+        }
+        if (!current.empty()) current.push_back('\n');
+        current += line;
+    };
+    while (line_begin <= answer_text.size()) {
+        const std::size_t line_end = answer_text.find('\n', line_begin);
+        if (line_end == std::string::npos) {
+            take_line(answer_text.substr(line_begin));
+            break;
+        }
+        std::string line = answer_text.substr(line_begin, line_end - line_begin);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        take_line(line);
+        line_begin = line_end + 1;
+    }
+    flush();
+
+    std::vector<std::string> claims;
+    for (const auto& block : blocks) {
+        for (const auto& claim : splitClaimSentences(block)) {
+            if (!claim.empty()) claims.push_back(claim);
+        }
+    }
+    return claims;
+}
+
+std::string buildCm1EvidencePrompt(const std::string& claim,
+                                   const std::vector<Cm1EvidenceChunk>& included_chunks) {
+    std::ostringstream prompt;
+    prompt << "Judge whether the claim is established by the evidence passages.\n";
+    prompt << "Use only those passages.\n";
+    prompt << "Reply with one JSON object and no other text:\n";
+    prompt << "{\"label\":\"supported\",\"evidence_quote\":\"exact span from one passage\"}\n";
+    prompt << "{\"label\":\"contradicted\",\"evidence_quote\":\"exact span from one passage\"}\n";
+    prompt << "{\"label\":\"insufficient_evidence\",\"evidence_quote\":\"\"}\n";
+    prompt << "supported means the passages establish the claim.\n";
+    prompt << "contradicted means the passages conflict with the claim.\n";
+    prompt << "insufficient_evidence means the passages establish neither conclusion.\n";
+    prompt << "Copy the quote exactly from one passage. Leave it empty for insufficient_evidence.\n\n";
+    prompt << "EVIDENCE PASSAGE START\n";
+    if (included_chunks.empty()) {
+        prompt << "No evidence passages were included.\n\n";
+    } else {
+        for (const auto& chunk : included_chunks) {
+            prompt << "[passage " << chunk.content_sha256 << "]\n";
+            prompt << chunk.content << "\n\n";
+        }
+    }
+    prompt << "EVIDENCE PASSAGE END\n\n";
+    prompt << "CLAIM START\n" << claim << "\n";
+    prompt << "CLAIM END\n\n";
+    prompt << "Emit exactly one JSON object, stop immediately afterward, and copy any quotation only from the evidence passage, not from the claim.\n";
+    return prompt.str();
+}
+
+std::optional<Cm1EvidenceJudgmentRecord> runCm1EvidenceJudgment(
+    const Cm1AnswerVersionRecord& answer,
+    const std::string& answer_text,
+    const std::vector<Cm1EvidenceChunk>& included_chunks,
+    bool inclusion_known,
+    bool evidence_texts_complete,
+    bool mock_synthesis,
+    const std::function<Cm1EvidenceCompletion(const std::string& prompt, int timeout_seconds)>& caller,
+    std::int64_t created_at_ms,
+    int budget_seconds,
+    const std::function<std::int64_t()>& now_ms) {
+    if (answer.answer_id.empty() || answer.content_sha256.empty()) {
+        return std::nullopt;
+    }
+    const std::vector<std::string> claims = segmentCm1EvidenceClaims(answer_text);
+    const int judged_count = std::min(static_cast<int>(claims.size()), kCm1EvidenceClaimCap);
+
+    const auto clock = now_ms ? now_ms : []() -> std::int64_t {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    };
+    const std::int64_t budget_ms =
+        static_cast<std::int64_t>(std::max(0, budget_seconds)) * 1000;
+    const std::int64_t started = clock();
+
+    std::string skip_reason;
+    if (mock_synthesis) {
+        skip_reason = "mock_synthesis";
+    } else if (!inclusion_known) {
+        skip_reason = "inclusion_unavailable";
+    } else if (!evidence_texts_complete) {
+        skip_reason = "evidence_text_missing";
+    }
+
+    nlohmann::json claim_rows = nlohmann::json::array();
+    for (int index = 0; index < judged_count; ++index) {
+        const std::string& claim_text = claims[static_cast<std::size_t>(index)];
+        if (!skip_reason.empty()) {
+            claim_rows.push_back(unavailableClaim(index, answer.answer_id, claim_text, skip_reason, ""));
+            continue;
+        }
+        const std::int64_t remain_ms = budget_ms - (clock() - started);
+        if (remain_ms < 1000) break;
+        const int timeout_seconds = static_cast<int>(remain_ms / 1000);
+        Cm1EvidenceCompletion completion;
+        try {
+            completion = caller(buildCm1EvidencePrompt(claim_text, included_chunks), timeout_seconds);
+        } catch (...) {
+            completion.ok = false;
+            completion.error = "exception";
+        }
+        if (!completion.ok && completion.error == "timeout") {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "timeout", completion.generation_id));
+            break;
+        }
+        if (!completion.ok) {
+            const std::string reason = completion.error == "llm_unavailable"
+                ? "llm_unavailable"
+                : "provider_error";
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, reason, completion.generation_id));
+            continue;
+        }
+        if (completion.text.empty()) {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "empty_completion", completion.generation_id));
+            continue;
+        }
+        if (completion.finish_reason.empty()) {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "finish_reason_missing",
+                completion.generation_id));
+            continue;
+        }
+        if (completion.finish_reason == "length") {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "length", completion.generation_id));
+            continue;
+        }
+        const std::optional<std::string> object = oneBalancedObject(completion.text);
+        if (!object.has_value()) {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "parse", completion.generation_id));
+            continue;
+        }
+        nlohmann::json parsed;
+        try {
+            parsed = nlohmann::json::parse(*object);
+        } catch (...) {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "parse", completion.generation_id));
+            continue;
+        }
+        if (!parsed.is_object() || parsed.size() != 2 || !parsed.contains("label")
+            || !parsed["label"].is_string() || !parsed.contains("evidence_quote")
+            || !parsed["evidence_quote"].is_string()) {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "schema", completion.generation_id));
+            continue;
+        }
+        const std::string label = parsed["label"].get<std::string>();
+        const std::string quote = parsed["evidence_quote"].get<std::string>();
+        if (label != "supported" && label != "contradicted" && label != "insufficient_evidence") {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "schema", completion.generation_id));
+            continue;
+        }
+        if (label == "insufficient_evidence") {
+            if (!quote.empty()) {
+                claim_rows.push_back(unavailableClaim(
+                    index, answer.answer_id, claim_text, "quote_present", completion.generation_id));
+                continue;
+            }
+            claim_rows.push_back(claimJson(
+                index, answer.answer_id, claim_text, "available", "", label, "", "",
+                completion.generation_id));
+            continue;
+        }
+        if (quote.empty()) {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "quote_required", completion.generation_id));
+            continue;
+        }
+        int hits = 0;
+        std::string hit_hash;
+        for (const auto& chunk : included_chunks) {
+            if (chunk.content.find(quote) != std::string::npos) {
+                ++hits;
+                hit_hash = chunk.content_sha256;
+            }
+        }
+        if (hits == 0) {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "quote_not_in_evidence",
+                completion.generation_id));
+            continue;
+        }
+        if (hits != 1) {
+            claim_rows.push_back(unavailableClaim(
+                index, answer.answer_id, claim_text, "quote_ambiguous", completion.generation_id));
+            continue;
+        }
+        claim_rows.push_back(claimJson(
+            index, answer.answer_id, claim_text, "available", "", label, quote, hit_hash,
+            completion.generation_id));
+    }
+
+    const int claims_total = static_cast<int>(claims.size());
+    const int claims_evaluated = static_cast<int>(claim_rows.size());
+    const int claims_not_judged = claims_total - claims_evaluated;
+    nlohmann::json payload = {
+        {"estimator_version", kCm1EvidenceVersion},
+        {"answer_id", answer.answer_id},
+        {"content_sha256", answer.content_sha256},
+        {"claims_total", claims_total},
+        {"claims_evaluated", claims_evaluated},
+        {"claims_not_judged", claims_not_judged},
+        {"claims", claim_rows},
+    };
+    if (claims.empty()) {
+        payload["unavailable_reason"] = "no_claims";
+    }
+
+    Cm1EvidenceJudgmentRecord record;
+    record.judgment_id = std::string("cm1e1:") + answer.answer_id;
+    record.answer_id = answer.answer_id;
+    record.content_sha256 = answer.content_sha256;
+    record.estimator_version = kCm1EvidenceVersion;
+    record.payload_json = payload.dump();
+    record.created_at_ms = created_at_ms;
+    return record;
 }
 
 } // namespace Thoth

@@ -11,6 +11,8 @@
 #include "json.hpp"
 
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -23,6 +25,9 @@ inline constexpr const char* kCm1SchemaVersion = "cm1-phase1-v1";
 inline constexpr const char* kCm1EstimatorStatus = "none_active";
 inline constexpr const char* kCm1BreadthVersion = "cm1-breadth-2";
 inline constexpr const char* kCm1BreadthLabel = "uncalibrated_evidence_breadth";
+inline constexpr const char* kCm1EvidenceVersion = "cm1-evidence-1";
+inline constexpr int kCm1EvidenceClaimCap = 8;
+inline constexpr int kCm1EvidenceNumPredict = 256;
 
 struct Cm1SourceGroup {
     std::string file_name;
@@ -220,6 +225,69 @@ Cm1VerifiedLabelDraft prepareCm1VerifiedLabel(
     const Cm1VerifiedLabel* latest,
     const Cm1VerifiedLabelSubmission& submission,
     std::int64_t created_at_ms);
+
+/** Derived evidence judgments. Default off so official EGAR runs stay unchanged. */
+bool cm1EvidenceEnabled();
+
+/**
+ * Split an answer into claim strings. List markers are removed. Decimal points,
+ * abbreviations, and backtick spans stay inside a claim. Short claims are kept.
+ */
+std::vector<std::string> segmentCm1EvidenceClaims(const std::string& answer_text);
+
+struct Cm1EvidenceChunk {
+    std::string content_sha256;
+    std::string content;
+};
+
+struct Cm1EvidenceCompletion {
+    bool called = false;
+    bool ok = false;
+    std::string error;
+    std::string text;
+    std::string finish_reason;
+    std::string generation_id;
+};
+
+struct Cm1EvidenceJudgmentRecord {
+    std::string judgment_id;
+    std::string answer_id;
+    std::string content_sha256;
+    std::string estimator_version = kCm1EvidenceVersion;
+    std::string payload_json;
+    std::int64_t created_at_ms = 0;
+};
+
+std::string buildCm1EvidencePrompt(const std::string& claim,
+                                   const std::vector<Cm1EvidenceChunk>& included_chunks);
+
+/**
+ * True when the controller state is still the state observed before judgment
+ * released the mutex. A newer state must not be replaced with IDLE.
+ */
+inline bool cm1EvidenceStateUnchanged(int state_at_release, int state_now) {
+    return state_at_release == state_now;
+}
+
+/**
+ * Judge up to kCm1EvidenceClaimCap claims within budget_seconds.
+ * caller is not invoked when synthesis was mocked, inclusion is unknown, or an
+ * included chunk text is missing. An empty answer id returns nullopt.
+ * now_ms drives the deadline. An empty function uses a steady clock.
+ * The per-call timeout is the remaining whole seconds. At under one second the
+ * remaining claims are not judged.
+ */
+std::optional<Cm1EvidenceJudgmentRecord> runCm1EvidenceJudgment(
+    const Cm1AnswerVersionRecord& answer,
+    const std::string& answer_text,
+    const std::vector<Cm1EvidenceChunk>& included_chunks,
+    bool inclusion_known,
+    bool evidence_texts_complete,
+    bool mock_synthesis,
+    const std::function<Cm1EvidenceCompletion(const std::string& prompt, int timeout_seconds)>& caller,
+    std::int64_t created_at_ms,
+    int budget_seconds = 900,
+    const std::function<std::int64_t()>& now_ms = {});
 
 } // namespace Thoth
 

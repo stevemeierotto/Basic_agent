@@ -131,7 +131,8 @@ InferenceGenerateResult LlamaServerClient::generate(const InferenceGenerateReque
     const std::string url = inferenceUrl(base_url_, "/v1/completions");
     const std::string progress_id = GenerationProgressIds::current();
     GenerationProgressSession progress(progress_id, inferenceUrl(base_url_, "/slots"));
-    const auto http = inferenceHttpPost(url, serializeGeneratePayload(request), LlmTimeoutPolicy::timeoutSeconds());
+    const auto http = inferenceHttpPost(
+        url, serializeGeneratePayload(request), LlmTimeoutPolicy::resolvedTimeoutSeconds(request.timeout_seconds));
     if (!http.ok) {
         result.error = http.error.empty() ? http.body : http.error;
         return result;

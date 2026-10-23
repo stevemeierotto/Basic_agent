@@ -58,7 +58,9 @@ public:
     Thoth::InferenceGenerateResult queryDetailed(
         const std::string& prompt,
         int num_predict_override,
-        const std::vector<std::string>& stop_sequences);
+        const std::vector<std::string>& stop_sequences,
+        std::optional<double> temperature_override = std::nullopt,
+        std::optional<long> timeout_seconds = std::nullopt);
 
     /** Phase A — structured chat generate via /v1/chat/completions (llama_cpp only). */
     Thoth::InferenceGenerateResult queryDetailedChat(
@@ -69,12 +71,16 @@ public:
     /**
      * Call-scoped generation. The returned outcome belongs to this invocation.
      * When THOTH_GENERATION_MAX_TOKENS is set, it replaces num_predict_override.
+     * A temperature override applies to this call only. Unset uses Config::temperature.
+     * A timeout override is capped by the shared generation timeout. Unset uses that timeout.
      */
     Thoth::GenerationOutcome generateCall(
         const std::string& prompt,
         int num_predict_override,
         const std::vector<std::string>& stop_sequences,
-        const Thoth::GenerationCallContext& context);
+        const Thoth::GenerationCallContext& context,
+        std::optional<double> temperature_override = std::nullopt,
+        std::optional<long> timeout_seconds = std::nullopt);
 
     void setInferenceClientForTests(std::unique_ptr<Thoth::InferenceClient> client);
 
