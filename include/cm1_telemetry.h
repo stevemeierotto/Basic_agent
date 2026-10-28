@@ -226,6 +226,73 @@ Cm1VerifiedLabelDraft prepareCm1VerifiedLabel(
     const Cm1VerifiedLabelSubmission& submission,
     std::int64_t created_at_ms);
 
+/**
+ * One claim copied from a persisted evidence-judgment payload.
+ * Claim boundaries are not recomputed.
+ */
+struct Cm1StoredClaim {
+    std::string claim_id;
+    std::string claim_sha256;
+    std::string claim_text;
+    std::string answer_id;
+    std::string answer_content_sha256;
+    std::string evidence_quote;
+    std::string evidence_chunk_sha256;
+};
+
+/**
+ * Append-only independent finding for one persisted claim.
+ * calibration_eligibility and egar_eligibility are stored separately.
+ * This checkpoint's writer accepts only provisional and excluded.
+ */
+struct Cm1ClaimVerification {
+    std::string verification_id;
+    std::string claim_id;
+    std::string claim_sha256;
+    std::string answer_id;
+    std::string content_sha256;
+    std::string protocol_id;
+    std::string protocol_version;
+    std::string reviewer_id;
+    std::string verifier_kind;
+    std::string verifier_version;
+    std::string method_id;
+    std::string outcome;
+    std::string source_kind;
+    std::string source_ref;
+    std::string calibration_eligibility;
+    std::string egar_eligibility;
+    std::string revision_reason;
+    std::string supersedes_verification_id;
+    int revision_index = 1;
+    std::int64_t created_at_ms = 0;
+};
+
+struct Cm1ClaimVerificationSubmission {
+    std::string claim_id;
+    std::string claim_text;
+    std::string answer_id;
+    std::string answer_text;
+    std::string protocol_id;
+    std::string protocol_version;
+    std::string reviewer_id;
+    std::string verifier_kind;
+    std::string verifier_version;
+    std::string method_id;
+    std::string outcome;
+    std::string source_kind;
+    std::string source_ref;
+    std::string calibration_eligibility = "provisional";
+    std::string egar_eligibility = "excluded";
+    std::string revision_reason;
+};
+
+struct Cm1ClaimVerificationDraft {
+    Cm1RecordDisposition disposition = Cm1RecordDisposition::Rejected;
+    std::string message;
+    Cm1ClaimVerification record;
+};
+
 /** Derived evidence judgments. Default off so official EGAR runs stay unchanged. */
 bool cm1EvidenceEnabled();
 
@@ -268,6 +335,34 @@ std::string buildCm1EvidencePrompt(const std::string& claim,
 inline bool cm1EvidenceStateUnchanged(int state_at_release, int state_now) {
     return state_at_release == state_now;
 }
+
+/**
+ * Copy one claim object out of a persisted judgment payload.
+ * A missing claim returns nullopt. The answer is not segmented again.
+ */
+std::optional<Cm1StoredClaim> findCm1StoredClaim(const Cm1EvidenceJudgmentRecord& judgment,
+                                                 const std::string& claim_id);
+
+/**
+ * Decide the next claim-verification row from persisted answer and claim
+ * records. An initial row starts a chain. A correction appends to that chain.
+ * Authorization, and any eligibility other than provisional / excluded, is rejected.
+ */
+Cm1ClaimVerificationDraft prepareCm1ClaimVerification(
+    const Cm1AnswerVersionRecord* answer,
+    const Cm1StoredClaim* claim,
+    const Cm1ClaimVerification* latest,
+    const Cm1ClaimVerificationSubmission& submission,
+    std::int64_t created_at_ms);
+
+/**
+ * Structural contract for a verification row against one persisted answer and claim.
+ * Provisional calibration eligibility and excluded EGAR eligibility are required.
+ * Authorization revisions are rejected. This does not read the database.
+ */
+bool cm1ClaimVerificationConforms(const Cm1ClaimVerification& record,
+                                  const Cm1AnswerVersionRecord& answer,
+                                  const Cm1StoredClaim& claim);
 
 /**
  * Judge up to kCm1EvidenceClaimCap claims within budget_seconds.

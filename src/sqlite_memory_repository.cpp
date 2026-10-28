@@ -303,6 +303,28 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             "  estimator_version TEXT NOT NULL,"
             "  payload_json TEXT NOT NULL,"
             "  created_at_ms INTEGER NOT NULL"
+            ");"
+            "CREATE TABLE IF NOT EXISTS cm1_claim_verifications ("
+            "  verification_id TEXT PRIMARY KEY,"
+            "  claim_id TEXT NOT NULL,"
+            "  claim_sha256 TEXT NOT NULL,"
+            "  answer_id TEXT NOT NULL,"
+            "  content_sha256 TEXT NOT NULL,"
+            "  protocol_id TEXT NOT NULL,"
+            "  protocol_version TEXT NOT NULL,"
+            "  reviewer_id TEXT NOT NULL,"
+            "  verifier_kind TEXT NOT NULL,"
+            "  verifier_version TEXT NOT NULL,"
+            "  method_id TEXT NOT NULL,"
+            "  outcome TEXT NOT NULL,"
+            "  source_kind TEXT NOT NULL,"
+            "  source_ref TEXT NOT NULL,"
+            "  calibration_eligibility TEXT NOT NULL,"
+            "  egar_eligibility TEXT NOT NULL,"
+            "  revision_reason TEXT NOT NULL,"
+            "  supersedes_verification_id TEXT NOT NULL,"
+            "  revision_index INTEGER NOT NULL,"
+            "  created_at_ms INTEGER NOT NULL"
             ");";
 
         char* errMsg = nullptr;
@@ -2481,6 +2503,31 @@ Cm1VerifiedLabel labelFromRow(sqlite3_stmt* stmt) {
     return record;
 }
 
+Cm1ClaimVerification claimVerificationFromRow(sqlite3_stmt* stmt) {
+    Cm1ClaimVerification record;
+    record.verification_id = safe_col_text(stmt, 0);
+    record.claim_id = safe_col_text(stmt, 1);
+    record.claim_sha256 = safe_col_text(stmt, 2);
+    record.answer_id = safe_col_text(stmt, 3);
+    record.content_sha256 = safe_col_text(stmt, 4);
+    record.protocol_id = safe_col_text(stmt, 5);
+    record.protocol_version = safe_col_text(stmt, 6);
+    record.reviewer_id = safe_col_text(stmt, 7);
+    record.verifier_kind = safe_col_text(stmt, 8);
+    record.verifier_version = safe_col_text(stmt, 9);
+    record.method_id = safe_col_text(stmt, 10);
+    record.outcome = safe_col_text(stmt, 11);
+    record.source_kind = safe_col_text(stmt, 12);
+    record.source_ref = safe_col_text(stmt, 13);
+    record.calibration_eligibility = safe_col_text(stmt, 14);
+    record.egar_eligibility = safe_col_text(stmt, 15);
+    record.revision_reason = safe_col_text(stmt, 16);
+    record.supersedes_verification_id = safe_col_text(stmt, 17);
+    record.revision_index = sqlite3_column_int(stmt, 18);
+    record.created_at_ms = sqlite3_column_int64(stmt, 19);
+    return record;
+}
+
 } // namespace
 
 bool SQLiteMemoryRepository::insertCm1UserFeedback(const Cm1UserFeedback& record) {
@@ -2627,6 +2674,212 @@ std::vector<Cm1VerifiedLabel> SQLiteMemoryRepository::listCm1VerifiedLabels(
         sqlite3_bind_text(stmt, 1, answer_id.c_str(), -1, SQLITE_TRANSIENT);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             rows.push_back(labelFromRow(stmt));
+        }
+        sqlite3_finalize(stmt);
+    } catch (...) {}
+    return rows;
+}
+
+namespace {
+
+const char* kClaimVerificationColumns =
+    "verification_id, claim_id, claim_sha256, answer_id, content_sha256, "
+    "protocol_id, protocol_version, reviewer_id, verifier_kind, verifier_version, method_id, "
+    "outcome, source_kind, source_ref, calibration_eligibility, egar_eligibility, "
+    "revision_reason, supersedes_verification_id, revision_index, created_at_ms";
+
+bool sameStoredVerification(const Cm1ClaimVerification& a, const Cm1ClaimVerification& b) {
+    return a.verification_id == b.verification_id
+        && a.claim_id == b.claim_id
+        && a.claim_sha256 == b.claim_sha256
+        && a.answer_id == b.answer_id
+        && a.content_sha256 == b.content_sha256
+        && a.protocol_id == b.protocol_id
+        && a.protocol_version == b.protocol_version
+        && a.reviewer_id == b.reviewer_id
+        && a.verifier_kind == b.verifier_kind
+        && a.verifier_version == b.verifier_version
+        && a.method_id == b.method_id
+        && a.outcome == b.outcome
+        && a.source_kind == b.source_kind
+        && a.source_ref == b.source_ref
+        && a.calibration_eligibility == b.calibration_eligibility
+        && a.egar_eligibility == b.egar_eligibility
+        && a.revision_reason == b.revision_reason
+        && a.supersedes_verification_id == b.supersedes_verification_id
+        && a.revision_index == b.revision_index
+        && a.created_at_ms == b.created_at_ms;
+}
+
+std::optional<Cm1ClaimVerification> loadClaimVerificationById(sqlite3* db, const std::string& id) {
+    const std::string sql = std::string("SELECT ") + kClaimVerificationColumns
+        + " FROM cm1_claim_verifications WHERE verification_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+    std::optional<Cm1ClaimVerification> out;
+    if (sqlite3_step(stmt) == SQLITE_ROW) out = claimVerificationFromRow(stmt);
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+std::vector<Cm1EvidenceJudgmentRecord> loadJudgmentsForAnswer(sqlite3* db, const std::string& answer_id) {
+    std::vector<Cm1EvidenceJudgmentRecord> rows;
+    const char* sql =
+        "SELECT judgment_id, answer_id, content_sha256, estimator_version, payload_json, created_at_ms "
+        "FROM cm1_evidence_judgments WHERE answer_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return rows;
+    sqlite3_bind_text(stmt, 1, answer_id.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Cm1EvidenceJudgmentRecord record;
+        record.judgment_id = safe_col_text(stmt, 0);
+        record.answer_id = safe_col_text(stmt, 1);
+        record.content_sha256 = safe_col_text(stmt, 2);
+        record.estimator_version = safe_col_text(stmt, 3);
+        record.payload_json = safe_col_text(stmt, 4);
+        record.created_at_ms = sqlite3_column_int64(stmt, 5);
+        rows.push_back(std::move(record));
+    }
+    sqlite3_finalize(stmt);
+    return rows;
+}
+
+bool bindClaimVerification(sqlite3_stmt* stmt, const Cm1ClaimVerification& record) {
+    sqlite3_bind_text(stmt, 1, record.verification_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, record.claim_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, record.claim_sha256.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, record.answer_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, record.content_sha256.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, record.protocol_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, record.protocol_version.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, record.reviewer_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, record.verifier_kind.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, record.verifier_version.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 11, record.method_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 12, record.outcome.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 13, record.source_kind.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 14, record.source_ref.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 15, record.calibration_eligibility.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 16, record.egar_eligibility.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 17, record.revision_reason.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 18, record.supersedes_verification_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 19, record.revision_index);
+    sqlite3_bind_int64(stmt, 20, record.created_at_ms);
+    return true;
+}
+
+} // namespace
+
+bool SQLiteMemoryRepository::insertCm1ClaimVerification(const Cm1ClaimVerification& record) {
+    try {
+        if (!db_ || !db_->handle || record.verification_id.empty() || record.claim_id.empty()
+            || record.answer_id.empty()) {
+            return false;
+        }
+        if (const auto existing = loadClaimVerificationById(db_->handle, record.verification_id)) {
+            return sameStoredVerification(*existing, record);
+        }
+
+        const auto answer = loadCm1AnswerVersion(record.answer_id);
+        if (!answer || answer->content_sha256 != record.content_sha256) return false;
+
+        std::optional<Cm1StoredClaim> matched;
+        for (const auto& judgment : loadJudgmentsForAnswer(db_->handle, record.answer_id)) {
+            const auto claim = findCm1StoredClaim(judgment, record.claim_id);
+            if (!claim || claim->claim_sha256 != record.claim_sha256) continue;
+            if (claim->answer_content_sha256 != record.content_sha256) continue;
+            matched = claim;
+            break;
+        }
+        if (!matched || !cm1ClaimVerificationConforms(record, *answer, *matched)) return false;
+
+        const auto latest = latestCm1ClaimVerification(
+            record.claim_id, record.protocol_id, record.protocol_version, record.reviewer_id,
+            record.verifier_kind, record.verifier_version, record.method_id);
+        if (record.revision_reason == "initial") {
+            if (latest) return false;
+        } else if (record.revision_reason == "correction") {
+            if (!latest || record.revision_index != latest->revision_index + 1
+                || record.supersedes_verification_id != latest->verification_id) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        const std::string sql = std::string("INSERT INTO cm1_claim_verifications (")
+            + kClaimVerificationColumns + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+        bindClaimVerification(stmt, record);
+        const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<Cm1ClaimVerification> SQLiteMemoryRepository::latestCm1ClaimVerification(
+    const std::string& claim_id,
+    const std::string& protocol_id,
+    const std::string& protocol_version,
+    const std::string& reviewer_id,
+    const std::string& verifier_kind,
+    const std::string& verifier_version,
+    const std::string& method_id) {
+    try {
+        if (!db_ || !db_->handle || claim_id.empty() || protocol_id.empty() || protocol_version.empty()
+            || reviewer_id.empty() || verifier_kind.empty() || method_id.empty()) {
+            return std::nullopt;
+        }
+        const char* sql =
+            "SELECT verification_id, claim_id, claim_sha256, answer_id, content_sha256, "
+            "protocol_id, protocol_version, reviewer_id, verifier_kind, verifier_version, method_id, "
+            "outcome, source_kind, source_ref, calibration_eligibility, egar_eligibility, "
+            "revision_reason, supersedes_verification_id, revision_index, created_at_ms "
+            "FROM cm1_claim_verifications "
+            "WHERE claim_id = ? AND protocol_id = ? AND protocol_version = ? AND reviewer_id = ? "
+            "AND verifier_kind = ? AND verifier_version = ? AND method_id = ? "
+            "ORDER BY revision_index DESC LIMIT 1;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+        sqlite3_bind_text(stmt, 1, claim_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, protocol_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, protocol_version.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, reviewer_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, verifier_kind.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, verifier_version.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 7, method_id.c_str(), -1, SQLITE_TRANSIENT);
+        std::optional<Cm1ClaimVerification> out;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            out = claimVerificationFromRow(stmt);
+        }
+        sqlite3_finalize(stmt);
+        return out;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::vector<Cm1ClaimVerification> SQLiteMemoryRepository::listCm1ClaimVerifications(
+    const std::string& answer_id) {
+    std::vector<Cm1ClaimVerification> rows;
+    try {
+        if (!db_ || !db_->handle || answer_id.empty()) return rows;
+        const char* sql =
+            "SELECT verification_id, claim_id, claim_sha256, answer_id, content_sha256, "
+            "protocol_id, protocol_version, reviewer_id, verifier_kind, verifier_version, method_id, "
+            "outcome, source_kind, source_ref, calibration_eligibility, egar_eligibility, "
+            "revision_reason, supersedes_verification_id, revision_index, created_at_ms "
+            "FROM cm1_claim_verifications WHERE answer_id = ? "
+            "ORDER BY created_at_ms, verification_id;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return rows;
+        sqlite3_bind_text(stmt, 1, answer_id.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            rows.push_back(claimVerificationFromRow(stmt));
         }
         sqlite3_finalize(stmt);
     } catch (...) {}

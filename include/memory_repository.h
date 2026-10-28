@@ -354,6 +354,17 @@ public:
         const std::string& answer_id, const std::string& protocol_id) = 0;
     virtual std::vector<Cm1VerifiedLabel> listCm1VerifiedLabels(
         const std::string& answer_id) = 0;
+    virtual bool insertCm1ClaimVerification(const Cm1ClaimVerification& record) = 0;
+    virtual std::optional<Cm1ClaimVerification> latestCm1ClaimVerification(
+        const std::string& claim_id,
+        const std::string& protocol_id,
+        const std::string& protocol_version,
+        const std::string& reviewer_id,
+        const std::string& verifier_kind,
+        const std::string& verifier_version,
+        const std::string& method_id) = 0;
+    virtual std::vector<Cm1ClaimVerification> listCm1ClaimVerifications(
+        const std::string& answer_id) = 0;
 
     /**
      * One terminal cognitive-metrics record per plan. metrics_id is the

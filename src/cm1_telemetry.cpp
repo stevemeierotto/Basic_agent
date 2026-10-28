@@ -759,6 +759,267 @@ Cm1VerifiedLabelDraft prepareCm1VerifiedLabel(
 
 namespace {
 
+bool sameVerificationChain(const Cm1ClaimVerification& latest,
+                           const Cm1StoredClaim& claim,
+                           const std::string& protocol_id,
+                           const std::string& protocol_version,
+                           const std::string& reviewer_id,
+                           const std::string& verifier_kind,
+                           const std::string& verifier_version,
+                           const std::string& method_id) {
+    return latest.claim_id == claim.claim_id
+        && latest.protocol_id == protocol_id
+        && latest.protocol_version == protocol_version
+        && latest.reviewer_id == reviewer_id
+        && latest.verifier_kind == verifier_kind
+        && latest.verifier_version == verifier_version
+        && latest.method_id == method_id;
+}
+
+bool persistedClaimIdentity(const Cm1AnswerVersionRecord& answer, const Cm1StoredClaim& claim) {
+    const std::string prefix = answer.answer_id + ":";
+    const std::string suffix = ":" + claim.claim_sha256;
+    if (claim.claim_sha256.empty() || claim.answer_id != answer.answer_id) return false;
+    if (claim.claim_id.compare(0, prefix.size(), prefix) != 0) return false;
+    if (claim.claim_id.size() <= prefix.size() + suffix.size()) return false;
+    return claim.claim_id.compare(claim.claim_id.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool internalEvidenceSource(const std::string& source_kind,
+                            const std::string& source_ref,
+                            const Cm1StoredClaim& claim) {
+    if (source_kind == "cm1_judgment" || source_kind == "evidence_passage"
+        || source_kind == "evidence_quote" || source_kind == "grag") {
+        return true;
+    }
+    if (!claim.evidence_quote.empty() && source_ref == claim.evidence_quote) return true;
+    if (!claim.evidence_chunk_sha256.empty() && source_ref == claim.evidence_chunk_sha256) {
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+std::optional<Cm1StoredClaim> findCm1StoredClaim(const Cm1EvidenceJudgmentRecord& judgment,
+                                                 const std::string& claim_id) {
+    if (judgment.answer_id.empty() || judgment.content_sha256.empty() || claim_id.empty()
+        || judgment.payload_json.empty()) {
+        return std::nullopt;
+    }
+    nlohmann::json payload;
+    try {
+        payload = nlohmann::json::parse(judgment.payload_json);
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (!payload.is_object() || !payload.contains("claims") || !payload["claims"].is_array()) {
+        return std::nullopt;
+    }
+    for (const auto& row : payload["claims"]) {
+        if (!row.is_object() || row.value("claim_id", "") != claim_id) continue;
+        if (!row.contains("claim_text") || !row["claim_text"].is_string()) return std::nullopt;
+        if (!row.contains("claim_sha256") || !row["claim_sha256"].is_string()) return std::nullopt;
+        Cm1StoredClaim claim;
+        claim.claim_id = claim_id;
+        claim.claim_text = row["claim_text"].get<std::string>();
+        claim.claim_sha256 = row["claim_sha256"].get<std::string>();
+        claim.answer_id = judgment.answer_id;
+        claim.answer_content_sha256 = judgment.content_sha256;
+        if (row.contains("evidence_quote") && row["evidence_quote"].is_string()) {
+            claim.evidence_quote = row["evidence_quote"].get<std::string>();
+        }
+        if (row.contains("evidence_chunk_sha256") && row["evidence_chunk_sha256"].is_string()) {
+            claim.evidence_chunk_sha256 = row["evidence_chunk_sha256"].get<std::string>();
+        }
+        return claim;
+    }
+    return std::nullopt;
+}
+
+bool cm1ClaimVerificationConforms(const Cm1ClaimVerification& record,
+                                  const Cm1AnswerVersionRecord& answer,
+                                  const Cm1StoredClaim& claim) {
+    if (record.verification_id.empty() || record.answer_id.empty() || record.claim_id.empty()
+        || record.claim_sha256.empty() || record.content_sha256.empty()) {
+        return false;
+    }
+    if (record.answer_id != answer.answer_id || record.content_sha256 != answer.content_sha256
+        || answer.content_sha256.empty()) {
+        return false;
+    }
+    if (record.claim_id != claim.claim_id || record.claim_sha256 != claim.claim_sha256) {
+        return false;
+    }
+    if (claim.answer_id != answer.answer_id || claim.answer_content_sha256 != answer.content_sha256) {
+        return false;
+    }
+    if (claim.claim_text.empty() || sha256Hex(claim.claim_text) != claim.claim_sha256) {
+        return false;
+    }
+    if (!persistedClaimIdentity(answer, claim)) return false;
+    if (record.protocol_id.empty() || record.protocol_version.empty() || record.reviewer_id.empty()
+        || record.method_id.empty() || record.source_kind.empty() || record.source_ref.empty()) {
+        return false;
+    }
+    if (record.verifier_kind != "human" && record.verifier_kind != "automated_agent"
+        && record.verifier_kind != "external_service") {
+        return false;
+    }
+    if (record.verifier_kind == "human") {
+        if (!record.verifier_version.empty()) return false;
+    } else if (record.verifier_version.empty()) {
+        return false;
+    }
+    if (record.outcome != "true" && record.outcome != "false" && record.outcome != "unverifiable") {
+        return false;
+    }
+    if (internalEvidenceSource(record.source_kind, record.source_ref, claim)) return false;
+    if (record.calibration_eligibility != "provisional" || record.egar_eligibility != "excluded") {
+        return false;
+    }
+    if (record.revision_reason == "initial") {
+        return record.revision_index == 1 && record.supersedes_verification_id.empty();
+    }
+    if (record.revision_reason == "correction") {
+        return record.revision_index >= 2 && !record.supersedes_verification_id.empty();
+    }
+    return false;
+}
+
+Cm1ClaimVerificationDraft prepareCm1ClaimVerification(
+    const Cm1AnswerVersionRecord* answer,
+    const Cm1StoredClaim* claim,
+    const Cm1ClaimVerification* latest,
+    const Cm1ClaimVerificationSubmission& submission,
+    std::int64_t created_at_ms) {
+    Cm1ClaimVerificationDraft draft;
+    auto reject = [&](const std::string& message) {
+        draft.disposition = Cm1RecordDisposition::Rejected;
+        draft.message = message;
+        return draft;
+    };
+    if (!answer || answer->answer_id.empty() || answer->content_sha256.empty()) {
+        return reject("No answer version is recorded for this synthesis.");
+    }
+    if (!claim || claim->claim_id.empty() || claim->claim_sha256.empty() || claim->claim_text.empty()) {
+        return reject("No persisted claim is recorded for this verification.");
+    }
+    if (submission.answer_id != answer->answer_id || claim->answer_id != answer->answer_id) {
+        return reject("Verification does not match the answer version.");
+    }
+    if (submission.claim_id != claim->claim_id) {
+        return reject("Verification does not match the persisted claim.");
+    }
+    if (claim->answer_content_sha256 != answer->content_sha256) {
+        return reject("The persisted claim is not for this answer version.");
+    }
+    if (sha256Hex(submission.answer_text) != answer->content_sha256) {
+        return reject("The displayed answer does not match the stored version.");
+    }
+    if (sha256Hex(claim->claim_text) != claim->claim_sha256) {
+        return reject("The persisted claim text does not match its stored hash.");
+    }
+    if (sha256Hex(submission.claim_text) != claim->claim_sha256) {
+        return reject("The claim text does not match the persisted claim.");
+    }
+    if (!persistedClaimIdentity(*answer, *claim)) {
+        return reject("The persisted claim id does not match the answer and claim hash.");
+    }
+
+    const std::string protocol_id = trimCopy(submission.protocol_id);
+    const std::string protocol_version = trimCopy(submission.protocol_version);
+    const std::string reviewer_id = trimCopy(submission.reviewer_id);
+    const std::string method_id = trimCopy(submission.method_id);
+    const std::string verifier_version = trimCopy(submission.verifier_version);
+    const std::string source_kind = trimCopy(submission.source_kind);
+    const std::string source_ref = trimCopy(submission.source_ref);
+    if (protocol_id.empty() || protocol_version.empty() || reviewer_id.empty() || method_id.empty()
+        || source_kind.empty() || source_ref.empty()) {
+        return reject("A claim verification needs a protocol, version, reviewer, method, and external source.");
+    }
+
+    const std::string& kind = submission.verifier_kind;
+    if (kind != "human" && kind != "automated_agent" && kind != "external_service") {
+        return reject("Verifier kind must be human, automated_agent, or external_service.");
+    }
+    if (kind == "human") {
+        if (!verifier_version.empty()) {
+            return reject("A human verifier has no verifier version.");
+        }
+    } else if (verifier_version.empty()) {
+        return reject("An automated agent or external service needs a verifier version.");
+    }
+
+    if (submission.outcome != "true" && submission.outcome != "false"
+        && submission.outcome != "unverifiable") {
+        return reject("Claim outcome must be true, false, or unverifiable.");
+    }
+    if (internalEvidenceSource(source_kind, source_ref, *claim)) {
+        return reject("Verification cannot cite the claim's internal evidence.");
+    }
+    if (submission.calibration_eligibility != "provisional"
+        || submission.egar_eligibility != "excluded") {
+        return reject("This checkpoint accepts only provisional calibration eligibility and excluded EGAR eligibility.");
+    }
+    if (submission.revision_reason == "authorization") {
+        return reject("Authorization revisions are not accepted in this checkpoint.");
+    }
+
+    const bool chain_match = latest && sameVerificationChain(
+        *latest, *claim, protocol_id, protocol_version, reviewer_id, kind, verifier_version, method_id);
+    if (latest && !chain_match) {
+        return reject("The latest verification is for a different chain.");
+    }
+
+    int revision_index = 1;
+    std::string supersedes;
+    if (submission.revision_reason == "initial") {
+        if (latest) {
+            return reject("An initial verification requires an empty chain.");
+        }
+    } else if (submission.revision_reason == "correction") {
+        if (!latest) {
+            return reject("A correction requires an existing verification.");
+        }
+        revision_index = latest->revision_index + 1;
+        supersedes = latest->verification_id;
+    } else {
+        return reject("Revision reason must be initial, correction, or authorization.");
+    }
+
+    draft.record.claim_id = claim->claim_id;
+    draft.record.claim_sha256 = claim->claim_sha256;
+    draft.record.answer_id = answer->answer_id;
+    draft.record.content_sha256 = answer->content_sha256;
+    draft.record.protocol_id = protocol_id;
+    draft.record.protocol_version = protocol_version;
+    draft.record.reviewer_id = reviewer_id;
+    draft.record.verifier_kind = kind;
+    draft.record.verifier_version = verifier_version;
+    draft.record.method_id = method_id;
+    draft.record.outcome = submission.outcome;
+    draft.record.source_kind = source_kind;
+    draft.record.source_ref = source_ref;
+    draft.record.calibration_eligibility = "provisional";
+    draft.record.egar_eligibility = "excluded";
+    draft.record.revision_reason = submission.revision_reason;
+    draft.record.supersedes_verification_id = supersedes;
+    draft.record.revision_index = revision_index;
+    draft.record.verification_id = claim->claim_id + ":c:" + protocol_id + ":" + protocol_version + ":"
+        + kind + ":" + verifier_version + ":" + method_id + ":" + reviewer_id + ":"
+        + std::to_string(revision_index);
+    draft.record.created_at_ms = created_at_ms;
+    if (!cm1ClaimVerificationConforms(draft.record, *answer, *claim)) {
+        return reject("The verification record does not match the persisted claim.");
+    }
+    draft.disposition = Cm1RecordDisposition::Insert;
+    draft.message = "Claim verification recorded.";
+    return draft;
+}
+
+namespace {
+
 std::string trimEnds(const std::string& text) {
     std::size_t begin = 0;
     while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) {

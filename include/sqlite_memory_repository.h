@@ -160,6 +160,17 @@ public:
     std::optional<Cm1VerifiedLabel> latestCm1VerifiedLabel(
         const std::string& answer_id, const std::string& protocol_id) override;
     std::vector<Cm1VerifiedLabel> listCm1VerifiedLabels(const std::string& answer_id) override;
+    bool insertCm1ClaimVerification(const Cm1ClaimVerification& record) override;
+    std::optional<Cm1ClaimVerification> latestCm1ClaimVerification(
+        const std::string& claim_id,
+        const std::string& protocol_id,
+        const std::string& protocol_version,
+        const std::string& reviewer_id,
+        const std::string& verifier_kind,
+        const std::string& verifier_version,
+        const std::string& method_id) override;
+    std::vector<Cm1ClaimVerification> listCm1ClaimVerifications(
+        const std::string& answer_id) override;
     bool enqueueCognitiveMetrics(const std::string& plan_id,
                                  const std::string& payload_json) override;
     std::vector<CognitiveMetricsOutboxRow> pendingCognitiveMetrics() override;
