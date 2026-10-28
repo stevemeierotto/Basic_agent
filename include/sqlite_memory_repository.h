@@ -185,6 +185,8 @@ public:
     bool saveProblemState(const ProblemStateRecord& record) override;
     std::optional<ProblemStateRecord> loadProblemState(const std::string& problem_id) override;
     std::optional<ProblemStateRecord> getLatestProblemState(const std::string& goal_id) override;
+    std::optional<Cm1SynthesisInclusion> loadCm1SynthesisInclusion(
+        const std::string& plan_id, const std::string& step_id) override;
 
 private:
     struct DBHandle;

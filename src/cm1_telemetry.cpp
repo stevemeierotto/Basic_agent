@@ -9,6 +9,7 @@
 
 #include "../include/alp_sha256.h"
 #include "../include/grag_diagnostics.h"
+#include "../include/memory_repository.h"
 
 #include <algorithm>
 #include <cctype>
@@ -49,6 +50,12 @@ bool cm1BreadthEnabled() {
 
 bool cm1EvidenceEnabled() {
     const char* env = std::getenv("THOTH_CM1_EVIDENCE");
+    if (!env || !*env) return false;
+    return std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "off";
+}
+
+bool cm1CorroborationEnabled() {
+    const char* env = std::getenv("THOTH_CM1_CORROBORATION");
     if (!env || !*env) return false;
     return std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "off";
 }
@@ -789,7 +796,8 @@ bool internalEvidenceSource(const std::string& source_kind,
                             const std::string& source_ref,
                             const Cm1StoredClaim& claim) {
     if (source_kind == "cm1_judgment" || source_kind == "evidence_passage"
-        || source_kind == "evidence_quote" || source_kind == "grag") {
+        || source_kind == "evidence_quote" || source_kind == "grag"
+        || source_kind == "warm_memory") {
         return true;
     }
     if (!claim.evidence_quote.empty() && source_ref == claim.evidence_quote) return true;
@@ -797,6 +805,17 @@ bool internalEvidenceSource(const std::string& source_kind,
         return true;
     }
     return false;
+}
+
+bool knownEvidenceLabel(const std::string& label) {
+    return label.empty() || label == "supported" || label == "contradicted"
+        || label == "insufficient_evidence";
+}
+
+bool evidenceLabelMatchesOutcome(const std::string& label, const std::string& outcome) {
+    if (!knownEvidenceLabel(label)) return false;
+    if (!label.empty()) return outcome == "unverifiable";
+    return outcome == "true" || outcome == "false" || outcome == "unverifiable";
 }
 
 } // namespace
@@ -874,6 +893,7 @@ bool cm1ClaimVerificationConforms(const Cm1ClaimVerification& record,
     if (record.outcome != "true" && record.outcome != "false" && record.outcome != "unverifiable") {
         return false;
     }
+    if (!evidenceLabelMatchesOutcome(record.evidence_label, record.outcome)) return false;
     if (internalEvidenceSource(record.source_kind, record.source_ref, claim)) return false;
     if (record.calibration_eligibility != "provisional" || record.egar_eligibility != "excluded") {
         return false;
@@ -955,6 +975,16 @@ Cm1ClaimVerificationDraft prepareCm1ClaimVerification(
         && submission.outcome != "unverifiable") {
         return reject("Claim outcome must be true, false, or unverifiable.");
     }
+    const std::string evidence_label = trimCopy(submission.evidence_label);
+    if (!knownEvidenceLabel(evidence_label)) {
+        return reject("Evidence label must be empty, supported, contradicted, or insufficient_evidence.");
+    }
+    if (!evidence_label.empty() && submission.outcome != "unverifiable") {
+        return reject("An evidence label requires an unverifiable outcome.");
+    }
+    if ((submission.outcome == "true" || submission.outcome == "false") && !evidence_label.empty()) {
+        return reject("A true or false outcome requires an empty evidence label.");
+    }
     if (internalEvidenceSource(source_kind, source_ref, *claim)) {
         return reject("Verification cannot cite the claim's internal evidence.");
     }
@@ -999,6 +1029,7 @@ Cm1ClaimVerificationDraft prepareCm1ClaimVerification(
     draft.record.verifier_version = verifier_version;
     draft.record.method_id = method_id;
     draft.record.outcome = submission.outcome;
+    draft.record.evidence_label = evidence_label;
     draft.record.source_kind = source_kind;
     draft.record.source_ref = source_ref;
     draft.record.calibration_eligibility = "provisional";
@@ -1280,6 +1311,102 @@ std::string buildCm1EvidencePrompt(const std::string& claim,
     return prompt.str();
 }
 
+struct Cm1EvidenceAssessment {
+    bool available = false;
+    bool stop = false;
+    std::string label;
+    std::string quote;
+    std::string chunk_sha256;
+    std::string unavailable_reason;
+};
+
+Cm1EvidenceAssessment assessCm1EvidenceCompletion(
+    const Cm1EvidenceCompletion& completion,
+    const std::vector<Cm1EvidenceChunk>& included_chunks) {
+    Cm1EvidenceAssessment assessment;
+    if (!completion.ok && completion.error == "timeout") {
+        assessment.unavailable_reason = "timeout";
+        assessment.stop = true;
+        return assessment;
+    }
+    if (!completion.ok) {
+        assessment.unavailable_reason = completion.error == "llm_unavailable"
+            ? "llm_unavailable"
+            : "provider_error";
+        return assessment;
+    }
+    if (completion.text.empty()) {
+        assessment.unavailable_reason = "empty_completion";
+        return assessment;
+    }
+    if (completion.finish_reason.empty()) {
+        assessment.unavailable_reason = "finish_reason_missing";
+        return assessment;
+    }
+    if (completion.finish_reason == "length") {
+        assessment.unavailable_reason = "length";
+        return assessment;
+    }
+    const std::optional<std::string> object = oneBalancedObject(completion.text);
+    if (!object.has_value()) {
+        assessment.unavailable_reason = "parse";
+        return assessment;
+    }
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(*object);
+    } catch (...) {
+        assessment.unavailable_reason = "parse";
+        return assessment;
+    }
+    if (!parsed.is_object() || parsed.size() != 2 || !parsed.contains("label")
+        || !parsed["label"].is_string() || !parsed.contains("evidence_quote")
+        || !parsed["evidence_quote"].is_string()) {
+        assessment.unavailable_reason = "schema";
+        return assessment;
+    }
+    const std::string label = parsed["label"].get<std::string>();
+    const std::string quote = parsed["evidence_quote"].get<std::string>();
+    if (label != "supported" && label != "contradicted" && label != "insufficient_evidence") {
+        assessment.unavailable_reason = "schema";
+        return assessment;
+    }
+    if (label == "insufficient_evidence") {
+        if (!quote.empty()) {
+            assessment.unavailable_reason = "quote_present";
+            return assessment;
+        }
+        assessment.available = true;
+        assessment.label = label;
+        return assessment;
+    }
+    if (quote.empty()) {
+        assessment.unavailable_reason = "quote_required";
+        return assessment;
+    }
+    int hits = 0;
+    std::string hit_hash;
+    for (const auto& chunk : included_chunks) {
+        if (chunk.content.find(quote) != std::string::npos) {
+            ++hits;
+            hit_hash = chunk.content_sha256;
+        }
+    }
+    if (hits == 0) {
+        assessment.unavailable_reason = "quote_not_in_evidence";
+        return assessment;
+    }
+    if (hits != 1) {
+        assessment.unavailable_reason = "quote_ambiguous";
+        return assessment;
+    }
+    assessment.available = true;
+    assessment.label = label;
+    assessment.quote = quote;
+    assessment.chunk_sha256 = hit_hash;
+    return assessment;
+}
+
 std::optional<Cm1EvidenceJudgmentRecord> runCm1EvidenceJudgment(
     const Cm1AnswerVersionRecord& answer,
     const std::string& answer_text,
@@ -1332,101 +1459,18 @@ std::optional<Cm1EvidenceJudgmentRecord> runCm1EvidenceJudgment(
             completion.ok = false;
             completion.error = "exception";
         }
-        if (!completion.ok && completion.error == "timeout") {
+        const Cm1EvidenceAssessment assessment = assessCm1EvidenceCompletion(
+            completion, included_chunks);
+        if (!assessment.available) {
             claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "timeout", completion.generation_id));
-            break;
-        }
-        if (!completion.ok) {
-            const std::string reason = completion.error == "llm_unavailable"
-                ? "llm_unavailable"
-                : "provider_error";
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, reason, completion.generation_id));
-            continue;
-        }
-        if (completion.text.empty()) {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "empty_completion", completion.generation_id));
-            continue;
-        }
-        if (completion.finish_reason.empty()) {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "finish_reason_missing",
+                index, answer.answer_id, claim_text, assessment.unavailable_reason,
                 completion.generation_id));
-            continue;
-        }
-        if (completion.finish_reason == "length") {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "length", completion.generation_id));
-            continue;
-        }
-        const std::optional<std::string> object = oneBalancedObject(completion.text);
-        if (!object.has_value()) {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "parse", completion.generation_id));
-            continue;
-        }
-        nlohmann::json parsed;
-        try {
-            parsed = nlohmann::json::parse(*object);
-        } catch (...) {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "parse", completion.generation_id));
-            continue;
-        }
-        if (!parsed.is_object() || parsed.size() != 2 || !parsed.contains("label")
-            || !parsed["label"].is_string() || !parsed.contains("evidence_quote")
-            || !parsed["evidence_quote"].is_string()) {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "schema", completion.generation_id));
-            continue;
-        }
-        const std::string label = parsed["label"].get<std::string>();
-        const std::string quote = parsed["evidence_quote"].get<std::string>();
-        if (label != "supported" && label != "contradicted" && label != "insufficient_evidence") {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "schema", completion.generation_id));
-            continue;
-        }
-        if (label == "insufficient_evidence") {
-            if (!quote.empty()) {
-                claim_rows.push_back(unavailableClaim(
-                    index, answer.answer_id, claim_text, "quote_present", completion.generation_id));
-                continue;
-            }
-            claim_rows.push_back(claimJson(
-                index, answer.answer_id, claim_text, "available", "", label, "", "",
-                completion.generation_id));
-            continue;
-        }
-        if (quote.empty()) {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "quote_required", completion.generation_id));
-            continue;
-        }
-        int hits = 0;
-        std::string hit_hash;
-        for (const auto& chunk : included_chunks) {
-            if (chunk.content.find(quote) != std::string::npos) {
-                ++hits;
-                hit_hash = chunk.content_sha256;
-            }
-        }
-        if (hits == 0) {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "quote_not_in_evidence",
-                completion.generation_id));
-            continue;
-        }
-        if (hits != 1) {
-            claim_rows.push_back(unavailableClaim(
-                index, answer.answer_id, claim_text, "quote_ambiguous", completion.generation_id));
+            if (assessment.stop) break;
             continue;
         }
         claim_rows.push_back(claimJson(
-            index, answer.answer_id, claim_text, "available", "", label, quote, hit_hash,
-            completion.generation_id));
+            index, answer.answer_id, claim_text, "available", "", assessment.label,
+            assessment.quote, assessment.chunk_sha256, completion.generation_id));
     }
 
     const int claims_total = static_cast<int>(claims.size());
@@ -1453,6 +1497,154 @@ std::optional<Cm1EvidenceJudgmentRecord> runCm1EvidenceJudgment(
     record.payload_json = payload.dump();
     record.created_at_ms = created_at_ms;
     return record;
+}
+
+namespace {
+
+constexpr const char* kWarmMemoryPrefix = "warm_memory:";
+
+bool warmMemoryFile(const std::string& file_name) {
+    const std::string prefix = kWarmMemoryPrefix;
+    return file_name.compare(0, prefix.size(), prefix) == 0;
+}
+
+std::string heldOutBatchRef(const std::vector<std::string>& content_hashes) {
+    std::vector<std::string> ordered = content_hashes;
+    std::sort(ordered.begin(), ordered.end());
+    ordered.erase(std::unique(ordered.begin(), ordered.end()), ordered.end());
+    std::string joined;
+    for (const auto& hash : ordered) {
+        if (!joined.empty()) joined.push_back('\n');
+        joined += hash;
+    }
+    return joined;
+}
+
+Cm1ClaimCorroborationResult corroborationIdle(const std::string& reason) {
+    Cm1ClaimCorroborationResult result;
+    result.reason = reason;
+    return result;
+}
+
+} // namespace
+
+Cm1ClaimCorroborationResult runCm1ClaimCorroboration(
+    MemoryRepository& repository,
+    const std::string& answer_id,
+    const std::string& claim_id,
+    const std::string& answer_text,
+    const std::vector<Cm1CorroborationPassage>& passages,
+    const std::function<Cm1EvidenceCompletion(const std::string& prompt, int timeout_seconds)>& caller,
+    std::int64_t created_at_ms,
+    int budget_seconds,
+    const std::function<std::int64_t()>& now_ms) {
+    if (!cm1CorroborationEnabled()) return corroborationIdle("disabled");
+
+    const auto answer = repository.loadCm1AnswerVersion(answer_id);
+    if (!answer) return corroborationIdle("missing_answer");
+    if (sha256Hex(answer_text) != answer->content_sha256) return corroborationIdle("answer_mismatch");
+
+    const auto judgment = repository.loadCm1EvidenceJudgment(std::string("cm1e1:") + answer_id);
+    if (!judgment) return corroborationIdle("missing_claim");
+    const auto claim = findCm1StoredClaim(*judgment, claim_id);
+    if (!claim) return corroborationIdle("missing_claim");
+
+    const auto inclusion = repository.loadCm1SynthesisInclusion(answer->plan_id, answer->step_id);
+    if (!inclusion) return corroborationIdle("inclusion_unknown");
+    std::unordered_set<std::string> included(
+        inclusion->content_sha256.begin(), inclusion->content_sha256.end());
+
+    std::vector<Cm1EvidenceChunk> eligible;
+    std::unordered_set<std::string> seen_hash;
+    for (const auto& passage : passages) {
+        if (passage.content.empty() || warmMemoryFile(passage.file_name)) continue;
+        if (!claim->evidence_quote.empty() && passage.content == claim->evidence_quote) continue;
+        const std::string hash = sha256Hex(passage.content);
+        if (!claim->evidence_chunk_sha256.empty() && hash == claim->evidence_chunk_sha256) continue;
+        if (included.count(hash) || seen_hash.count(hash)) continue;
+        seen_hash.insert(hash);
+        Cm1EvidenceChunk chunk;
+        chunk.content = passage.content;
+        chunk.content_sha256 = hash;
+        eligible.push_back(std::move(chunk));
+    }
+    if (eligible.empty()) return corroborationIdle("no_eligible_passage");
+
+    const auto clock = now_ms ? now_ms : []() -> std::int64_t {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    };
+    const std::int64_t budget_ms = static_cast<std::int64_t>(std::max(0, budget_seconds)) * 1000;
+    if (budget_ms < 1000) return corroborationIdle("timeout");
+
+    Cm1EvidenceCompletion completion;
+    try {
+        completion = caller(buildCm1EvidencePrompt(claim->claim_text, eligible),
+                            static_cast<int>(budget_ms / 1000));
+    } catch (...) {
+        completion.ok = false;
+        completion.error = "exception";
+    }
+    const Cm1EvidenceAssessment assessment = assessCm1EvidenceCompletion(completion, eligible);
+    if (!assessment.available) {
+        if (assessment.unavailable_reason == "timeout") return corroborationIdle("timeout");
+        if (assessment.unavailable_reason == "quote_ambiguous") return corroborationIdle("ambiguous");
+        return corroborationIdle("invalid_output");
+    }
+    if ((assessment.label == "supported" || assessment.label == "contradicted")
+        && (assessment.chunk_sha256.empty() || included.count(assessment.chunk_sha256)
+            || assessment.chunk_sha256 == claim->evidence_chunk_sha256)) {
+        return corroborationIdle("invalid_output");
+    }
+
+    const bool batch = eligible.size() > 1 && assessment.label == "insufficient_evidence";
+    std::vector<std::string> member_hashes;
+    member_hashes.reserve(eligible.size());
+    for (const auto& chunk : eligible) member_hashes.push_back(chunk.content_sha256);
+
+    Cm1ClaimVerificationSubmission submission;
+    submission.claim_id = claim->claim_id;
+    submission.claim_text = claim->claim_text;
+    submission.answer_id = answer->answer_id;
+    submission.answer_text = answer_text;
+    submission.protocol_id = kCm1CorroborationProtocolId;
+    submission.protocol_version = kCm1CorroborationProtocolVersion;
+    submission.reviewer_id = kCm1CorroborationReviewerId;
+    submission.verifier_kind = "automated_agent";
+    submission.verifier_version = kCm1CorroborationVerifierVersion;
+    submission.method_id = kCm1CorroborationMethodId;
+    submission.outcome = "unverifiable";
+    submission.evidence_label = assessment.label;
+    submission.source_kind = batch ? kCm1HeldOutBatchSource : kCm1HeldOutPassageSource;
+    submission.source_ref = batch ? heldOutBatchRef(member_hashes) : (
+        assessment.label == "insufficient_evidence" ? eligible.front().content_sha256
+                                                    : assessment.chunk_sha256);
+    submission.calibration_eligibility = "provisional";
+    submission.egar_eligibility = "excluded";
+
+    const auto latest = repository.latestCm1ClaimVerification(
+        claim->claim_id, submission.protocol_id, submission.protocol_version, submission.reviewer_id,
+        submission.verifier_kind, submission.verifier_version, submission.method_id);
+    if (latest && latest->evidence_label == submission.evidence_label
+        && latest->outcome == submission.outcome
+        && latest->source_kind == submission.source_kind
+        && latest->source_ref == submission.source_ref) {
+        Cm1ClaimCorroborationResult result;
+        result.reason = "unchanged";
+        result.record = latest;
+        return result;
+    }
+    submission.revision_reason = latest ? "correction" : "initial";
+    const Cm1ClaimVerificationDraft draft = prepareCm1ClaimVerification(
+        &*answer, &*claim, latest ? &*latest : nullptr, submission, created_at_ms);
+    if (draft.disposition != Cm1RecordDisposition::Insert) return corroborationIdle("rejected");
+    if (!repository.insertCm1ClaimVerification(draft.record)) return corroborationIdle("rejected");
+    Cm1ClaimCorroborationResult result;
+    result.wrote = true;
+    result.reason = "stored";
+    result.record = draft.record;
+    return result;
 }
 
 } // namespace Thoth

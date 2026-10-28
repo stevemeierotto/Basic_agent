@@ -409,6 +409,13 @@ public:
     virtual bool saveProblemState(const ProblemStateRecord& record) = 0;
     virtual std::optional<ProblemStateRecord> loadProblemState(const std::string& problem_id) = 0;
     virtual std::optional<ProblemStateRecord> getLatestProblemState(const std::string& goal_id) = 0;
+
+    /**
+     * Synthesis inclusion hashes for one answer step.
+     * nullopt when the persisted plan does not carry a known inclusion list.
+     */
+    virtual std::optional<Cm1SynthesisInclusion> loadCm1SynthesisInclusion(
+        const std::string& plan_id, const std::string& step_id) = 0;
 };
 
 } // namespace Thoth

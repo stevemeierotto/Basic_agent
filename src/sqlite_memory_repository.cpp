@@ -324,7 +324,8 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
             "  revision_reason TEXT NOT NULL,"
             "  supersedes_verification_id TEXT NOT NULL,"
             "  revision_index INTEGER NOT NULL,"
-            "  created_at_ms INTEGER NOT NULL"
+            "  created_at_ms INTEGER NOT NULL,"
+            "  evidence_label TEXT NOT NULL DEFAULT ''"
             ");";
 
         char* errMsg = nullptr;
@@ -375,6 +376,7 @@ SQLiteMemoryRepository::SQLiteMemoryRepository(const std::string& dbPath)
         add_col("strategies", "success_rate", "REAL");
         add_col("strategies", "created_at", "INTEGER");
         add_col("strategies", "experience_origin", "TEXT DEFAULT 'unknown'");
+        add_col("cm1_claim_verifications", "evidence_label", "TEXT NOT NULL DEFAULT ''");
 
         auto backfill_origin = [&](const char* select_sql, const char* update_sql, const char* pointer) {
             sqlite3_stmt* select = nullptr;
@@ -2525,6 +2527,7 @@ Cm1ClaimVerification claimVerificationFromRow(sqlite3_stmt* stmt) {
     record.supersedes_verification_id = safe_col_text(stmt, 17);
     record.revision_index = sqlite3_column_int(stmt, 18);
     record.created_at_ms = sqlite3_column_int64(stmt, 19);
+    record.evidence_label = safe_col_text(stmt, 20);
     return record;
 }
 
@@ -2686,7 +2689,8 @@ const char* kClaimVerificationColumns =
     "verification_id, claim_id, claim_sha256, answer_id, content_sha256, "
     "protocol_id, protocol_version, reviewer_id, verifier_kind, verifier_version, method_id, "
     "outcome, source_kind, source_ref, calibration_eligibility, egar_eligibility, "
-    "revision_reason, supersedes_verification_id, revision_index, created_at_ms";
+    "revision_reason, supersedes_verification_id, revision_index, created_at_ms, "
+    "evidence_label";
 
 bool sameStoredVerification(const Cm1ClaimVerification& a, const Cm1ClaimVerification& b) {
     return a.verification_id == b.verification_id
@@ -2701,6 +2705,7 @@ bool sameStoredVerification(const Cm1ClaimVerification& a, const Cm1ClaimVerific
         && a.verifier_version == b.verifier_version
         && a.method_id == b.method_id
         && a.outcome == b.outcome
+        && a.evidence_label == b.evidence_label
         && a.source_kind == b.source_kind
         && a.source_ref == b.source_ref
         && a.calibration_eligibility == b.calibration_eligibility
@@ -2745,6 +2750,161 @@ std::vector<Cm1EvidenceJudgmentRecord> loadJudgmentsForAnswer(sqlite3* db, const
     return rows;
 }
 
+enum class StepInclusionStatus { MissingPlan, StepAbsent, Unknown, Known };
+
+struct StepInclusionRead {
+    StepInclusionStatus status = StepInclusionStatus::MissingPlan;
+    std::vector<std::string> hashes;
+};
+
+StepInclusionRead readPlanInclusion(const std::string& body, const std::string& step_id) {
+    StepInclusionRead read;
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(body);
+    } catch (...) {
+        read.status = StepInclusionStatus::Unknown;
+        return read;
+    }
+    if (!parsed.is_object() || !parsed.contains("steps") || !parsed["steps"].is_array()) {
+        read.status = StepInclusionStatus::Unknown;
+        return read;
+    }
+    for (const auto& step : parsed["steps"]) {
+        if (!step.is_object() || step.value("step_id", "") != step_id) continue;
+        if (!step.contains("result") || !step["result"].is_object()) {
+            read.status = StepInclusionStatus::Unknown;
+            return read;
+        }
+        const auto& result = step["result"];
+        if (!result.value("cm1_included_in_synthesis_available", false)
+            || !result.contains("cm1_included_content_sha256")
+            || !result["cm1_included_content_sha256"].is_array()) {
+            read.status = StepInclusionStatus::Unknown;
+            return read;
+        }
+        for (const auto& hash : result["cm1_included_content_sha256"]) {
+            if (!hash.is_string()) {
+                read.hashes.clear();
+                read.status = StepInclusionStatus::Unknown;
+                return read;
+            }
+            read.hashes.push_back(hash.get<std::string>());
+        }
+        read.status = StepInclusionStatus::Known;
+        return read;
+    }
+    read.status = StepInclusionStatus::StepAbsent;
+    return read;
+}
+
+StepInclusionRead inclusionFromPlanTable(sqlite3* db,
+                                         const char* sql,
+                                         const std::string& plan_id,
+                                         const std::string& step_id) {
+    StepInclusionRead read;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        read.status = StepInclusionStatus::Unknown;
+        return read;
+    }
+    sqlite3_bind_text(stmt, 1, plan_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        read.status = StepInclusionStatus::MissingPlan;
+        return read;
+    }
+    const std::string body = safe_col_text(stmt, 0);
+    sqlite3_finalize(stmt);
+    if (body.empty()) {
+        read.status = StepInclusionStatus::Unknown;
+        return read;
+    }
+    return readPlanInclusion(body, step_id);
+}
+
+std::optional<Cm1SynthesisInclusion> readSynthesisInclusion(sqlite3* db,
+                                                            const std::string& plan_id,
+                                                            const std::string& step_id) {
+    if (!db || plan_id.empty() || step_id.empty()) return std::nullopt;
+    const auto active = inclusionFromPlanTable(
+        db, "SELECT steps_json FROM active_plans WHERE plan_id = ?;", plan_id, step_id);
+    if (active.status == StepInclusionStatus::Known) {
+        Cm1SynthesisInclusion inclusion;
+        inclusion.content_sha256 = active.hashes;
+        return inclusion;
+    }
+    if (active.status == StepInclusionStatus::Unknown) return std::nullopt;
+    const auto durable = inclusionFromPlanTable(
+        db, "SELECT plan_json FROM plans WHERE plan_id = ?;", plan_id, step_id);
+    if (durable.status == StepInclusionStatus::Known) {
+        Cm1SynthesisInclusion inclusion;
+        inclusion.content_sha256 = durable.hashes;
+        return inclusion;
+    }
+    return std::nullopt;
+}
+
+bool lowercaseSha256Hex(const std::string& text) {
+    if (text.size() != 64) return false;
+    for (unsigned char ch : text) {
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return false;
+    }
+    return true;
+}
+
+std::optional<std::vector<std::string>> heldOutMembers(const Cm1ClaimVerification& record) {
+    if (record.source_kind == kCm1HeldOutPassageSource) {
+        if (!lowercaseSha256Hex(record.source_ref)) return std::nullopt;
+        return std::vector<std::string>{record.source_ref};
+    }
+    if (record.source_kind != kCm1HeldOutBatchSource) return std::vector<std::string>{};
+    std::vector<std::string> members;
+    std::size_t begin = 0;
+    const std::string& text = record.source_ref;
+    while (begin <= text.size()) {
+        const std::size_t end = text.find('\n', begin);
+        if (end == std::string::npos) {
+            members.push_back(text.substr(begin));
+            break;
+        }
+        members.push_back(text.substr(begin, end - begin));
+        begin = end + 1;
+        if (begin == text.size()) {
+            members.emplace_back();
+            break;
+        }
+    }
+    if (members.size() < 2) return std::nullopt;
+    for (std::size_t i = 0; i < members.size(); ++i) {
+        if (!lowercaseSha256Hex(members[i])) return std::nullopt;
+        if (i > 0 && !(members[i - 1] < members[i])) return std::nullopt;
+    }
+    return members;
+}
+
+bool heldOutSourceAllowed(sqlite3* db,
+                          const Cm1ClaimVerification& record,
+                          const Cm1AnswerVersionRecord& answer,
+                          const std::string& evidence_chunk_sha256) {
+    if (record.source_kind != kCm1HeldOutPassageSource && record.source_kind != kCm1HeldOutBatchSource) {
+        return true;
+    }
+    const auto members = heldOutMembers(record);
+    if (!members || (record.source_kind == kCm1HeldOutBatchSource && members->size() < 2)) {
+        return false;
+    }
+    const auto inclusion = readSynthesisInclusion(db, answer.plan_id, answer.step_id);
+    if (!inclusion) return false;
+    for (const auto& member : *members) {
+        if (!evidence_chunk_sha256.empty() && member == evidence_chunk_sha256) return false;
+        for (const auto& hash : inclusion->content_sha256) {
+            if (member == hash) return false;
+        }
+    }
+    return true;
+}
+
 bool bindClaimVerification(sqlite3_stmt* stmt, const Cm1ClaimVerification& record) {
     sqlite3_bind_text(stmt, 1, record.verification_id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, record.claim_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -2766,6 +2926,7 @@ bool bindClaimVerification(sqlite3_stmt* stmt, const Cm1ClaimVerification& recor
     sqlite3_bind_text(stmt, 18, record.supersedes_verification_id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 19, record.revision_index);
     sqlite3_bind_int64(stmt, 20, record.created_at_ms);
+    sqlite3_bind_text(stmt, 21, record.evidence_label.c_str(), -1, SQLITE_TRANSIENT);
     return true;
 }
 
@@ -2793,6 +2954,7 @@ bool SQLiteMemoryRepository::insertCm1ClaimVerification(const Cm1ClaimVerificati
             break;
         }
         if (!matched || !cm1ClaimVerificationConforms(record, *answer, *matched)) return false;
+        if (!heldOutSourceAllowed(db_->handle, record, *answer, matched->evidence_chunk_sha256)) return false;
 
         const auto latest = latestCm1ClaimVerification(
             record.claim_id, record.protocol_id, record.protocol_version, record.reviewer_id,
@@ -2809,7 +2971,7 @@ bool SQLiteMemoryRepository::insertCm1ClaimVerification(const Cm1ClaimVerificati
         }
 
         const std::string sql = std::string("INSERT INTO cm1_claim_verifications (")
-            + kClaimVerificationColumns + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+            + kClaimVerificationColumns + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_->handle, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
         bindClaimVerification(stmt, record);
@@ -2834,17 +2996,13 @@ std::optional<Cm1ClaimVerification> SQLiteMemoryRepository::latestCm1ClaimVerifi
             || reviewer_id.empty() || verifier_kind.empty() || method_id.empty()) {
             return std::nullopt;
         }
-        const char* sql =
-            "SELECT verification_id, claim_id, claim_sha256, answer_id, content_sha256, "
-            "protocol_id, protocol_version, reviewer_id, verifier_kind, verifier_version, method_id, "
-            "outcome, source_kind, source_ref, calibration_eligibility, egar_eligibility, "
-            "revision_reason, supersedes_verification_id, revision_index, created_at_ms "
-            "FROM cm1_claim_verifications "
+        const std::string sql = std::string("SELECT ") + kClaimVerificationColumns
+            + " FROM cm1_claim_verifications "
             "WHERE claim_id = ? AND protocol_id = ? AND protocol_version = ? AND reviewer_id = ? "
             "AND verifier_kind = ? AND verifier_version = ? AND method_id = ? "
             "ORDER BY revision_index DESC LIMIT 1;";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
+        if (sqlite3_prepare_v2(db_->handle, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return std::nullopt;
         sqlite3_bind_text(stmt, 1, claim_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, protocol_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 3, protocol_version.c_str(), -1, SQLITE_TRANSIENT);
@@ -2868,15 +3026,11 @@ std::vector<Cm1ClaimVerification> SQLiteMemoryRepository::listCm1ClaimVerificati
     std::vector<Cm1ClaimVerification> rows;
     try {
         if (!db_ || !db_->handle || answer_id.empty()) return rows;
-        const char* sql =
-            "SELECT verification_id, claim_id, claim_sha256, answer_id, content_sha256, "
-            "protocol_id, protocol_version, reviewer_id, verifier_kind, verifier_version, method_id, "
-            "outcome, source_kind, source_ref, calibration_eligibility, egar_eligibility, "
-            "revision_reason, supersedes_verification_id, revision_index, created_at_ms "
-            "FROM cm1_claim_verifications WHERE answer_id = ? "
+        const std::string sql = std::string("SELECT ") + kClaimVerificationColumns
+            + " FROM cm1_claim_verifications WHERE answer_id = ? "
             "ORDER BY created_at_ms, verification_id;";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return rows;
+        if (sqlite3_prepare_v2(db_->handle, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return rows;
         sqlite3_bind_text(stmt, 1, answer_id.c_str(), -1, SQLITE_TRANSIENT);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             rows.push_back(claimVerificationFromRow(stmt));
@@ -2909,6 +3063,16 @@ std::optional<Cm1AnswerVersionRecord> SQLiteMemoryRepository::loadCm1AnswerVersi
         }
         sqlite3_finalize(stmt);
         return out;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<Cm1SynthesisInclusion> SQLiteMemoryRepository::loadCm1SynthesisInclusion(
+    const std::string& plan_id, const std::string& step_id) {
+    try {
+        if (!db_ || !db_->handle) return std::nullopt;
+        return readSynthesisInclusion(db_->handle, plan_id, step_id);
     } catch (...) {
         return std::nullopt;
     }

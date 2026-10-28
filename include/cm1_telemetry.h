@@ -28,6 +28,19 @@ inline constexpr const char* kCm1BreadthLabel = "uncalibrated_evidence_breadth";
 inline constexpr const char* kCm1EvidenceVersion = "cm1-evidence-1";
 inline constexpr int kCm1EvidenceClaimCap = 8;
 inline constexpr int kCm1EvidenceNumPredict = 256;
+inline constexpr const char* kCm1CorroborationProtocolId = "cm1-corroboration";
+inline constexpr const char* kCm1CorroborationProtocolVersion = "v1";
+inline constexpr const char* kCm1CorroborationReviewerId = "thoth-corroboration";
+inline constexpr const char* kCm1CorroborationVerifierVersion = "cm1-corroboration-1";
+inline constexpr const char* kCm1CorroborationMethodId = "held-out-passage-read";
+/** One passage. source_ref is sha256Hex of that passage's raw content. */
+inline constexpr const char* kCm1HeldOutPassageSource = "held_out_passage";
+/**
+ * More than one passage was assessed and none was cited.
+ * source_ref is the sorted unique content hashes, one per line.
+ * It identifies the batch. It is not a single passage.
+ */
+inline constexpr const char* kCm1HeldOutBatchSource = "held_out_batch";
 
 struct Cm1SourceGroup {
     std::string file_name;
@@ -241,7 +254,9 @@ struct Cm1StoredClaim {
 };
 
 /**
- * Append-only independent finding for one persisted claim.
+ * Append-only finding for one persisted claim.
+ * outcome is factual correctness. evidence_label is a passage assessment.
+ * A non-empty evidence label requires outcome unverifiable.
  * calibration_eligibility and egar_eligibility are stored separately.
  * This checkpoint's writer accepts only provisional and excluded.
  */
@@ -258,6 +273,7 @@ struct Cm1ClaimVerification {
     std::string verifier_version;
     std::string method_id;
     std::string outcome;
+    std::string evidence_label;
     std::string source_kind;
     std::string source_ref;
     std::string calibration_eligibility;
@@ -280,6 +296,7 @@ struct Cm1ClaimVerificationSubmission {
     std::string verifier_version;
     std::string method_id;
     std::string outcome;
+    std::string evidence_label;
     std::string source_kind;
     std::string source_ref;
     std::string calibration_eligibility = "provisional";
@@ -358,6 +375,8 @@ Cm1ClaimVerificationDraft prepareCm1ClaimVerification(
 /**
  * Structural contract for a verification row against one persisted answer and claim.
  * Provisional calibration eligibility and excluded EGAR eligibility are required.
+ * A non-empty evidence_label requires outcome unverifiable.
+ * Outcome true or false requires an empty evidence_label.
  * Authorization revisions are rejected. This does not read the database.
  */
 bool cm1ClaimVerificationConforms(const Cm1ClaimVerification& record,
@@ -379,6 +398,49 @@ std::optional<Cm1EvidenceJudgmentRecord> runCm1EvidenceJudgment(
     bool inclusion_known,
     bool evidence_texts_complete,
     bool mock_synthesis,
+    const std::function<Cm1EvidenceCompletion(const std::string& prompt, int timeout_seconds)>& caller,
+    std::int64_t created_at_ms,
+    int budget_seconds = 900,
+    const std::function<std::int64_t()>& now_ms = {});
+
+/**
+ * Content hashes of chunks that entered synthesis for one persisted step.
+ * An empty vector means the inclusion list is known and nothing was included.
+ * nullopt means the list cannot be recovered.
+ */
+struct Cm1SynthesisInclusion {
+    std::vector<std::string> content_sha256;
+};
+
+/** Caller-supplied passage. content is hashed with sha256Hex and no other normalization. */
+struct Cm1CorroborationPassage {
+    std::string content;
+    std::string file_name;
+};
+
+struct Cm1ClaimCorroborationResult {
+    bool wrote = false;
+    std::string reason;
+    std::optional<Cm1ClaimVerification> record;
+};
+
+class MemoryRepository;
+
+/** Default off. Unset, 0, false, and off leave the corroboration writer idle. */
+bool cm1CorroborationEnabled();
+
+/**
+ * Assess one stored claim against caller-supplied passages.
+ * Does not retrieve, re-segment, or change the evidence judgment.
+ * A disabled writer returns without reading the model.
+ * Timeout, invalid output, ambiguous evidence, and no eligible passage write nothing.
+ */
+Cm1ClaimCorroborationResult runCm1ClaimCorroboration(
+    MemoryRepository& repository,
+    const std::string& answer_id,
+    const std::string& claim_id,
+    const std::string& answer_text,
+    const std::vector<Cm1CorroborationPassage>& passages,
     const std::function<Cm1EvidenceCompletion(const std::string& prompt, int timeout_seconds)>& caller,
     std::int64_t created_at_ms,
     int budget_seconds = 900,
