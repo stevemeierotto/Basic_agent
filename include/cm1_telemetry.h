@@ -18,6 +18,7 @@
 #include <vector>
 
 struct GragDiagnostics;
+class IndexManager;
 
 namespace Thoth {
 
@@ -444,6 +445,28 @@ Cm1ClaimCorroborationResult runCm1ClaimCorroboration(
     const std::function<Cm1EvidenceCompletion(const std::string& prompt, int timeout_seconds)>& caller,
     std::int64_t created_at_ms,
     int budget_seconds = 900,
+    const std::function<std::int64_t()>& now_ms = {});
+
+/**
+ * Retrieve index passages for one stored claim and pass the eligible ones to
+ * runCm1ClaimCorroboration. The query is the stored claim text.
+ * An embedding failure and an empty index both come back as no passages.
+ * The writer then reports no_eligible_passage and does not call the model.
+ * A model label of insufficient_evidence is a separate stored judgment.
+ * Returns reason indexing, without searching, while the index reports that it
+ * is indexing. Returns provenance_missing, without searching, when a required
+ * synthesis source file cannot be recovered. Does not call the controller.
+ */
+Cm1ClaimCorroborationResult runCm1ClaimDiscovery(
+    IndexManager& index,
+    MemoryRepository& repository,
+    const std::string& answer_id,
+    const std::string& claim_id,
+    const std::string& answer_text,
+    const std::function<Cm1EvidenceCompletion(const std::string& prompt, int timeout_seconds)>& caller,
+    std::int64_t created_at_ms,
+    int budget_seconds = 900,
+    int top_k = 8,
     const std::function<std::int64_t()>& now_ms = {});
 
 } // namespace Thoth

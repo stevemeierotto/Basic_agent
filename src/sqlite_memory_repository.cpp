@@ -2755,6 +2755,7 @@ enum class StepInclusionStatus { MissingPlan, StepAbsent, Unknown, Known };
 struct StepInclusionRead {
     StepInclusionStatus status = StepInclusionStatus::MissingPlan;
     std::vector<std::string> hashes;
+    std::string body;
 };
 
 StepInclusionRead readPlanInclusion(const std::string& body, const std::string& step_id) {
@@ -2820,7 +2821,23 @@ StepInclusionRead inclusionFromPlanTable(sqlite3* db,
         read.status = StepInclusionStatus::Unknown;
         return read;
     }
-    return readPlanInclusion(body, step_id);
+    read = readPlanInclusion(body, step_id);
+    read.body = body;
+    return read;
+}
+
+std::optional<std::string> knownInclusionPlanBody(sqlite3* db,
+                                                  const std::string& plan_id,
+                                                  const std::string& step_id) {
+    if (!db || plan_id.empty() || step_id.empty()) return std::nullopt;
+    const auto active = inclusionFromPlanTable(
+        db, "SELECT steps_json FROM active_plans WHERE plan_id = ?;", plan_id, step_id);
+    if (active.status == StepInclusionStatus::Known) return active.body;
+    if (active.status == StepInclusionStatus::Unknown) return std::nullopt;
+    const auto durable = inclusionFromPlanTable(
+        db, "SELECT plan_json FROM plans WHERE plan_id = ?;", plan_id, step_id);
+    if (durable.status == StepInclusionStatus::Known) return durable.body;
+    return std::nullopt;
 }
 
 std::optional<Cm1SynthesisInclusion> readSynthesisInclusion(sqlite3* db,
@@ -3073,6 +3090,16 @@ std::optional<Cm1SynthesisInclusion> SQLiteMemoryRepository::loadCm1SynthesisInc
     try {
         if (!db_ || !db_->handle) return std::nullopt;
         return readSynthesisInclusion(db_->handle, plan_id, step_id);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> SQLiteMemoryRepository::loadCm1PersistedPlanBody(
+    const std::string& plan_id, const std::string& step_id) {
+    try {
+        if (!db_ || !db_->handle) return std::nullopt;
+        return knownInclusionPlanBody(db_->handle, plan_id, step_id);
     } catch (...) {
         return std::nullopt;
     }

@@ -45,6 +45,8 @@ public:
     void indexProjectAsync(const std::string& rootPath);
 
     bool isIndexing() const { return m_isIndexing; }
+    /** Test seam. Does not queue or run an indexing task. */
+    void setIndexingForTests(bool indexing) { m_isIndexing = indexing; }
 
     // Access indexed chunks
     const std::vector<CodeChunk>& getChunks() const;

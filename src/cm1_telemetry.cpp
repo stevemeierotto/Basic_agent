@@ -9,6 +9,7 @@
 
 #include "../include/alp_sha256.h"
 #include "../include/grag_diagnostics.h"
+#include "../include/index_manager.h"
 #include "../include/memory_repository.h"
 
 #include <algorithm>
@@ -1526,6 +1527,57 @@ Cm1ClaimCorroborationResult corroborationIdle(const std::string& reason) {
     return result;
 }
 
+void appendPersistedRow(const nlohmann::json& item,
+                        std::vector<std::pair<std::string, std::string>>& rows) {
+    if (!item.is_object()) return;
+    std::string file = item.value("file", "");
+    if (file.empty()) file = item.value("file_name", "");
+    std::string content = item.value("content", "");
+    if (content.empty()) content = item.value("code_text", "");
+    if (content.empty()) return;
+    rows.emplace_back(std::move(file), std::move(content));
+}
+
+void appendPersistedArray(const nlohmann::json& parent,
+                          const char* key,
+                          std::vector<std::pair<std::string, std::string>>& rows) {
+    if (!parent.is_object() || !parent.contains(key) || !parent[key].is_array()) return;
+    for (const auto& item : parent[key]) appendPersistedRow(item, rows);
+}
+
+std::vector<std::pair<std::string, std::string>> persistedRetrievalRows(const std::string& body) {
+    std::vector<std::pair<std::string, std::string>> rows;
+    const auto parsed = nlohmann::json::parse(body);
+    if (!parsed.is_object() || !parsed.contains("steps") || !parsed["steps"].is_array()) return rows;
+    for (const auto& step : parsed["steps"]) {
+        if (!step.is_object() || !step.contains("result") || !step["result"].is_object()) continue;
+        const auto& result = step["result"];
+        if (result.contains("data") && result["data"].is_object()) {
+            appendPersistedArray(result["data"], "chunks", rows);
+            if (result["data"].contains("data") && result["data"]["data"].is_object()) {
+                appendPersistedArray(result["data"]["data"], "chunks", rows);
+            }
+        }
+        if (result.contains("diagnostics") && result["diagnostics"].is_object()) {
+            appendPersistedArray(result["diagnostics"], "breakdowns", rows);
+        }
+    }
+    return rows;
+}
+
+bool sourceFileForHash(const std::vector<std::pair<std::string, std::string>>& rows,
+                       const std::string& hash,
+                       std::unordered_set<std::string>& files) {
+    bool found = false;
+    for (const auto& row : rows) {
+        if (sha256Hex(row.second) != hash) continue;
+        if (row.first.empty()) return false;
+        files.insert(row.first);
+        found = true;
+    }
+    return found;
+}
+
 } // namespace
 
 Cm1ClaimCorroborationResult runCm1ClaimCorroboration(
@@ -1645,6 +1697,77 @@ Cm1ClaimCorroborationResult runCm1ClaimCorroboration(
     result.reason = "stored";
     result.record = draft.record;
     return result;
+}
+
+Cm1ClaimCorroborationResult runCm1ClaimDiscovery(
+    IndexManager& index,
+    MemoryRepository& repository,
+    const std::string& answer_id,
+    const std::string& claim_id,
+    const std::string& answer_text,
+    const std::function<Cm1EvidenceCompletion(const std::string& prompt, int timeout_seconds)>& caller,
+    std::int64_t created_at_ms,
+    int budget_seconds,
+    int top_k,
+    const std::function<std::int64_t()>& now_ms) {
+    if (index.isIndexing()) return corroborationIdle("indexing");
+
+    const auto answer = repository.loadCm1AnswerVersion(answer_id);
+    if (!answer) return corroborationIdle("missing_answer");
+    if (sha256Hex(answer_text) != answer->content_sha256) return corroborationIdle("answer_mismatch");
+
+    const auto judgment = repository.loadCm1EvidenceJudgment(std::string("cm1e1:") + answer_id);
+    if (!judgment) return corroborationIdle("missing_claim");
+    const auto claim = findCm1StoredClaim(*judgment, claim_id);
+    if (!claim) return corroborationIdle("missing_claim");
+
+    const auto inclusion = repository.loadCm1SynthesisInclusion(answer->plan_id, answer->step_id);
+    if (!inclusion) return corroborationIdle("inclusion_unknown");
+    const auto plan_body = repository.loadCm1PersistedPlanBody(answer->plan_id, answer->step_id);
+    if (!plan_body) return corroborationIdle("provenance_missing");
+
+    std::vector<std::pair<std::string, std::string>> persisted;
+    try {
+        persisted = persistedRetrievalRows(*plan_body);
+    } catch (...) {
+        return corroborationIdle("provenance_missing");
+    }
+
+    std::unordered_set<std::string> synthesis_files;
+    for (const auto& hash : inclusion->content_sha256) {
+        if (hash.empty() || !sourceFileForHash(persisted, hash, synthesis_files)) {
+            return corroborationIdle("provenance_missing");
+        }
+    }
+    if (!claim->evidence_chunk_sha256.empty()
+        && !sourceFileForHash(persisted, claim->evidence_chunk_sha256, synthesis_files)) {
+        return corroborationIdle("provenance_missing");
+    }
+
+    std::unordered_set<std::string> included(
+        inclusion->content_sha256.begin(), inclusion->content_sha256.end());
+    // retrieveChunks returns an empty list when the query embedding fails.
+    const int recall = top_k > 0 ? top_k : 8;
+    const auto hits = index.retrieveChunks(claim->claim_text, recall);
+    std::vector<Cm1CorroborationPassage> passages;
+    std::unordered_set<std::string> seen_hash;
+    for (const auto& hit : hits) {
+        const std::string content = hit.first;
+        const CodeChunk* chunk = index.getChunkByCode(content);
+        if (!chunk) continue;
+        const std::string file_name = chunk->fileName;
+        if (content.empty() || warmMemoryFile(file_name) || synthesis_files.count(file_name)) continue;
+        if (!claim->evidence_quote.empty() && content == claim->evidence_quote) continue;
+        const std::string hash = sha256Hex(content);
+        if (!claim->evidence_chunk_sha256.empty() && hash == claim->evidence_chunk_sha256) continue;
+        if (included.count(hash) || seen_hash.count(hash)) continue;
+        seen_hash.insert(hash);
+        passages.push_back(Cm1CorroborationPassage{content, file_name});
+    }
+
+    return runCm1ClaimCorroboration(
+        repository, answer_id, claim_id, answer_text, passages, caller,
+        created_at_ms, budget_seconds, now_ms);
 }
 
 } // namespace Thoth

@@ -416,6 +416,13 @@ public:
      */
     virtual std::optional<Cm1SynthesisInclusion> loadCm1SynthesisInclusion(
         const std::string& plan_id, const std::string& step_id) = 0;
+
+    /**
+     * Plan JSON that supplied a known synthesis inclusion list for this step.
+     * nullopt when that list cannot be recovered. Does not change the hash list.
+     */
+    virtual std::optional<std::string> loadCm1PersistedPlanBody(
+        const std::string& plan_id, const std::string& step_id) = 0;
 };
 
 } // namespace Thoth
