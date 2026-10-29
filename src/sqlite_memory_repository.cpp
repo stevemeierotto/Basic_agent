@@ -2441,6 +2441,30 @@ std::optional<Cm1EvidenceJudgmentRecord> SQLiteMemoryRepository::loadCm1Evidence
     }
 }
 
+std::vector<Cm1EvidenceJudgmentRecord> SQLiteMemoryRepository::listCm1EvidenceJudgments() {
+    std::vector<Cm1EvidenceJudgmentRecord> rows;
+    try {
+        if (!db_ || !db_->handle) return rows;
+        const char* sql =
+            "SELECT judgment_id, answer_id, content_sha256, estimator_version, payload_json, "
+            "created_at_ms FROM cm1_evidence_judgments ORDER BY created_at_ms, judgment_id;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_->handle, sql, -1, &stmt, nullptr) != SQLITE_OK) return rows;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Cm1EvidenceJudgmentRecord record;
+            record.judgment_id = safe_col_text(stmt, 0);
+            record.answer_id = safe_col_text(stmt, 1);
+            record.content_sha256 = safe_col_text(stmt, 2);
+            record.estimator_version = safe_col_text(stmt, 3);
+            record.payload_json = safe_col_text(stmt, 4);
+            record.created_at_ms = sqlite3_column_int64(stmt, 5);
+            rows.push_back(std::move(record));
+        }
+        sqlite3_finalize(stmt);
+    } catch (...) {}
+    return rows;
+}
+
 std::optional<Cm1BreadthEstimate> SQLiteMemoryRepository::loadCm1BreadthEstimate(
     const std::string& estimate_id) {
     try {

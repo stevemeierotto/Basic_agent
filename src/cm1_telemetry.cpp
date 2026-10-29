@@ -1578,6 +1578,70 @@ bool sourceFileForHash(const std::vector<std::pair<std::string, std::string>>& r
     return found;
 }
 
+enum class StoredClaimProvenance { Readable, InclusionUnknown, Missing };
+
+struct StoredClaimProvenanceRead {
+    StoredClaimProvenance status = StoredClaimProvenance::Missing;
+    std::unordered_set<std::string> synthesis_files;
+};
+
+StoredClaimProvenanceRead readStoredClaimProvenance(MemoryRepository& repository,
+                                                    const Cm1AnswerVersionRecord& answer,
+                                                    const Cm1StoredClaim& claim) {
+    StoredClaimProvenanceRead read;
+    const auto inclusion = repository.loadCm1SynthesisInclusion(answer.plan_id, answer.step_id);
+    if (!inclusion) {
+        read.status = StoredClaimProvenance::InclusionUnknown;
+        return read;
+    }
+    const auto plan_body = repository.loadCm1PersistedPlanBody(answer.plan_id, answer.step_id);
+    if (!plan_body) return read;
+    std::vector<std::pair<std::string, std::string>> persisted;
+    try {
+        persisted = persistedRetrievalRows(*plan_body);
+    } catch (...) {
+        return read;
+    }
+    for (const auto& hash : inclusion->content_sha256) {
+        if (hash.empty() || !sourceFileForHash(persisted, hash, read.synthesis_files)) {
+            read.synthesis_files.clear();
+            return read;
+        }
+    }
+    if (!claim.evidence_chunk_sha256.empty()
+        && !sourceFileForHash(persisted, claim.evidence_chunk_sha256, read.synthesis_files)) {
+        read.synthesis_files.clear();
+        return read;
+    }
+    read.status = StoredClaimProvenance::Readable;
+    return read;
+}
+
+std::optional<std::string> persistedAnswerText(const std::string& body, const std::string& step_id) {
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(body);
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (!parsed.is_object() || !parsed.contains("steps") || !parsed["steps"].is_array()) {
+        return std::nullopt;
+    }
+    for (const auto& step : parsed["steps"]) {
+        if (!step.is_object() || step.value("step_id", "") != step_id) continue;
+        if (!step.contains("result") || !step["result"].is_object()) return std::nullopt;
+        const auto& result = step["result"];
+        if (!result.contains("data") || !result["data"].is_object()
+            || !result["data"].contains("response") || !result["data"]["response"].is_string()) {
+            return std::nullopt;
+        }
+        const std::string text = result["data"]["response"].get<std::string>();
+        if (text.empty()) return std::nullopt;
+        return text;
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 Cm1ClaimCorroborationResult runCm1ClaimCorroboration(
@@ -1721,31 +1785,19 @@ Cm1ClaimCorroborationResult runCm1ClaimDiscovery(
     const auto claim = findCm1StoredClaim(*judgment, claim_id);
     if (!claim) return corroborationIdle("missing_claim");
 
+    const auto provenance = readStoredClaimProvenance(repository, *answer, *claim);
+    if (provenance.status == StoredClaimProvenance::InclusionUnknown) {
+        return corroborationIdle("inclusion_unknown");
+    }
+    if (provenance.status != StoredClaimProvenance::Readable) {
+        return corroborationIdle("provenance_missing");
+    }
     const auto inclusion = repository.loadCm1SynthesisInclusion(answer->plan_id, answer->step_id);
     if (!inclusion) return corroborationIdle("inclusion_unknown");
-    const auto plan_body = repository.loadCm1PersistedPlanBody(answer->plan_id, answer->step_id);
-    if (!plan_body) return corroborationIdle("provenance_missing");
-
-    std::vector<std::pair<std::string, std::string>> persisted;
-    try {
-        persisted = persistedRetrievalRows(*plan_body);
-    } catch (...) {
-        return corroborationIdle("provenance_missing");
-    }
-
-    std::unordered_set<std::string> synthesis_files;
-    for (const auto& hash : inclusion->content_sha256) {
-        if (hash.empty() || !sourceFileForHash(persisted, hash, synthesis_files)) {
-            return corroborationIdle("provenance_missing");
-        }
-    }
-    if (!claim->evidence_chunk_sha256.empty()
-        && !sourceFileForHash(persisted, claim->evidence_chunk_sha256, synthesis_files)) {
-        return corroborationIdle("provenance_missing");
-    }
 
     std::unordered_set<std::string> included(
         inclusion->content_sha256.begin(), inclusion->content_sha256.end());
+    const std::unordered_set<std::string>& synthesis_files = provenance.synthesis_files;
     // retrieveChunks returns an empty list when the query embedding fails.
     const int recall = top_k > 0 ? top_k : 8;
     const auto hits = index.retrieveChunks(claim->claim_text, recall);
@@ -1768,6 +1820,53 @@ Cm1ClaimCorroborationResult runCm1ClaimDiscovery(
     return runCm1ClaimCorroboration(
         repository, answer_id, claim_id, answer_text, passages, caller,
         created_at_ms, budget_seconds, now_ms);
+}
+
+std::vector<Cm1DiscoveryCandidate> selectCm1DiscoveryCandidates(MemoryRepository& repository) {
+    std::vector<Cm1DiscoveryCandidate> selected;
+    for (const auto& judgment : repository.listCm1EvidenceJudgments()) {
+        nlohmann::json payload;
+        try {
+            payload = nlohmann::json::parse(judgment.payload_json);
+        } catch (...) {
+            continue;
+        }
+        if (!payload.is_object() || !payload.contains("claims") || !payload["claims"].is_array()) {
+            continue;
+        }
+        const auto answer = repository.loadCm1AnswerVersion(judgment.answer_id);
+        if (!answer || answer->content_sha256.empty()
+            || answer->content_sha256 != judgment.content_sha256) {
+            continue;
+        }
+        const auto plan_body = repository.loadCm1PersistedPlanBody(answer->plan_id, answer->step_id);
+        if (!plan_body) continue;
+        const auto answer_text = persistedAnswerText(*plan_body, answer->step_id);
+        if (!answer_text || sha256Hex(*answer_text) != answer->content_sha256) continue;
+
+        for (const auto& row : payload["claims"]) {
+            if (!row.is_object() || row.value("evaluation_status", "") != "available") continue;
+            const auto claim = findCm1StoredClaim(judgment, row.value("claim_id", ""));
+            if (!claim || claim->answer_content_sha256 != answer->content_sha256) continue;
+            if (readStoredClaimProvenance(repository, *answer, *claim).status
+                != StoredClaimProvenance::Readable) {
+                continue;
+            }
+            if (repository.latestCm1ClaimVerification(
+                    claim->claim_id,
+                    kCm1CorroborationProtocolId,
+                    kCm1CorroborationProtocolVersion,
+                    kCm1CorroborationReviewerId,
+                    "automated_agent",
+                    kCm1CorroborationVerifierVersion,
+                    kCm1CorroborationMethodId)) {
+                continue;
+            }
+            selected.push_back(Cm1DiscoveryCandidate{
+                answer->answer_id, claim->claim_id, *answer_text});
+        }
+    }
+    return selected;
 }
 
 } // namespace Thoth

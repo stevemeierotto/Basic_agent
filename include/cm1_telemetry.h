@@ -469,6 +469,24 @@ Cm1ClaimCorroborationResult runCm1ClaimDiscovery(
     int top_k = 8,
     const std::function<std::int64_t()>& now_ms = {});
 
+/**
+ * One stored claim that can be discovered later.
+ * answer_text is the synthesis response recovered from the persisted plan.
+ */
+struct Cm1DiscoveryCandidate {
+    std::string answer_id;
+    std::string claim_id;
+    std::string answer_text;
+};
+
+/**
+ * Read stored judgments and return available claims with no CM-1 corroboration
+ * row. The answer version must match the judgment hash, the plan must contain
+ * that same answer text, and every included or cited source must resolve to a
+ * file. Does not retrieve, call the model, write, or read THOTH_CM1_CORROBORATION.
+ */
+std::vector<Cm1DiscoveryCandidate> selectCm1DiscoveryCandidates(MemoryRepository& repository);
+
 } // namespace Thoth
 
 #endif

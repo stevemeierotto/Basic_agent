@@ -345,6 +345,8 @@ public:
     virtual bool insertCm1EvidenceJudgment(const Cm1EvidenceJudgmentRecord& record) = 0;
     virtual std::optional<Cm1EvidenceJudgmentRecord> loadCm1EvidenceJudgment(
         const std::string& judgment_id) = 0;
+    /** Every stored evidence judgment, oldest first. Read-only. */
+    virtual std::vector<Cm1EvidenceJudgmentRecord> listCm1EvidenceJudgments() = 0;
     virtual bool insertCm1UserFeedback(const Cm1UserFeedback& record) = 0;
     virtual std::optional<Cm1UserFeedback> latestCm1UserFeedback(
         const std::string& answer_id) = 0;
