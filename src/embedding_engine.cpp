@@ -32,7 +32,7 @@ void logEmbedFailure(const Thoth::InferenceClient* client,
 
 } // namespace
 
-void EmbeddingEngine::ensureInferenceClient() {
+void EmbeddingEngine::ensureInferenceClientUnlocked() {
     if (inference_client_) {
         return;
     }
@@ -41,12 +41,18 @@ void EmbeddingEngine::ensureInferenceClient() {
     inference_client_ = Thoth::createInferenceClient(endpoints, config);
 }
 
+void EmbeddingEngine::ensureInferenceClient() {
+    std::lock_guard<std::mutex> lock(engineMutex);
+    ensureInferenceClientUnlocked();
+}
+
 EmbeddingEngine::EmbeddingEngine(Method method, Config* config) 
     : method(method), config(config) {}
 
 EmbeddingEngine::~EmbeddingEngine() = default;
 
 void EmbeddingEngine::setMethod(Method m) {
+    std::lock_guard<std::mutex> lock(engineMutex);
     method = m;
     if (m != Method::External) {
         inference_client_.reset();
@@ -56,8 +62,14 @@ void EmbeddingEngine::setMethod(Method m) {
 std::vector<float> EmbeddingEngine::embed(const std::string& text) {
     if (text.empty()) return {};
 
+    Method selected;
+    {
+        std::lock_guard<std::mutex> lock(engineMutex);
+        selected = method;
+    }
+
     std::vector<float> vec;
-    switch (method) {
+    switch (selected) {
         case Method::Simple:
             vec = embedSimple(text);
             break;
@@ -81,7 +93,13 @@ std::vector<float> EmbeddingEngine::embed(const std::string& text) {
 std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<std::string>& texts) {
     if (texts.empty()) return {};
 
-    if (method != Method::External) {
+    Method selected;
+    {
+        std::lock_guard<std::mutex> lock(engineMutex);
+        selected = method;
+    }
+
+    if (selected != Method::External) {
         std::vector<std::vector<float>> results;
         results.reserve(texts.size());
         for (const auto& t : texts) {
@@ -90,8 +108,13 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
         return results;
     }
 
+    Thoth::InferenceClient* client = nullptr;
+    std::string model;
     try {
-        ensureInferenceClient();
+        std::lock_guard<std::mutex> lock(engineMutex);
+        ensureInferenceClientUnlocked();
+        client = inference_client_.get();
+        model = getModelName();
     } catch (const std::exception& e) {
         std::cerr << "[EmbeddingEngine] Inference client unavailable: " << e.what()
                   << ". Falling back to local TfIdf.\n";
@@ -102,7 +125,7 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
         return finalResults;
     }
 
-    if (!inference_client_) {
+    if (!client) {
         std::cerr << "[EmbeddingEngine] Inference service unreachable. Falling back to local TfIdf.\n";
         std::vector<std::vector<float>> finalResults;
         for (const auto& t : texts) {
@@ -110,8 +133,6 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
         }
         return finalResults;
     }
-
-    const std::string model = getModelName();
     std::vector<std::vector<float>> finalResults;
     finalResults.reserve(texts.size());
 
@@ -119,7 +140,7 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
     const size_t MAX_CHAR_LIMIT = 8000;
 
     for (size_t i = 0; i < texts.size(); i += MAX_BATCH_SIZE) {
-        if (method != Method::External) break;
+        if (selected != Method::External) break;
 
         size_t end = std::min(i + MAX_BATCH_SIZE, texts.size());
         std::vector<std::string> microBatch;
@@ -135,7 +156,7 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
         request.model = model;
         request.inputs = microBatch;
 
-        const auto embedded = inference_client_->embed(request);
+        const auto embedded = client->embed(request);
         if (embedded.ok && embedded.embeddings.size() == microBatch.size()) {
             for (const auto& vec : embedded.embeddings) {
                 finalResults.push_back(normalizeVector(vec));
@@ -143,7 +164,7 @@ std::vector<std::vector<float>> EmbeddingEngine::embedBatch(const std::vector<st
             continue;
         }
 
-        std::cerr << "[EmbeddingEngine] " << inference_client_->backendName() << " embed failed";
+        std::cerr << "[EmbeddingEngine] " << client->backendName() << " embed failed";
         if (!embedded.error.empty()) {
             std::cerr << ": " << embedded.error;
         }
@@ -167,6 +188,7 @@ std::vector<float> EmbeddingEngine::embedSimple(const std::string& text) {
 }
 
 std::vector<float> EmbeddingEngine::embedTfIdf(const std::string& text) {
+    std::lock_guard<std::mutex> lock(engineMutex);
     std::vector<float> vec(VOCAB_SIZE, 0.0f);
     auto tokens = tokenize(text);
     if (tokens.empty()) return vec;
@@ -192,8 +214,11 @@ std::vector<float> EmbeddingEngine::embedWordHash(const std::string& text) {
 }
 
 std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
+    Thoth::InferenceClient* client = nullptr;
     try {
-        ensureInferenceClient();
+        std::lock_guard<std::mutex> lock(engineMutex);
+        ensureInferenceClientUnlocked();
+        client = inference_client_.get();
     } catch (const std::exception& e) {
         logEmbedFailure(nullptr, "client_unavailable", e.what());
         if (embedStrictModeEnabled()) {
@@ -201,7 +226,7 @@ std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
         }
         return embedTfIdf(text);
     }
-    if (!inference_client_) {
+    if (!client) {
         logEmbedFailure(nullptr, "client_unavailable", "inference client not initialized");
         if (embedStrictModeEnabled()) {
             return {};
@@ -220,11 +245,11 @@ std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
     request.model = getModelName();
     request.inputs = {safeText};
 
-    const auto embedded = inference_client_->embed(request);
+    const auto embedded = client->embed(request);
     if (embedded.ok && !embedded.embeddings.empty()) {
         const auto& vec = embedded.embeddings.front();
         if (static_cast<int>(vec.size()) != getDimension()) {
-            logEmbedFailure(inference_client_.get(),
+            logEmbedFailure(client,
                             "dimension_mismatch",
                             "got " + std::to_string(vec.size()) + " expected "
                                 + std::to_string(getDimension()));
@@ -236,7 +261,7 @@ std::vector<float> EmbeddingEngine::embedExternal(const std::string& text) {
         return embedded.embeddings.front();
     }
 
-    logEmbedFailure(inference_client_.get(), "embed_request", embedded.error);
+    logEmbedFailure(client, "embed_request", embedded.error);
     if (embedStrictModeEnabled()) {
         return {};
     }

@@ -112,7 +112,7 @@ E2StrictRetrievalResult e2StrictRetrieve(const E2StrictRetrievalInput& input) {
         const auto corpusHits = input.index->retrieveChunks(input.query, recallK);
 
         for (const auto& [code, score] : corpusHits) {
-            const auto* chunk = input.index->getChunkByCode(code);
+            const auto chunk = input.index->copyChunkByCode(code);
             if (!chunk) {
                 continue;
             }

@@ -1753,7 +1753,7 @@ Cm1ClaimCorroborationResult runCm1ClaimDiscovery(
     std::unordered_set<std::string> seen_hash;
     for (const auto& hit : hits) {
         const std::string content = hit.first;
-        const CodeChunk* chunk = index.getChunkByCode(content);
+        const auto chunk = index.copyChunkByCode(content);
         if (!chunk) continue;
         const std::string file_name = chunk->fileName;
         if (content.empty() || warmMemoryFile(file_name) || synthesis_files.count(file_name)) continue;

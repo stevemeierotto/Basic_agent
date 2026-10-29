@@ -648,7 +648,7 @@ std::string CommandProcessor::processQuery(const std::string& input,
             return "[Denied] " + queryDenyReason;
         }
 
-        if (indexManager && indexManager->getChunks().empty()) {
+        if (indexManager && indexManager->chunkCount() == 0) {
             Thoth::ConversationPromptMetrics promptMetrics;
             PromptFactory::ConversationBuildOptions options;
             options.includeTools = config && config->enable_tools && Thoth::looksLikeToolIntent(input);
@@ -1342,7 +1342,7 @@ void CommandProcessor::ensureInitialized() {
             FileHandler fh;
             indexManager->init(fh.getRagPath("rag_index.bin"));
             
-            if (indexManager->getChunks().empty()) {
+            if (indexManager->chunkCount() == 0) {
                 std::string sandboxRag = fh.getAgentWorkspacePath("rag/");
                 std::cerr << "[RAG] Index empty. Bootstrapping from sandbox: " << sandboxRag << "\n";
                 indexManager->indexProject(sandboxRag);

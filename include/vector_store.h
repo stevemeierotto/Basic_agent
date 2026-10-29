@@ -30,6 +30,12 @@ public:
     // Query for topK matches
     std::vector<std::pair<std::string, float>> retrieve(const std::string& query, int topK);
 
+    /**
+     * Rank stored vectors against an already computed query embedding.
+     * Does not embed and does not lock. IndexManager calls this while holding chunksMutex.
+     */
+    std::vector<std::pair<std::string, float>> rank(const std::vector<float>& queryVec, int topK) const;
+
     // Persistence
     bool loadEmbeddings(const std::string& filepath);
     bool saveEmbeddings(const std::string& filepath) const;

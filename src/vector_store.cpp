@@ -45,17 +45,24 @@ void VectorStore::clear() {
 }
 
 std::vector<std::pair<std::string, float>> VectorStore::retrieve(const std::string& query, int topK) {
-    if (topK <= 0) {
+    if (topK <= 0 || !embeddingEngine) {
+        return {};
+    }
+    auto queryVec = embeddingEngine->embed(query);
+    if (queryVec.empty()) {
+        std::cerr << "[ERROR] Query embedding failed for: " << query << "\n";
+        return {};
+    }
+    return rank(queryVec, topK);
+}
+
+std::vector<std::pair<std::string, float>> VectorStore::rank(const std::vector<float>& queryVec,
+                                                            int topK) const {
+    if (topK <= 0 || queryVec.empty()) {
         return {};
     }
 
     if (documents.empty() || embeddings.empty()) {
-        return {};
-    }
-
-    auto queryVec = embeddingEngine->embed(query);
-    if (queryVec.empty()) {
-        std::cerr << "[ERROR] Query embedding failed for: " << query << "\n";
         return {};
     }
 
@@ -86,7 +93,7 @@ std::vector<std::pair<std::string, float>> VectorStore::retrieve(const std::stri
     }
 
     if (valid_scores == 0) {
-        std::cerr << "[WARN] All scores were zero for query: " << query << "\n";
+        std::cerr << "[WARN] All scores were zero for prepared query vector\n";
     }
 
     std::vector<std::pair<std::string, float>> results;

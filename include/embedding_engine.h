@@ -67,6 +67,8 @@ private:
     float calculateIdf(const std::string& term) const;
 
     void ensureInferenceClient();
+    /** Caller holds engineMutex. */
+    void ensureInferenceClientUnlocked();
 
     std::unique_ptr<Thoth::InferenceClient> inference_client_;
     mutable std::mutex engineMutex;

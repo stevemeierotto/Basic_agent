@@ -52,8 +52,19 @@ public:
     const std::vector<CodeChunk>& getChunks() const;
     
     // Get chunk by code text using hash map (O(1) lookup)
-    // Returns nullptr if not found, otherwise returns pointer to chunk
+    // Returns nullptr if not found, otherwise returns pointer to chunk.
+    // The pointer is valid only until the next mutation on this thread.
+    // Concurrent callers use copyChunkByCode.
     const CodeChunk* getChunkByCode(const std::string& codeText) const;
+
+    /** Copy of the chunk, taken under chunksMutex. Empty when the code is absent. */
+    std::optional<CodeChunk> copyChunkByCode(const std::string& codeText) const;
+
+    /** Copy of the live chunk table, taken under chunksMutex. */
+    std::vector<CodeChunk> snapshotChunks() const;
+
+    /** chunks.size() under chunksMutex. */
+    size_t chunkCount() const;
 
     // Save/load the index
     bool saveIndex() const;
@@ -171,6 +182,8 @@ private:
     std::thread m_workerThread;
     std::queue<std::function<void()>> m_taskQueue;
     std::mutex m_queueMutex;
+    /** Serializes indexFile across the worker and synchronous callers. */
+    std::mutex indexingMutex_;
     std::condition_variable m_queueCv;
     std::atomic<bool> m_stopWorker{false};
 

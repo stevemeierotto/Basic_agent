@@ -1999,7 +1999,7 @@ namespace {
 std::unordered_map<std::string, int> cm1IndexedCountsByFile(IndexManager* index) {
     std::unordered_map<std::string, int> counts;
     if (!index) return counts;
-    for (const auto& chunk : index->getChunks()) {
+    for (const auto& chunk : index->snapshotChunks()) {
         if (chunk.fileName.empty()) continue;
         counts[chunk.fileName] += 1;
     }

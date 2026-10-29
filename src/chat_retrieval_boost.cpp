@@ -150,7 +150,7 @@ void ensureFilenameCoverage(IndexManager* indexManager,
     }
 
     const bool quoteQuery = isQuoteQuery(query);
-    const auto& allChunks = indexManager->getChunks();
+    const std::vector<CodeChunk> allChunks = indexManager->snapshotChunks();
     std::unordered_map<std::string, std::vector<const CodeChunk*>> matchedByStem;
 
     for (const auto& chunk : allChunks) {

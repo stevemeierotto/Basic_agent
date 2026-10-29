@@ -111,8 +111,9 @@ std::vector<CodeChunk> RAGPipeline::retrieveRelevant(const std::string& query,
 
     std::vector<std::pair<CodeChunk, float>> rag_results;
     for (const auto& [chunkCode, score] : rawResults) {
-        const auto* chunk = indexManager->getChunkByCode(chunkCode);
-        if (chunk) rag_results.push_back({*chunk, score});
+        if (auto chunk = indexManager->copyChunkByCode(chunkCode)) {
+            rag_results.push_back({std::move(*chunk), score});
+        }
     }
 
     if (memory && engine) {

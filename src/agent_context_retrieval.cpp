@@ -249,7 +249,7 @@ RetrievalScope resolveAgentContextRetrievalScope(const std::string& active_conte
     }
 
     if (indexManager) {
-        for (const auto& chunk : indexManager->getChunks()) {
+        for (const auto& chunk : indexManager->snapshotChunks()) {
             if (chunk.corpus_tier == "session_attachment" &&
                 chunk.owner_context_id == active_context_key) {
                 appendUnique(scope.selected_documents, documentStemFromPath(chunk.fileName));

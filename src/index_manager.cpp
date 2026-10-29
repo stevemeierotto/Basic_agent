@@ -400,6 +400,25 @@ const CodeChunk* IndexManager::getChunkByCode(const std::string& codeText) const
     return nullptr;
 }
 
+std::optional<CodeChunk> IndexManager::copyChunkByCode(const std::string& codeText) const {
+    std::shared_lock<std::shared_mutex> lock(chunksMutex);
+    auto it = codeToChunkIndex.find(codeText);
+    if (it == codeToChunkIndex.end() || it->second >= chunks.size()) {
+        return std::nullopt;
+    }
+    return chunks[it->second];
+}
+
+std::vector<CodeChunk> IndexManager::snapshotChunks() const {
+    std::shared_lock<std::shared_mutex> lock(chunksMutex);
+    return chunks;
+}
+
+size_t IndexManager::chunkCount() const {
+    std::shared_lock<std::shared_mutex> lock(chunksMutex);
+    return chunks.size();
+}
+
 void IndexManager::enforceMemoryLimits() {
     std::unique_lock lock(chunksMutex);
     if (chunks.size() > MAX_CHUNKS || getCurrentMemoryUsage() > MAX_TOTAL_SIZE) {
@@ -624,11 +643,20 @@ bool IndexManager::chunkInActiveCorpus(const CodeChunk& chunk) const {
 
 std::vector<std::pair<std::string, float>> IndexManager::retrieveChunks(
     const std::string& query, int topK, const Thoth::RetrievalScope* scope) {
+    if (topK <= 0 || !engine) {
+        return {};
+    }
+    const std::vector<float> queryVec = engine->embed(query);
+    if (queryVec.empty()) {
+        return {};
+    }
+
+    std::shared_lock<std::shared_mutex> lock(chunksMutex);
     const bool scopeFilter = scope != nullptr;
     const bool filterCorpus =
         scopeFilter || !activeCorpusFiles_.empty() || !activeCorpusRoots_.empty();
     const int recallK = filterCorpus ? std::max(topK * 8, 80) : std::max(topK * 2, topK);
-    auto rawResults = store.retrieve(query, recallK);
+    auto rawResults = store.rank(queryVec, recallK);
 
     if (!filterCorpus) {
         if (static_cast<int>(rawResults.size()) > topK) {
@@ -637,7 +665,6 @@ std::vector<std::pair<std::string, float>> IndexManager::retrieveChunks(
         return rawResults;
     }
 
-    std::shared_lock<std::shared_mutex> lock(chunksMutex);
     std::vector<std::pair<std::string, float>> filtered;
     filtered.reserve(rawResults.size());
     for (const auto& entry : rawResults) {
@@ -824,6 +851,7 @@ void IndexManager::persistRegistryRevisionState(bool success,
 }
 
 void IndexManager::indexFile(const std::string& filePath) {
+    std::lock_guard<std::mutex> index_lock(indexingMutex_);
     std::string normalizedPath;
     try {
         normalizedPath = fs::absolute(filePath).lexically_normal().string();
@@ -1242,9 +1270,14 @@ bool IndexManager::saveIndex(const std::string& dbPath) const {
         out.write(reinterpret_cast<const char*>(&headerLen), sizeof(headerLen));
         out.write(headerStr.data(), headerLen);
 
-        size_t n = chunks.size();
+        std::vector<CodeChunk> snapshot;
+        {
+            std::shared_lock lock(chunksMutex);
+            snapshot = chunks;
+        }
+        size_t n = snapshot.size();
         out.write(reinterpret_cast<const char*>(&n), sizeof(n));
-        for (const auto& c : chunks) {
+        for (const auto& c : snapshot) {
             size_t len;
             len = c.fileName.size();
             out.write(reinterpret_cast<const char*>(&len), sizeof(len));
@@ -1353,12 +1386,8 @@ void IndexManager::loadIndex(const std::string& dbPath) {
 
     size_t n;
     in.read(reinterpret_cast<char*>(&n), sizeof(n));
-    {
-        std::unique_lock lock(chunksMutex);
-        chunks.clear(); 
-        codeToChunkIndex.clear();
-        chunks.reserve(n);
-    }
+    std::vector<CodeChunk> loaded;
+    loaded.reserve(n);
     for (size_t i = 0; i < n; ++i) {
         CodeChunk c; size_t len;
         in.read(reinterpret_cast<char*>(&len), sizeof(len)); c.fileName.resize(len); in.read(&c.fileName[0], len);
@@ -1374,12 +1403,7 @@ void IndexManager::loadIndex(const std::string& dbPath) {
         in.read(reinterpret_cast<char*>(&c.embedding_version), sizeof(c.embedding_version));
         in.read(reinterpret_cast<char*>(&c.keyword_score), sizeof(c.keyword_score));
         try { c.fileName = fs::absolute(c.fileName).lexically_normal().string(); } catch (...) {}
-        {
-            std::unique_lock lock(chunksMutex);
-            codeToChunkIndex[c.code] = chunks.size();
-            chunks.push_back(std::move(c));
-            indexedFileFingerprints[chunks.back().fileName] = computeFileFingerprint(chunks.back().fileName);
-        }
+        loaded.push_back(std::move(c));
     }
     
     // Load Primary Engine State
@@ -1408,9 +1432,16 @@ void IndexManager::loadIndex(const std::string& dbPath) {
 
     {
         std::unique_lock lock(chunksMutex);
+        chunks = std::move(loaded);
+        codeToChunkIndex.clear();
+        indexedFileFingerprints.clear();
         store.clear();
         for (size_t i = 0; i < chunks.size(); ++i) {
             auto& c = chunks[i];
+            if (!c.code.empty()) {
+                codeToChunkIndex[c.code] = i;
+            }
+            indexedFileFingerprints[c.fileName] = computeFileFingerprint(c.fileName);
             if (!c.embedding.empty() && !c.code.empty()) {
                 store.addDocumentWithEmbedding(c.code, c.embedding);
             }

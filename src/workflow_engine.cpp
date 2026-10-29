@@ -675,7 +675,7 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
         if (chunks.empty()) {
             const bool indexPopulated =
                 ragPipeline_->indexManager &&
-                !ragPipeline_->indexManager->getChunks().empty();
+                ragPipeline_->indexManager->chunkCount() > 0;
 
             if (!indexPopulated) {
                 result.success = false;

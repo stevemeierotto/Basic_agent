@@ -165,7 +165,10 @@ BasicAgentPlugin::BasicAgentPlugin()
 }
 
 BasicAgentPlugin::~BasicAgentPlugin() {
+    cmdProcessor.setController(nullptr);
+    controller.reset();
     delete indexManager;
+    indexManager = nullptr;
     std::cerr << "[BasicAgentPlugin] Destroyed.\n";
 }
 
@@ -175,7 +178,7 @@ Thoth::InProcessEpisodeEventChannel* BasicAgentPlugin::episodeEventChannelForTes
 
 void BasicAgentPlugin::bootstrapSandboxIfEmpty() {
     if (!indexManager) return;
-    if (indexManager->getChunks().empty()) {
+    if (indexManager->chunkCount() == 0) {
         FileHandler fh;
         const std::string corpus = fh.getAgentWorkspacePath("rag/test_suite_corpus");
         std::filesystem::create_directories(corpus);
@@ -649,7 +652,7 @@ Thoth::BenchmarkEnvironmentInputs BasicAgentPlugin::buildTestSuiteBenchmarkInput
     inputs.corpus_paths = {corpusPath};
     inputs.corpus_mode = Thoth::CorpusFingerprintMode::FAST;
     if (indexManager) {
-        inputs.corpus_chunk_count = static_cast<int>(indexManager->getChunks().size());
+        inputs.corpus_chunk_count = static_cast<int>(indexManager->chunkCount());
     }
     inputs.thoth_env_flags = Thoth::collectThothEnvFlags();
     if (fullTier) {
@@ -672,7 +675,7 @@ Thoth::IndexEnvironment BasicAgentPlugin::benchmarkIndexEnvironment() const {
         {"model_name", rag.engine->getModelName()},
         {"embedding_dimension", rag.engine->getDimension()},
         {"embedding_version", rag.engine->getInternalVersion()},
-        {"chunk_count", static_cast<int>(indexManager->getChunks().size())},
+        {"chunk_count", static_cast<int>(indexManager->chunkCount())},
     };
     return index;
 }
