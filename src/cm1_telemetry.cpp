@@ -8,8 +8,10 @@
 #include "../include/cm1_telemetry.h"
 
 #include "../include/alp_sha256.h"
+#include "../include/cm1_foreground.h"
 #include "../include/grag_diagnostics.h"
 #include "../include/index_manager.h"
+#include "../include/llm_timeout_policy.h"
 #include "../include/memory_repository.h"
 
 #include <algorithm>
@@ -59,6 +61,22 @@ bool cm1CorroborationEnabled() {
     const char* env = std::getenv("THOTH_CM1_CORROBORATION");
     if (!env || !*env) return false;
     return std::string(env) != "0" && std::string(env) != "false" && std::string(env) != "off";
+}
+
+int cm1DiscoveryTimeoutSeconds() {
+    constexpr int kDefaultSeconds = 30;
+    const char* env = std::getenv("THOTH_CM1_DISCOVERY_TIMEOUT_SECONDS");
+    int requested = kDefaultSeconds;
+    if (env && *env) {
+        try {
+            const int parsed = std::stoi(env);
+            if (parsed > 0) requested = parsed;
+        } catch (...) {
+        }
+    }
+    const long shared = LlmTimeoutPolicy::timeoutSeconds();
+    if (requested > shared) return static_cast<int>(shared);
+    return requested;
 }
 
 std::string makeCm1SnapshotId(const std::string& plan_id,
@@ -1702,6 +1720,7 @@ Cm1ClaimCorroborationResult runCm1ClaimCorroboration(
         completion.ok = false;
         completion.error = "exception";
     }
+    if (completion.error == kCm1DiscoveryYieldError) return corroborationIdle("yielded");
     const Cm1EvidenceAssessment assessment = assessCm1EvidenceCompletion(completion, eligible);
     if (!assessment.available) {
         if (assessment.unavailable_reason == "timeout") return corroborationIdle("timeout");

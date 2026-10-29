@@ -1,4 +1,5 @@
 #include "../include/llm_interface.h"
+#include "../include/cm1_foreground.h"
 #include "../include/decision_trace.h"
 #include "../include/generation_budget.h"
 #include "../include/generation_progress_observer.h"
@@ -72,6 +73,16 @@ void applyConfiguredSeed(std::optional<int>& seed_field) {
 
 std::string nextGenerationId() {
     return Thoth::makeGenerationId();
+}
+
+bool discoveryMustYield(Thoth::InferenceGenerateResult& result) {
+    if (!Thoth::cm1DiscoveryYieldArmed() || !Thoth::cm1ForegroundWorkActive()) {
+        return false;
+    }
+    result = Thoth::InferenceGenerateResult{};
+    result.ok = false;
+    result.error = Thoth::kCm1DiscoveryYieldError;
+    return true;
 }
 
 } // namespace
@@ -341,6 +352,7 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
     std::optional<long> timeout_seconds) {
     Thoth::InferenceGenerateResult result;
     try {
+        if (discoveryMustYield(result)) return result;
         if (auto fail = Thoth::RobustnessMockResponses::popFailure()) {
             result.ok = false;
             result.error = *fail;
@@ -373,6 +385,9 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
         }
 
         std::lock_guard<std::recursive_mutex> lock(llmMutex);
+        // After the lock, so a goal that became active before this call can
+        // take the mutex without waiting for HTTP.
+        if (discoveryMustYield(result)) return result;
         try {
             ensureInferenceClient();
         } catch (const std::exception& e) {
@@ -413,6 +428,7 @@ Thoth::InferenceGenerateResult LLMInterface::queryDetailed(
         const auto started = std::chrono::steady_clock::now();
         result = inference_client_->generate(request);
         if (!result.ok && result.error.find("not found") != std::string::npos) {
+            if (discoveryMustYield(result)) return result;
             const std::string detected = detectOllamaModel();
             if (!detected.empty() && detected != model) {
                 selectedModel = detected;

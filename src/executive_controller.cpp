@@ -42,6 +42,7 @@
 #include <cstdlib>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <csignal>
 #include <filesystem>
 #include <unistd.h>
@@ -331,16 +332,23 @@ ExecutiveController::ExecutiveController(
     }
     execution_mode_ = std::make_unique<Thoth::StandardExecutionMode>();
     transition_to_unlocked(ControllerState::IDLE);
+    if (Thoth::cm1CorroborationEnabled()) {
+        discovery_thread_ = std::make_unique<std::thread>([this]() { run_idle_discovery(); });
+    }
 }
 
 ExecutiveController::~ExecutiveController() {
+    discovery_stop_.store(true, std::memory_order_release);
+    discovery_cv_.notify_all();
     std::unique_ptr<std::thread> thread_to_join;
+    std::unique_ptr<std::thread> discovery_to_join;
     std::vector<std::future<StepResult>> step_futures;
     std::vector<std::future<StepResult>> preload_futures;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stop_requested_ = true;
         thread_to_join = std::move(loop_thread_);
+        discovery_to_join = std::move(discovery_thread_);
         step_futures = std::move(active_step_futures_);
         preload_futures = std::move(prefetch_futures_);
         active_step_ids_.clear();
@@ -348,6 +356,9 @@ ExecutiveController::~ExecutiveController() {
     }
     if (thread_to_join && thread_to_join->joinable()) {
         thread_to_join->join();
+    }
+    if (discovery_to_join && discovery_to_join->joinable()) {
+        discovery_to_join->join();
     }
     for (auto& fut : step_futures) {
         if (fut.valid()) {
@@ -472,6 +483,9 @@ private:
 std::string ExecutiveController::execute_goal(const std::string& goal,
                                               const BenchmarkAttribution& benchmark,
                                               const std::string& mtcp_task_id) {
+    // Admit before joining the previous loop so a newer goal keeps foreground
+    // priority while that loop exits.
+    ForegroundAdmission admission;
     // Join any prior loop outside the lock (same pattern as ~ExecutiveController).
     // Never unlock while a std::lock_guard still owns the mutex.
     {
@@ -568,9 +582,7 @@ std::string ExecutiveController::execute_goal(const std::string& goal,
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        loop_thread_ = std::make_unique<std::thread>([this]() {
-            run_loop();
-        });
+        start_admitted_loop_unlocked(admission, false, false);
     }
     return "GOAL ACCEPTED: " + goal;
 }
@@ -612,6 +624,7 @@ bool ExecutiveController::is_running() const {
 }
 
 void ExecutiveController::resume_from_plan(const Plan& plan) {
+    ForegroundAdmission admission;
     {
         std::unique_ptr<std::thread> thread_to_join;
         {
@@ -721,16 +734,12 @@ void ExecutiveController::resume_from_plan(const Plan& plan) {
         });
     }
     if (continueReflection) {
-        continue_pending_reflection();
+        continue_pending_reflection(&admission);
         return;
     }
     if (startLoop) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!stop_requested_ && !loop_thread_) {
-            loop_thread_ = std::make_unique<std::thread>([this]() {
-                run_loop();
-            });
-        }
+        start_admitted_loop_unlocked(admission, true, false);
     }
     if (finishHistoryTail) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -897,6 +906,206 @@ int ExecutiveController::get_current_step_index() const {
     return static_cast<int>(current_plan_.current_index);
 }
 
+bool ExecutiveController::start_admitted_loop_unlocked(ForegroundAdmission& admission,
+                                                      bool honor_stop,
+                                                      bool mark_running) {
+    if (loop_thread_) return false;
+    if (honor_stop && stop_requested_) return false;
+    if (mark_running) running_ = true;
+    loop_thread_ = std::make_unique<std::thread>([this]() {
+        struct Exit {
+            ~Exit() { cm1ForegroundGoalCount().fetch_sub(1, std::memory_order_acq_rel); }
+        } exit;
+        run_loop();
+    });
+    admission.handToLoop();
+    return true;
+}
+
+void ExecutiveController::wait_for_discovery_stop(std::chrono::milliseconds budget) {
+    std::unique_lock<std::mutex> lock(discovery_wait_mutex_);
+    discovery_cv_.wait_for(lock, budget, [this] {
+        return discovery_stop_.load(std::memory_order_acquire);
+    });
+}
+
+namespace {
+
+constexpr std::chrono::milliseconds kDiscoveryIdleWait{1000};
+constexpr std::chrono::milliseconds kDiscoveryForegroundWait{50};
+
+/** Worker-local only. THOTH_CM1_DISCOVERY_RETRY_MS overrides the 60s default. */
+std::chrono::milliseconds discoveryRetryCooldown() {
+    constexpr int kDefaultMs = 60000;
+    const char* env = std::getenv("THOTH_CM1_DISCOVERY_RETRY_MS");
+    if (!env || !*env) return std::chrono::milliseconds(kDefaultMs);
+    try {
+        const int parsed = std::stoi(env);
+        if (parsed > 0) return std::chrono::milliseconds(parsed);
+    } catch (...) {
+    }
+    return std::chrono::milliseconds(kDefaultMs);
+}
+
+} // namespace
+
+void ExecutiveController::run_idle_discovery() {
+    // One in-flight discovery HTTP call cannot be cancelled. The goal waits on
+    // llmMutex until that call returns. cm1DiscoveryTimeoutSeconds bounds it.
+    // retrieveChunks can observe a prefix of a file that indexFile is still
+    // publishing. This worker does not change that publication.
+    // Claims that store no row wait out discoveryRetryCooldown before another
+    // model call. A yield is not one of those attempts.
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> retry_after;
+    while (!discovery_stop_.load(std::memory_order_acquire)) {
+        if (!Thoth::cm1CorroborationEnabled()) {
+            wait_for_discovery_stop(kDiscoveryIdleWait);
+            continue;
+        }
+        if (Thoth::cm1ForegroundWorkActive()) {
+            wait_for_discovery_stop(kDiscoveryForegroundWait);
+            continue;
+        }
+
+        LLMInterface* llm = nullptr;
+        IndexManager* index = nullptr;
+        std::shared_ptr<Thoth::MemoryRepository> repository;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            llm = llm_interface_;
+            if (memory_) repository = memory_->getRepo();
+            if (rag_) index = rag_->getIndexManager();
+        }
+        if (!llm || !index || !repository
+            || discovery_stop_.load(std::memory_order_acquire)
+            || !Thoth::cm1CorroborationEnabled()
+            || Thoth::cm1ForegroundWorkActive()) {
+            wait_for_discovery_stop(Thoth::cm1ForegroundWorkActive()
+                                        ? kDiscoveryForegroundWait
+                                        : kDiscoveryIdleWait);
+            continue;
+        }
+
+        std::vector<Thoth::Cm1DiscoveryCandidate> candidates;
+        try {
+            candidates = Thoth::selectCm1DiscoveryCandidates(*repository);
+        } catch (...) {
+            wait_for_discovery_stop(kDiscoveryIdleWait);
+            continue;
+        }
+        if (candidates.empty()) {
+            retry_after.clear();
+            wait_for_discovery_stop(kDiscoveryIdleWait);
+            continue;
+        }
+
+        {
+            std::unordered_set<std::string> live;
+            for (const auto& candidate : candidates) live.insert(candidate.claim_id);
+            for (auto it = retry_after.begin(); it != retry_after.end();) {
+                if (live.count(it->first) == 0) it = retry_after.erase(it);
+                else ++it;
+            }
+        }
+
+        bool yielded = false;
+        auto next_retry = std::chrono::steady_clock::time_point::max();
+        const auto cooldown = discoveryRetryCooldown();
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& candidate : candidates) {
+            if (discovery_stop_.load(std::memory_order_acquire)
+                || !Thoth::cm1CorroborationEnabled()) {
+                break;
+            }
+            if (Thoth::cm1ForegroundWorkActive()) {
+                yielded = true;
+                break;
+            }
+            const auto cooled = retry_after.find(candidate.claim_id);
+            if (cooled != retry_after.end() && now < cooled->second) {
+                if (cooled->second < next_retry) next_retry = cooled->second;
+                continue;
+            }
+
+            const int timeout_seconds = Thoth::cm1DiscoveryTimeoutSeconds();
+            Thoth::Cm1ClaimCorroborationResult result;
+            try {
+                result = Thoth::runCm1ClaimDiscovery(
+                    *index, *repository, candidate.answer_id, candidate.claim_id,
+                    candidate.answer_text,
+                    [this, llm](const std::string& prompt, int call_timeout_seconds) {
+                        Thoth::Cm1EvidenceCompletion completion;
+                        if (void (*probe)() = Thoth::cm1DiscoveryBeforeCallForTests().load(
+                                std::memory_order_acquire)) {
+                            probe();
+                        }
+                        if (discovery_stop_.load(std::memory_order_acquire)
+                            || Thoth::cm1ForegroundWorkActive()) {
+                            completion.ok = false;
+                            completion.error = Thoth::kCm1DiscoveryYieldError;
+                            return completion;
+                        }
+                        Thoth::Cm1DiscoveryYieldScope yield_scope;
+                        Thoth::GenerationCallContext call;
+                        call.call_type = "cm1_discovery";
+                        const Thoth::GenerationOutcome generated = llm->generateCall(
+                            prompt, Thoth::kCm1EvidenceNumPredict, {}, call, 0.0,
+                            static_cast<long>(std::max(1, call_timeout_seconds)));
+                        completion.called = true;
+                        completion.ok = generated.ok;
+                        if (generated.error == Thoth::kCm1DiscoveryYieldError) {
+                            completion.ok = false;
+                            completion.error = Thoth::kCm1DiscoveryYieldError;
+                        } else if (!generated.ok
+                                   && generated.error.find("Timeout was reached") != std::string::npos) {
+                            completion.error = "timeout";
+                        } else {
+                            completion.error = generated.error;
+                        }
+                        completion.text = generated.text;
+                        completion.finish_reason = generated.finish_reason;
+                        completion.generation_id = generated.generation_id;
+                        return completion;
+                    },
+                    nowMs(), timeout_seconds);
+            } catch (...) {
+                const auto when = std::chrono::steady_clock::now() + cooldown;
+                retry_after[candidate.claim_id] = when;
+                if (when < next_retry) next_retry = when;
+                continue;
+            }
+            if (result.reason == "yielded") {
+                yielded = true;
+                break;
+            }
+            if (!result.wrote) {
+                const auto when = std::chrono::steady_clock::now() + cooldown;
+                retry_after[candidate.claim_id] = when;
+                if (when < next_retry) next_retry = when;
+            } else {
+                retry_after.erase(candidate.claim_id);
+            }
+        }
+
+        if (yielded) {
+            while (!discovery_stop_.load(std::memory_order_acquire)
+                   && Thoth::cm1ForegroundWorkActive()) {
+                wait_for_discovery_stop(kDiscoveryForegroundWait);
+            }
+            continue;
+        }
+
+        auto delay = kDiscoveryIdleWait;
+        if (next_retry != std::chrono::steady_clock::time_point::max()) {
+            const auto remain = std::chrono::duration_cast<std::chrono::milliseconds>(
+                next_retry - std::chrono::steady_clock::now());
+            if (remain < delay) delay = remain;
+        }
+        if (delay.count() < 0) delay = std::chrono::milliseconds(0);
+        wait_for_discovery_stop(delay);
+    }
+}
+
 void ExecutiveController::run_loop() {
     while (!stop_requested_) {
         bool should_pause = false;
@@ -1001,7 +1210,7 @@ void ExecutiveController::decide_transition() {
         if (!any_unfinished && active_step_futures_.empty()) {
             if (current_plan_.reflection_pending) {
                 lock.unlock();
-                continue_pending_reflection();
+                continue_pending_reflection(nullptr);
                 return;
             }
 
@@ -1034,7 +1243,7 @@ void ExecutiveController::decide_transition() {
                 auto reflection_meta = log_reflection_replan(score, reflection_count_);
                 lock.unlock();
                 emit_event(EventType::REFLECTION_REPLAN, "", reflection_meta);
-                continue_pending_reflection();
+                continue_pending_reflection(nullptr);
                 return;
             }
 
@@ -1834,7 +2043,7 @@ bool ExecutiveController::commit_history_aging_unlocked() {
     return true;
 }
 
-void ExecutiveController::continue_pending_reflection() {
+void ExecutiveController::continue_pending_reflection(ForegroundAdmission* admission) {
     std::string reflection_goal;
     std::string plannerSessionId;
     std::string reflectionTask;
@@ -1918,7 +2127,9 @@ void ExecutiveController::continue_pending_reflection() {
             memory_->deleteActivePlan(retiredPlanId);
         }
         transition_to_unlocked(ControllerState::IDLE);
-        if (!stop_requested_ && !loop_thread_) {
+        if (admission) {
+            start_admitted_loop_unlocked(*admission, true, true);
+        } else if (!stop_requested_ && !loop_thread_) {
             running_ = true;
             loop_thread_ = std::make_unique<std::thread>([this]() { run_loop(); });
         }

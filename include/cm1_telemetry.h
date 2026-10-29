@@ -431,10 +431,30 @@ class MemoryRepository;
 bool cm1CorroborationEnabled();
 
 /**
+ * HTTP budget for one idle discovery model call.
+ * THOTH_CM1_DISCOVERY_TIMEOUT_SECONDS overrides the 30-second default.
+ * A missing, non-positive, or unreadable value keeps that default.
+ * The shared generation budget still caps the value passed to libcurl.
+ *
+ * A discovery request that has already entered the inference client cannot be
+ * cancelled. The next goal waits for that request, bounded by this timeout.
+ * Discovery retrieval can also see a partially published index. Publication
+ * stays one chunk at a time, and isIndexing() is false while the current
+ * file is inside indexFile.
+ *
+ * A discovery attempt that stores no corroboration row is not sent to the
+ * model again until THOTH_CM1_DISCOVERY_RETRY_MS elapses. The default is
+ * 60 seconds. A missing, non-positive, or unreadable value keeps that
+ * default. The wait is worker-local. A yield does not start it.
+ */
+int cm1DiscoveryTimeoutSeconds();
+
+/**
  * Assess one stored claim against caller-supplied passages.
  * Does not retrieve, re-segment, or change the evidence judgment.
  * A disabled writer returns without reading the model.
- * Timeout, invalid output, ambiguous evidence, and no eligible passage write nothing.
+ * Timeout, invalid output, ambiguous evidence, a discovery yield, and no
+ * eligible passage write nothing.
  */
 Cm1ClaimCorroborationResult runCm1ClaimCorroboration(
     MemoryRepository& repository,

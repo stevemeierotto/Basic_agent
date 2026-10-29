@@ -31,10 +31,13 @@
 #include "benchmark_environment.h"
 #include "episode_events.h"
 #include "episodic_learning_eval.h"
+#include "cm1_foreground.h"
 
 class LLMInterface;
 #include <thread>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <unordered_map>
 
@@ -170,7 +173,35 @@ protected:
     nlohmann::json store_plan_history(float success_score);
     bool reinforce_plan_graph();
     bool commit_history_aging_unlocked();
-    void continue_pending_reflection();
+    /**
+     * One accepted goal. The loop thread drops the count when it exits.
+     * handToLoop gives the loop that duty. Any return before that drops it here.
+     */
+    class ForegroundAdmission {
+    public:
+        ForegroundAdmission() {
+            cm1ForegroundGoalCount().fetch_add(1, std::memory_order_acq_rel);
+        }
+        ~ForegroundAdmission() {
+            if (armed_) {
+                cm1ForegroundGoalCount().fetch_sub(1, std::memory_order_acq_rel);
+            }
+        }
+        ForegroundAdmission(const ForegroundAdmission&) = delete;
+        ForegroundAdmission& operator=(const ForegroundAdmission&) = delete;
+        void handToLoop() { armed_ = false; }
+
+    private:
+        bool armed_ = true;
+    };
+
+    void continue_pending_reflection(ForegroundAdmission* admission = nullptr);
+    /** Caller holds mutex_. The new loop drops the admission count on exit. */
+    bool start_admitted_loop_unlocked(ForegroundAdmission& admission,
+                                      bool honor_stop,
+                                      bool mark_running);
+    void run_idle_discovery();
+    void wait_for_discovery_stop(std::chrono::milliseconds budget);
     void capture_working_trajectory_unlocked(Plan& plan) const;
     void bind_active_sets_to_plan_unlocked(const std::string& plan_id);
     void clear_owned_active_sets_unlocked();
@@ -329,6 +360,12 @@ protected:
     /** E2 A4: arm-scoped STRICT eval context (null outside eval harness). */
     const SealedEpisodeInjectionLog* e2_strict_episode_log_ = nullptr;
     const E2EvalConfig* e2_eval_config_ = nullptr;
+
+    /** Idle corroboration. Started only when THOTH_CM1_CORROBORATION is on. */
+    std::atomic<bool> discovery_stop_{false};
+    std::mutex discovery_wait_mutex_;
+    std::condition_variable discovery_cv_;
+    std::unique_ptr<std::thread> discovery_thread_;
 };
 
 } // namespace Thoth
