@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <unordered_set>
 #include <map>
 #include <shared_mutex>
 #include <mutex>
@@ -422,9 +423,21 @@ size_t IndexManager::chunkCount() const {
 void IndexManager::enforceMemoryLimits() {
     std::unique_lock lock(chunksMutex);
     if (chunks.size() > MAX_CHUNKS || getCurrentMemoryUsage() > MAX_TOTAL_SIZE) {
-        size_t toRemove = chunks.size() / 5;
-        chunks.erase(chunks.begin(), chunks.begin() + toRemove);
-        rebuildInternalStructures();
+        const size_t toRemove = std::min(chunks.size() / 5, chunks.size());
+        std::unordered_set<std::string> evictedFiles;
+        for (size_t i = 0; i < toRemove; ++i) {
+            evictedFiles.insert(chunks[i].fileName);
+        }
+        chunks.erase(chunks.begin(), chunks.begin() + static_cast<std::ptrdiff_t>(toRemove));
+        for (const auto& fileName : evictedFiles) {
+            const bool stillPresent = std::any_of(
+                chunks.begin(), chunks.end(),
+                [&](const CodeChunk& chunk) { return chunk.fileName == fileName; });
+            if (!stillPresent) {
+                indexedFileFingerprints.erase(fileName);
+            }
+        }
+        rebuildInternalStructuresUnlocked();
     }
 }
 
