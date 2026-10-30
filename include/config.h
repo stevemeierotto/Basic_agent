@@ -15,7 +15,7 @@ public:
     double similarity_threshold =0.6;
     std::string similarity_metric = "cosine";  // "cosine", "dot", "euclidean", "jaccard"
 
-    std::string llm_model = "qwen2.5:3b";
+    std::string llm_model = "chat-model";
     std::string embedding_model = "nomic-embed-text:v1.5";
 
     /** Inference service origins (env vars take precedence over these). */
