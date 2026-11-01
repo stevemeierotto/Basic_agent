@@ -66,6 +66,8 @@ struct StepExecutionContext {
     /** E2 A4: evaluation-only STRICT kernel context (injected by harness; null in production). */
     const SealedEpisodeInjectionLog* e2_strict_episode_log = nullptr;
     const E2EvalConfig* e2_eval_config = nullptr;
+    /** Resolved evidence directory for one fixed-evidence goal. Empty for production retrieval. */
+    std::vector<std::string> fixed_evidence_roots;
 };
 
 /**

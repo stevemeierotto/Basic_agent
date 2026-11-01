@@ -13,6 +13,7 @@
 #include "runtime_bootstrap.h"
 #include "embedding_engine.h"
 #include "executive_controller.h"
+#include "workspace_index_run.h"
 #include "default_planner.h"
 #include "iplanner.h"
 #include "prompt_factory.h"
@@ -60,6 +61,17 @@ public:
             controller->execute_goal(goal, benchmark, task_id);
         }
     }
+
+    /** One-shot EGAR-LX path. Does not use execute_goal. */
+    bool runFixedEvidenceGoal(const std::string& goal,
+                              const std::string& evidence_directory,
+                              std::string& error,
+                              std::string& terminal_state);
+
+    /** One-shot GRAG directory index. Does not execute a goal. */
+    bool indexWorkspaceDirectory(const std::string& path,
+                                 std::string& error,
+                                 Thoth::WorkspaceIndexResult& result);
 
     /** MTCP — production revise_plan with a frozen plan. Empty when the planner is absent. */
     nlohmann::json revisePlanForMtcp(const nlohmann::json& plan_json,

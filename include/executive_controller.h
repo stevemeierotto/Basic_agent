@@ -74,7 +74,16 @@ public:
     // Primary entry point — drives the full goal to completion
     std::string execute_goal(const std::string& goal,
                              const BenchmarkAttribution& benchmark = {},
-                             const std::string& mtcp_task_id = {});
+                             const std::string& mtcp_task_id = {},
+                             const std::vector<std::string>& fixed_evidence_roots = {});
+
+    /** EGAR-LX fixed-evidence entry. Requires an existing evidence directory.
+     *  Enables containment, then execute_goal with that directory's retrieval scope.
+     *  Production Run, /goal, and chat do not use this entry. */
+    std::string execute_fixed_evidence_goal(const std::string& goal,
+                                            const std::string& evidence_directory,
+                                            const BenchmarkAttribution& benchmark = {},
+                                            const std::string& mtcp_task_id = {});
 
     /** E2 evaluation harness only — inject STRICT kernel context for RETRIEVAL dispatch (A4). */
     void set_e2_strict_eval_context(const SealedEpisodeInjectionLog* episode_log,
@@ -302,6 +311,8 @@ protected:
     int max_reflections_ = Reflection::kMaxReflections;
     std::string reflection_skip_reason_;
     std::string session_id_;
+    /** Set only for the fixed-evidence goal in this loop. Cleared when the loop exits. */
+    std::vector<std::string> fixed_evidence_roots_;
     bool plan_reused_ = false;
     BenchmarkAttribution benchmark_attribution_;
     Thoth::IEpisodeEventChannel* episode_event_channel_ = nullptr;

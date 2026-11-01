@@ -36,6 +36,9 @@ struct RetrievalScope {
     std::vector<std::string> allowed_tiers;
     std::vector<std::string> selected_documents;
     std::vector<std::string> excluded_documents;
+    /** Resolved directories for one fixed-evidence goal. Empty on production scopes.
+     *  legacy_orphan chunks pass only when a resolved path is inside one of these. */
+    std::vector<std::string> authorized_evidence_roots;
     /** ALP-F — session-link filter active (populated once at scope resolve). */
     bool alp_session_link_filter = false;
     std::vector<std::string> linked_document_ids;
@@ -60,6 +63,21 @@ RetrievalScope resolveAgentContextRetrievalScope(const std::string& active_conte
 
 /** TCB-R4 — harness / Plan L explicit benchmark tier. */
 RetrievalScope resolveBenchmarkExplicitScope();
+
+/**
+ * Production Agent Context scope plus legacy_orphan limited to authorized_evidence_roots.
+ * An empty root list admits no legacy_orphan chunk. Session, benchmark, and
+ * system_reference rules stay those of resolveAgentContextRetrievalScope.
+ */
+RetrievalScope resolveFixedEvidenceRetrievalScope(
+    const std::string& active_context_key,
+    const IndexManager* indexManager,
+    const std::vector<std::string>& authorized_evidence_roots);
+
+/** Existing directory, symlink resolved. Empty, missing, or non-directory fails. */
+bool resolveAuthorizedEvidenceDirectory(const std::string& path,
+                                        std::string& resolved,
+                                        std::string& error);
 
 bool chunkPassesRetrievalScope(const CodeChunk& chunk, const RetrievalScope& scope);
 

@@ -8,6 +8,7 @@
 #pragma once
 
 #include "controller_event.h"
+#include "workspace_index_run.h"
 #include "engine_event.h"
 #include "corpus_create.h"
 #include "json.hpp"
@@ -51,6 +52,23 @@ public:
     std::future<std::string> submitGoal(const std::string& session_id,
                                         const std::string& goal,
                                         const std::string& task_id = {});
+
+    /**
+     * One-shot EGAR-LX goal. Calls execute_fixed_evidence_goal and waits for
+     * a terminal state. Does not use submitGoal, submitChat, or HTTP.
+     */
+    bool runFixedEvidenceGoal(const std::string& goal,
+                              const std::string& evidence_directory,
+                              std::string& error,
+                              std::string& terminal_state);
+
+    /**
+     * One-shot GRAG index of one workspace directory. Does not use submitGoal,
+     * submitChat, or fixed-evidence containment.
+     */
+    bool indexWorkspaceDirectory(const std::string& path,
+                                 std::string& error,
+                                 WorkspaceIndexResult& result);
     nlohmann::json revisePlanForMtcp(const nlohmann::json& plan_json,
                                      const nlohmann::json& failed_step_result,
                                      const std::string& task_id = {});

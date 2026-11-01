@@ -10,6 +10,7 @@
 
 #include "json.hpp"
 #include "plan.h"
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -35,6 +36,79 @@ inline std::pair<std::string, std::string> splitPlanReuseInjection(const std::st
 inline std::string cleanGoalForStorage(const std::string& goal) {
     auto [clean, _] = splitPlanReuseInjection(goal);
     return clean;
+}
+
+inline bool isAsciiSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+/** A line whose trimmed text is exactly "Problem:", not a longer line that contains it. */
+inline bool isStandaloneProblemLine(const std::string& line) {
+    std::size_t begin = 0;
+    std::size_t end = line.size();
+    while (begin < end && (line[begin] == ' ' || line[begin] == '\t')) {
+        ++begin;
+    }
+    while (end > begin && (line[end - 1] == ' ' || line[end - 1] == '\t' || line[end - 1] == '\r')) {
+        --end;
+    }
+    static const char kMarker[] = "Problem:";
+    constexpr std::size_t kLen = sizeof(kMarker) - 1;
+    return (end - begin) == kLen && line.compare(begin, kLen, kMarker) == 0;
+}
+
+/**
+ * Text after the first standalone Problem: line.
+ * Empty or whitespace-only sections are not a case excerpt.
+ */
+inline std::optional<std::string> standaloneProblemSection(const std::string& text) {
+    std::size_t lineStart = 0;
+    while (lineStart <= text.size()) {
+        const std::size_t newline = text.find('\n', lineStart);
+        const std::size_t lineEnd = newline == std::string::npos ? text.size() : newline;
+        if (isStandaloneProblemLine(text.substr(lineStart, lineEnd - lineStart))) {
+            const std::size_t contentStart = newline == std::string::npos ? text.size() : newline + 1;
+            const std::string rest = text.substr(contentStart);
+            std::size_t begin = 0;
+            std::size_t end = rest.size();
+            while (begin < end && isAsciiSpace(rest[begin])) {
+                ++begin;
+            }
+            while (end > begin && isAsciiSpace(rest[end - 1])) {
+                --end;
+            }
+            if (begin >= end) {
+                return std::nullopt;
+            }
+            return rest.substr(begin, end - begin);
+        }
+        if (newline == std::string::npos) {
+            break;
+        }
+        lineStart = newline + 1;
+    }
+    return std::nullopt;
+}
+
+/**
+ * Planner trajectory block.
+ * A nonempty standalone Problem: section is placed after the header and stored
+ * success score so the existing front truncation keeps the case text.
+ * Every other goal keeps the historical Goal-then-Success layout.
+ */
+inline std::string formatTrajectoryInjection(const std::string& goal, float success_score) {
+    const std::string cleaned = cleanGoalForStorage(goal);
+    std::ostringstream oss;
+    oss << "[PAST EXPERIENCE — RELEVANT TRAJECTORY]\n";
+    const std::optional<std::string> problem = standaloneProblemSection(cleaned);
+    if (problem.has_value()) {
+        oss << "  Success: " << success_score << "\n";
+        oss << "- Case: " << *problem << "\n";
+    } else {
+        oss << "- Goal: " << cleaned << "\n";
+        oss << "  Success: " << success_score << "\n";
+    }
+    return oss.str();
 }
 
 /** Truncate injection text with an explicit marker (never silent cut). */

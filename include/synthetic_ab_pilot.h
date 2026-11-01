@@ -1,0 +1,148 @@
+/*
+ * Copyright (c) 2026 Steve Meierotto
+ *
+ * Thoth — synthetic EGAR-LX A/B orchestration
+ *
+ * Mechanical pilot only. It does not collect historical cases or score diagnoses.
+ *
+ * Licensed under the MIT License (see LICENSE in project root)
+ */
+#ifndef THOTH_SYNTHETIC_AB_PILOT_H
+#define THOTH_SYNTHETIC_AB_PILOT_H
+
+#include "memory_snapshot.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace Thoth {
+
+enum class SyntheticExecution {
+    Mock,
+    Live
+};
+
+struct HashedFile {
+    std::string label;
+    std::string sha256;
+};
+
+/** Model identity reported by a running inference service. Not a file hash. */
+struct ServiceModelIdentity {
+    std::string role;
+    std::string id;
+    int n_embd = 0;
+    std::int64_t size = 0;
+    std::string ftype;
+
+    bool operator==(const ServiceModelIdentity& other) const {
+        return role == other.role && id == other.id && n_embd == other.n_embd
+            && size == other.size && ftype == other.ftype;
+    }
+};
+
+/** Identity recorded for one evaluation arm and compared with the other arm. */
+struct ArmIdentity {
+    std::string engine_binary_sha256;
+    std::string engine_library_sha256;
+    std::string engine_image_digest;
+    std::string retrieval_config_sha256;
+    std::vector<HashedFile> model_files;
+    std::vector<ServiceModelIdentity> service_models;
+    std::vector<HashedFile> evidence_files;
+    std::vector<HashedFile> goal_files;
+};
+
+struct EngineProcessStatus {
+    bool exited = false;
+    bool timed_out = false;
+    int exit_code = -1;
+};
+
+struct SyntheticCase {
+    std::string name;
+    std::string goal_text;
+    std::string evidence_name;
+    std::string evidence_text;
+};
+
+struct SyntheticAbRequest {
+    std::string engine_binary;
+    std::string work_root;
+    std::string retrieval_config_path;
+    std::string engine_image = "thoth-engine:local";
+    SyntheticExecution execution = SyntheticExecution::Mock;
+    std::string inference_backend = "llama_cpp";
+    std::string inference_base_url = "http://127.0.0.1:8080";
+    std::string embed_base_url = "http://127.0.0.1:8081";
+    bool require_engine_image = false;
+    std::vector<std::string> model_files;
+    std::vector<SyntheticCase> acquisition;
+    std::vector<SyntheticCase> evaluation;
+    int engine_timeout_seconds = 45;
+};
+
+struct SyntheticAbReport {
+    std::string execution = "mock";
+    std::string acquisition_sha256;
+    ExperienceTableCounts acquisition_counts;
+    std::string empty_experience_sha256;
+    std::string frozen_sha256_after_evaluation;
+    bool frozen_unchanged = false;
+    bool identities_match = false;
+    bool engine_image_verified = false;
+    std::string engine_image_digest;
+    std::string engine_library_path;
+    std::string engine_library_sha256;
+    std::vector<ServiceModelIdentity> service_models;
+    ArmIdentity arm_a;
+    ArmIdentity arm_b;
+    std::string report_path;
+};
+
+bool armIdentitiesMatch(const ArmIdentity& arm_a,
+                         const ArmIdentity& arm_b,
+                         std::string& error);
+
+/**
+ * Live identity. Compares the executable, the library the loader resolves,
+ * and server-reported model records. An unavailable image digest is not a
+ * match. It is required only when require_engine_image is true.
+ */
+bool liveArmIdentitiesMatch(const ArmIdentity& arm_a,
+                             const ArmIdentity& arm_b,
+                             bool require_engine_image,
+                             std::string& error);
+
+/**
+ * Ask the dynamic loader which libbasic_agent.so this executable loads.
+ * Fails when that path cannot be established.
+ */
+bool resolveLoadedAgentLibrary(const std::string& engine_binary,
+                               std::string& library_path,
+                               std::string& error);
+
+/**
+ * Snapshot only after a clean engine exit. A live, timed-out, or failed
+ * process is refused before the source database is copied.
+ */
+bool snapshotAfterEngineExit(const EngineProcessStatus& status,
+                             const std::string& source_database,
+                             const std::string& snapshot_directory,
+                             const ExperienceTableCounts* required_counts,
+                             MemorySnapshot& snapshot,
+                             std::string& error);
+
+/**
+ * Run sequential synthetic acquisition goals, freeze one experience snapshot,
+ * then evaluate each synthetic case on a fresh empty Arm A database and an
+ * independent Arm B copy of that snapshot.
+ */
+bool runSyntheticAbPilot(const SyntheticAbRequest& request,
+                         SyntheticAbReport& report,
+                         std::string& error);
+
+} // namespace Thoth
+
+#endif

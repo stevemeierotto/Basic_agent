@@ -363,6 +363,62 @@ std::future<std::string> EngineRuntime::submitGoal(const std::string& session_id
     return future;
 }
 
+bool EngineRuntime::runFixedEvidenceGoal(const std::string& goal,
+                                        const std::string& evidence_directory,
+                                        std::string& error,
+                                        std::string& terminal_state) {
+    terminal_state.clear();
+    if (!isReady() || !impl_ || !impl_->plugin) {
+        error = "Engine is not ready.";
+        return false;
+    }
+
+    auto promise = std::make_shared<std::promise<bool>>();
+    std::future<bool> future = promise->get_future();
+    try {
+        impl_->enqueue([this, goal, evidence_directory, &error, &terminal_state, promise]() {
+            try {
+                const bool ok = impl_->plugin->runFixedEvidenceGoal(
+                    goal, evidence_directory, error, terminal_state);
+                promise->set_value(ok);
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+            }
+        });
+    } catch (const EngineException& ex) {
+        error = ex.error().message;
+        return false;
+    }
+    return future.get();
+}
+
+bool EngineRuntime::indexWorkspaceDirectory(const std::string& path,
+                                           std::string& error,
+                                           WorkspaceIndexResult& result) {
+    result = WorkspaceIndexResult{};
+    if (!isReady() || !impl_ || !impl_->plugin) {
+        error = "Engine is not ready.";
+        return false;
+    }
+
+    auto promise = std::make_shared<std::promise<bool>>();
+    std::future<bool> future = promise->get_future();
+    try {
+        impl_->enqueue([this, path, &error, &result, promise]() {
+            try {
+                const bool ok = impl_->plugin->indexWorkspaceDirectory(path, error, result);
+                promise->set_value(ok);
+            } catch (...) {
+                promise->set_exception(std::current_exception());
+            }
+        });
+    } catch (const EngineException& ex) {
+        error = ex.error().message;
+        return false;
+    }
+    return future.get();
+}
+
 nlohmann::json EngineRuntime::revisePlanForMtcp(const nlohmann::json& plan_json,
                                                    const nlohmann::json& failed_step_result,
                                                    const std::string& task_id) {

@@ -6,9 +6,12 @@
  * Licensed under the MIT License (see LICENSE in project root)
  */
 
+#include "../include/agent_context_retrieval.h"
 #include "../include/engine_http_transport.h"
 #include "../include/engine_runtime.h"
+#include "../include/fixed_evidence_goal_run.h"
 #include "../include/runtime_bootstrap.h"
+#include "../include/workspace_index_run.h"
 
 #include <atomic>
 #include <chrono>
@@ -77,13 +80,44 @@ bool stopRequested() {
 void printUsage(std::ostream& out) {
     out << "Usage: thoth-engine [--help] [--version]\n"
         << "       thoth-engine --execute \"<prompt>\"\n"
+        << "       thoth-engine --fixed-evidence-goal PATH --evidence-directory DIR\n"
+        << "       thoth-engine --index-directory PATH\n"
         << "       thoth-engine --serve [--bind HOST] [--port PORT]\n"
         << "       thoth-engine\n"
         << "\n"
         << "Modes:\n"
-        << "  (default)   Read prompts from stdin until EOF or SIGINT\n"
-        << "  --execute   Process one prompt and exit\n"
-        << "  --serve     Run HTTP API server (Plan F)\n"
+        << "  (default)                 Read prompts from stdin until EOF or SIGINT\n"
+        << "  --execute                 Process one chat prompt and exit\n"
+        << "  --fixed-evidence-goal     Read one local goal file, run\n"
+        << "                            execute_fixed_evidence_goal, and exit\n"
+        << "  --evidence-directory      Authorized evidence directory for that goal\n"
+        << "  --index-directory         Index one workspace directory, save\n"
+        << "                            rag_index.bin, and exit\n"
+        << "  --serve                   Run HTTP API server (Plan F)\n"
+        << "\n"
+        << "Fixed-evidence goal:\n"
+        << "  PATH is one local file. DIR is an existing directory; a symlink to a\n"
+        << "  directory is resolved. legacy_orphan chunks are admitted only under\n"
+        << "  that directory. An absent or invalid DIR exits before the engine\n"
+        << "  starts. The process uses THOTH_WORKSPACE_PATH and the existing\n"
+        << "  inference environment, writes the usual workspace logs, and exits.\n"
+        << "  One goal per process. Do not combine with --serve or --execute.\n"
+        << "  A one-shot container attaches to an existing llama network. Example:\n"
+        << "    docker run --rm --network <llama-network> \\\n"
+        << "      -e THOTH_WORKSPACE_PATH=/workspace -e THOTH_LOGS_PATH=/logs \\\n"
+        << "      -e THOTH_INFERENCE_BACKEND=llama_cpp \\\n"
+        << "      -e THOTH_INFERENCE_BASE_URL=http://llama-server:8080 \\\n"
+        << "      -e THOTH_EMBED_BASE_URL=http://llama-embed-server:8081 \\\n"
+        << "      -e THOTH_LLM_TIMEOUT_SECONDS=900 \\\n"
+        << "      -v <workspace>:/workspace -v <goal-file>:/goal.txt:ro \\\n"
+        << "      -v <evidence>:/evidence:ro \\\n"
+        << "      thoth-engine:local --fixed-evidence-goal /goal.txt --evidence-directory /evidence\n"
+        << "\n"
+        << "Workspace index:\n"
+        << "  PATH must be a directory inside THOTH_WORKSPACE_PATH. The resolved\n"
+        << "  directory and every symlink target under it must stay inside that\n"
+        << "  workspace. The process loads the existing GRAG index, indexes PATH,\n"
+        << "  saves rag_index.bin, and exits. It does not run a goal.\n"
         << "\n"
         << "HTTP server options (--serve):\n"
         << "  --bind HOST   Bind address (default: 127.0.0.1)\n"
@@ -103,6 +137,9 @@ struct CliOptions {
     bool showVersion = false;
     bool serve = false;
     std::optional<std::string> executePrompt;
+    std::optional<std::string> fixedEvidenceGoal;
+    std::optional<std::string> evidenceDirectory;
+    std::optional<std::string> indexDirectory;
     Thoth::EngineHttpConfig http_config = Thoth::engineHttpConfigFromEnvironment();
     bool error = false;
 };
@@ -163,6 +200,48 @@ CliOptions parseArgs(int argc, char** argv) {
             options.executePrompt = argv[++i];
             continue;
         }
+        if (arg == "--fixed-evidence-goal") {
+            if (options.fixedEvidenceGoal) {
+                std::cerr << "thoth-engine: one goal file per process\n";
+                options.error = true;
+                return options;
+            }
+            if (i + 1 >= argc) {
+                std::cerr << "thoth-engine: --fixed-evidence-goal requires a file path\n";
+                options.error = true;
+                return options;
+            }
+            options.fixedEvidenceGoal = argv[++i];
+            continue;
+        }
+        if (arg == "--evidence-directory") {
+            if (options.evidenceDirectory) {
+                std::cerr << "thoth-engine: one evidence directory per process\n";
+                options.error = true;
+                return options;
+            }
+            if (i + 1 >= argc) {
+                std::cerr << "thoth-engine: --evidence-directory requires a directory path\n";
+                options.error = true;
+                return options;
+            }
+            options.evidenceDirectory = argv[++i];
+            continue;
+        }
+        if (arg == "--index-directory") {
+            if (options.indexDirectory) {
+                std::cerr << "thoth-engine: one index directory per process\n";
+                options.error = true;
+                return options;
+            }
+            if (i + 1 >= argc) {
+                std::cerr << "thoth-engine: --index-directory requires a directory path\n";
+                options.error = true;
+                return options;
+            }
+            options.indexDirectory = argv[++i];
+            continue;
+        }
 
         std::cerr << "thoth-engine: unknown argument: " << arg << '\n';
         options.error = true;
@@ -171,6 +250,19 @@ CliOptions parseArgs(int argc, char** argv) {
 
     if (options.serve && options.executePrompt) {
         std::cerr << "thoth-engine: --serve cannot be combined with --execute\n";
+        options.error = true;
+    }
+    if (options.fixedEvidenceGoal && (options.serve || options.executePrompt)) {
+        std::cerr << "thoth-engine: --fixed-evidence-goal cannot be combined with --serve or --execute\n";
+        options.error = true;
+    }
+    if (options.indexDirectory
+        && (options.serve || options.executePrompt || options.fixedEvidenceGoal)) {
+        std::cerr << "thoth-engine: --index-directory cannot be combined with --serve, --execute, or --fixed-evidence-goal\n";
+        options.error = true;
+    }
+    if (options.evidenceDirectory && !options.fixedEvidenceGoal) {
+        std::cerr << "thoth-engine: --evidence-directory requires --fixed-evidence-goal\n";
         options.error = true;
     }
     return options;
@@ -197,13 +289,43 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (!options.executePrompt && !options.serve) {
+    if (!options.executePrompt && !options.serve && !options.fixedEvidenceGoal
+        && !options.indexDirectory) {
         installShutdownSignals();
     }
 
     sigset_t shutdown_signals {};
     if (options.serve) {
         blockShutdownSignals(shutdown_signals);
+    }
+
+    std::string fixed_goal;
+    std::string resolved_evidence_dir;
+    if (options.fixedEvidenceGoal) {
+        std::string error;
+        if (!Thoth::readFixedEvidenceGoalFile(*options.fixedEvidenceGoal, fixed_goal, error)) {
+            std::cerr << "[thoth-engine] " << error << '\n';
+            return 1;
+        }
+        if (!options.evidenceDirectory) {
+            std::cerr << "[thoth-engine] fixed-evidence goal requires --evidence-directory\n";
+            return 1;
+        }
+        if (!Thoth::resolveAuthorizedEvidenceDirectory(
+                *options.evidenceDirectory, resolved_evidence_dir, error)) {
+            std::cerr << "[thoth-engine] " << error << '\n';
+            return 1;
+        }
+    }
+
+    std::string resolved_index_dir;
+    if (options.indexDirectory) {
+        std::string error;
+        if (!Thoth::validateWorkspaceIndexDirectory(
+                *options.indexDirectory, error, resolved_index_dir)) {
+            std::cerr << "[thoth-engine] " << error << '\n';
+            return 1;
+        }
     }
 
     try {
@@ -245,6 +367,33 @@ int main(int argc, char** argv) {
             std::cerr << "[thoth-engine] shutting down" << std::endl;
             runtime->shutdown();
             std::cerr << "[thoth-engine] shutdown complete" << std::endl;
+            return 0;
+        }
+
+        if (options.indexDirectory) {
+            std::string error;
+            Thoth::WorkspaceIndexResult result;
+            if (!runtime->indexWorkspaceDirectory(resolved_index_dir, error, result)) {
+                std::cerr << "[thoth-engine] " << error << '\n';
+                runtime->shutdown();
+                return 1;
+            }
+            std::cout << Thoth::formatWorkspaceIndexStatus(result) << '\n';
+            runtime->shutdown();
+            return 0;
+        }
+
+        if (options.fixedEvidenceGoal) {
+            std::string error;
+            std::string terminal_state;
+            if (!runtime->runFixedEvidenceGoal(
+                    fixed_goal, resolved_evidence_dir, error, terminal_state)) {
+                std::cerr << "[thoth-engine] " << error << '\n';
+                runtime->shutdown();
+                return 1;
+            }
+            std::cout << "FIXED_EVIDENCE_GOAL " << terminal_state << '\n';
+            runtime->shutdown();
             return 0;
         }
 

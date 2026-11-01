@@ -8,6 +8,8 @@
 
 #include "../include/executive_controller.h"
 #include "../include/experience_provenance.h"
+#include "../include/agent_context_retrieval.h"
+#include "../include/fixed_evidence_containment.h"
 #include "../include/generation_call.h"
 #include "../include/llm_interface.h"
 #include "../include/logger.h"
@@ -482,7 +484,8 @@ private:
 
 std::string ExecutiveController::execute_goal(const std::string& goal,
                                               const BenchmarkAttribution& benchmark,
-                                              const std::string& mtcp_task_id) {
+                                              const std::string& mtcp_task_id,
+                                              const std::vector<std::string>& fixed_evidence_roots) {
     // Admit before joining the previous loop so a newer goal keeps foreground
     // priority while that loop exits.
     ForegroundAdmission admission;
@@ -568,6 +571,7 @@ std::string ExecutiveController::execute_goal(const std::string& goal,
         refresh_goal_state_embeddings_unlocked();
         persist_current_plan_unlocked();
 
+        fixed_evidence_roots_ = fixed_evidence_roots;
         state_ = ControllerState::IDLE;
         running_ = true;
     }
@@ -585,6 +589,20 @@ std::string ExecutiveController::execute_goal(const std::string& goal,
         start_admitted_loop_unlocked(admission, false, false);
     }
     return "GOAL ACCEPTED: " + goal;
+}
+
+std::string ExecutiveController::execute_fixed_evidence_goal(
+    const std::string& goal,
+    const std::string& evidence_directory,
+    const BenchmarkAttribution& benchmark,
+    const std::string& mtcp_task_id) {
+    std::string resolved;
+    std::string error;
+    if (!resolveAuthorizedEvidenceDirectory(evidence_directory, resolved, error)) {
+        return "FIXED_EVIDENCE_REJECTED: " + error;
+    }
+    FixedEvidenceContainment::enable();
+    return execute_goal(goal, benchmark, mtcp_task_id, {resolved});
 }
 
 void ExecutiveController::pause() {
@@ -1134,6 +1152,7 @@ void ExecutiveController::run_loop() {
     }
     
     std::lock_guard<std::mutex> lock(mutex_);
+    fixed_evidence_roots_.clear();
     running_ = false;
 }
 
@@ -1383,6 +1402,7 @@ void ExecutiveController::decide_transition() {
         execution_context.e2_eval_config = e2_eval_config_;
         execution_context.task_id = mtcp_task_id_;
         execution_context.session_id = session_id_;
+        execution_context.fixed_evidence_roots = fixed_evidence_roots_;
     }
 
     for (const auto& [step_id, cached] : prefetched_completions) {
@@ -1621,6 +1641,7 @@ nlohmann::json ExecutiveController::dispatch_step(PlanStep& step) {
         ctx.e2_eval_config = e2_eval_config_;
         ctx.task_id = mtcp_task_id_;
         ctx.session_id = session_id_;
+        ctx.fixed_evidence_roots = fixed_evidence_roots_;
         return ctx;
     }();
     auto result = workflow_engine_->executeStep(step, current_plan_.plan_id, context);
@@ -1920,13 +1941,38 @@ MemoryRepository::ActivePlanRecord activePlanRecordFrom(const Plan& plan,
     return rec;
 }
 
+void logGraphReinforcement(const std::string& plan_id,
+                           const char* outcome,
+                           const char* reason,
+                           int edge_count,
+                           bool score_applied,
+                           float success_score) {
+    nlohmann::json metadata = {
+        {"plan_id", plan_id},
+        {"outcome", outcome},
+        {"reason", reason},
+        {"edge_count", edge_count}
+    };
+    if (score_applied) {
+        metadata["success_score"] = success_score;
+    }
+    StructuredLogger::instance().log(
+        LogLevel::Info,
+        "controller",
+        "GRAPH_REINFORCEMENT",
+        "Graph reinforcement outcome",
+        metadata);
+}
+
 } // namespace
 
 bool ExecutiveController::reinforce_plan_graph() {
     if (!memory_ || current_plan_.plan_id.empty()) {
+        const std::string plan_id = current_plan_.plan_id;
         active_sets_.clear();
         active_sets_plan_id_.clear();
         retrieval_sets_memory_authoritative_ = true;
+        logGraphReinforcement(plan_id, "indeterminate", "unavailable", 0, false, 0.0f);
         return false;
     }
     if (current_plan_.graph_reinforced) {
@@ -1935,6 +1981,9 @@ bool ExecutiveController::reinforce_plan_graph() {
     }
 
     std::vector<Memory::Edge> reinforced;
+    bool score_applied = false;
+    float applied_score = 0.0f;
+    const bool refiner_missing = !graph_refiner_ && active_sets_.size() >= 2;
     if (graph_refiner_ && active_sets_.size() >= 2) {
         std::vector<Memory::Edge> trajectory_edges;
         for (size_t i = 0; i < active_sets_.size() - 1; ++i) {
@@ -1966,9 +2015,9 @@ bool ExecutiveController::reinforce_plan_graph() {
             }
         }
         if (!trajectory_edges.empty()) {
-            const float success_score =
-                (current_plan_.status == PlanStatus::COMPLETED) ? 1.0f : 0.0f;
-            reinforced = graph_refiner_->computeReinforcedEdges(trajectory_edges, success_score);
+            applied_score = (current_plan_.status == PlanStatus::COMPLETED) ? 1.0f : 0.0f;
+            score_applied = true;
+            reinforced = graph_refiner_->computeReinforcedEdges(trajectory_edges, applied_score);
         }
     }
 
@@ -1991,8 +2040,11 @@ bool ExecutiveController::reinforce_plan_graph() {
         durable.reflection_count = reflection_count_;
     }
 
+    const int edge_count = static_cast<int>(reinforced.size());
     if (!memory_->commitReinforcedPlan(
             reinforced, activePlanRecordFrom(durable, session_id_, state_to_name(state_)))) {
+        logGraphReinforcement(current_plan_.plan_id, "indeterminate", "failed_commit",
+                              edge_count, score_applied, applied_score);
         return false;
     }
 
@@ -2002,6 +2054,16 @@ bool ExecutiveController::reinforce_plan_graph() {
     }
     active_sets_.clear();
     retrieval_sets_memory_authoritative_ = true;
+    const char* outcome = "no_edge";
+    const char* reason = "no_eligible_edges";
+    if (refiner_missing) {
+        outcome = "indeterminate";
+        reason = "missing_refiner";
+    } else if (score_applied) {
+        outcome = (applied_score >= 0.8f) ? "reward" : "penalty";
+        reason = outcome;
+    }
+    logGraphReinforcement(current_plan_.plan_id, outcome, reason, edge_count, score_applied, applied_score);
     return true;
 }
 
@@ -3281,10 +3343,10 @@ std::string ExecutiveController::build_plan_reuse_context(const std::vector<Memo
             any = true;
         }
         oss << "- Plan ID: " << p.plan_id << "\n";
+        oss << "  Outline: " << Thoth::sanitizePlanOutline(p.outline) << "\n";
         oss << "  Goal: " << Thoth::cleanGoalForStorage(p.goal) << "\n";
         oss << "  Success: " << std::fixed << std::setprecision(2) << p.success_score;
         oss << " | Steps: " << countStepsFromOutline(p.outline) << "\n";
-        oss << "  Outline: " << Thoth::sanitizePlanOutline(p.outline) << "\n";
     }
     return oss.str();
 }

@@ -1,4 +1,6 @@
 #include "../include/basic_agent_plugin.h"
+#include "../include/fixed_evidence_goal_run.h"
+#include "../include/workspace_index_run.h"
 #include "../include/generation_budget.h"
 #include "../include/conversation_authority.h"
 #include "../include/corpus_create.h"
@@ -678,4 +680,28 @@ Thoth::IndexEnvironment BasicAgentPlugin::benchmarkIndexEnvironment() const {
         {"chunk_count", static_cast<int>(indexManager->chunkCount())},
     };
     return index;
+}
+
+bool BasicAgentPlugin::runFixedEvidenceGoal(const std::string& goal,
+                                           const std::string& evidence_directory,
+                                           std::string& error,
+                                           std::string& terminal_state) {
+    if (!controller) {
+        error = "controller unavailable";
+        terminal_state.clear();
+        return false;
+    }
+    return Thoth::runFixedEvidenceGoal(
+        *controller, goal, evidence_directory, error, terminal_state);
+}
+
+bool BasicAgentPlugin::indexWorkspaceDirectory(const std::string& path,
+                                              std::string& error,
+                                              Thoth::WorkspaceIndexResult& result) {
+    if (!indexManager) {
+        error = "index unavailable";
+        result = Thoth::WorkspaceIndexResult{};
+        return false;
+    }
+    return Thoth::indexWorkspaceDirectory(*indexManager, path, error, result);
 }

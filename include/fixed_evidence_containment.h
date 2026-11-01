@@ -16,10 +16,13 @@ namespace Thoth {
  * experimental_environment_ready stays false. This check does not inspect a
  * workspace, database, snapshot, manifest, or execution authorization.
  *
- * Future experimental entry must call enable() before goal execution begins,
- * while prefetch state is empty. A prefetched step cached before enable() can
- * be replayed without another registry call. Package 1 does not switch
- * containment mid-run and does not establish full experimental isolation.
+ * EGAR-LX goal execution calls enable() from
+ * ExecutiveController::execute_fixed_evidence_goal before that goal starts.
+ * thoth-engine --fixed-evidence-goal is the one-shot caller. Production Run,
+ * /goal, chat, --serve, and --execute keep the ordinary goal path and do not
+ * call enable(). A prefetched step cached before enable() can be replayed without
+ * another registry call. This does not switch containment mid-run and does
+ * not establish full experimental isolation.
  */
 struct ContainmentConfirmation {
     bool containment_enabled = false;

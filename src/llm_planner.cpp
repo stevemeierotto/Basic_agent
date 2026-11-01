@@ -297,12 +297,8 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
             goal_embedding, Thoth::PlannerInjection::kMaxTrajectoryInject);
         if (!trajectories.empty()) {
             trajectory_count = trajectories.size();
-            std::ostringstream traj_oss;
-            traj_oss << "[PAST EXPERIENCE — RELEVANT TRAJECTORY]\n";
             const auto& t = trajectories.front();
-            traj_oss << "- Goal: " << Thoth::cleanGoalForStorage(t.goal) << "\n";
-            traj_oss << "  Success: " << t.success_score << "\n";
-            past_experience = traj_oss.str();
+            past_experience = Thoth::formatTrajectoryInjection(t.goal, t.success_score);
 
             StructuredLogger::instance().log(LogLevel::Info, "planner", "TRAJECTORY_INJECTION",
                 "Injected scored trajectory into planner prompt",

@@ -655,8 +655,12 @@ StepResult WorkflowEngine::executeRetrieval(const PlanStep& step,
         }
 
         GragDiagnostics diagnostics;
-        Thoth::RetrievalScope retrievalScope = Thoth::resolveAgentContextRetrievalScope(
-            memory_ ? memory_->getActiveSessionId() : std::string{}, ragPipeline_->indexManager);
+        const std::string active_context_key =
+            memory_ ? memory_->getActiveSessionId() : std::string{};
+        const Thoth::RetrievalScope retrievalScope = context.fixed_evidence_roots.empty()
+            ? Thoth::resolveAgentContextRetrievalScope(active_context_key, ragPipeline_->indexManager)
+            : Thoth::resolveFixedEvidenceRetrievalScope(
+                  active_context_key, ragPipeline_->indexManager, context.fixed_evidence_roots);
         auto chunks = ragPipeline_->retrieveRelevant(
             query, {}, topK, "", planId, step.step_id,
             context.goal_embedding, context.current_embedding, context.trajectory_embedding,

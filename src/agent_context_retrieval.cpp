@@ -26,6 +26,47 @@ namespace {
 
 std::atomic<std::uint64_t> g_scopeSerial{0};
 
+bool pathIsInsideRoot(const fs::path& root, const fs::path& candidate) {
+    const fs::path base = root.lexically_normal();
+    const fs::path path = candidate.lexically_normal();
+    auto base_it = base.begin();
+    auto path_it = path.begin();
+    for (; base_it != base.end(); ++base_it, ++path_it) {
+        if (path_it == path.end()) {
+            return false;
+        }
+        if (*base_it != *path_it) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool legacyOrphanPathAuthorized(const CodeChunk& chunk, const RetrievalScope& scope) {
+    if (scope.authorized_evidence_roots.empty() || chunk.fileName.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const fs::path resolved = fs::weakly_canonical(fs::path(chunk.fileName), ec);
+    if (ec || resolved.empty()) {
+        return false;
+    }
+    for (const auto& root_text : scope.authorized_evidence_roots) {
+        if (root_text.empty()) {
+            continue;
+        }
+        std::error_code root_ec;
+        const fs::path root = fs::weakly_canonical(fs::path(root_text), root_ec);
+        if (root_ec || root.empty()) {
+            continue;
+        }
+        if (pathIsInsideRoot(root, resolved)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string lowerBasename(const std::string& path) {
     try {
         std::string name = fs::path(path).filename().string();
@@ -115,6 +156,9 @@ nlohmann::json RetrievalScope::toJson() const {
                        {"excluded_documents", excluded_documents}};
     if (alp_session_link_filter && !linked_document_ids.empty()) {
         out["linked_document_ids"] = linked_document_ids;
+    }
+    if (!authorized_evidence_roots.empty()) {
+        out["authorized_evidence_roots"] = authorized_evidence_roots;
     }
     return out;
 }
@@ -214,7 +258,10 @@ bool chunkPassesRetrievalScope(const CodeChunk& chunk, const RetrievalScope& sco
         return tierAllowed("system_reference");
     }
     if (tier == "legacy_orphan") {
-        return tierAllowed("legacy_orphan");
+        if (!tierAllowed("legacy_orphan")) {
+            return false;
+        }
+        return legacyOrphanPathAuthorized(chunk, scope);
     }
     if (tier == "shared_knowledge") {
         return tierAllowed("shared_knowledge");
@@ -257,6 +304,48 @@ RetrievalScope resolveAgentContextRetrievalScope(const std::string& active_conte
         }
     }
     return scope;
+}
+
+RetrievalScope resolveFixedEvidenceRetrievalScope(
+    const std::string& active_context_key,
+    const IndexManager* indexManager,
+    const std::vector<std::string>& authorized_evidence_roots) {
+    RetrievalScope scope = resolveAgentContextRetrievalScope(active_context_key, indexManager);
+    scope.scope_type = "fixed_evidence";
+    if (std::find(scope.allowed_tiers.begin(), scope.allowed_tiers.end(), "legacy_orphan") ==
+        scope.allowed_tiers.end()) {
+        scope.allowed_tiers.push_back("legacy_orphan");
+    }
+    scope.authorized_evidence_roots = authorized_evidence_roots;
+    return scope;
+}
+
+bool resolveAuthorizedEvidenceDirectory(const std::string& path,
+                                        std::string& resolved,
+                                        std::string& error) {
+    resolved.clear();
+    if (path.find_first_not_of(" \t\r\n") == std::string::npos) {
+        error = "evidence directory is absent";
+        return false;
+    }
+    std::error_code ec;
+    const fs::path input(path);
+    if (!fs::exists(input, ec) || ec) {
+        error = "evidence directory not found: " + path;
+        return false;
+    }
+    const fs::path canonical = fs::weakly_canonical(input, ec);
+    if (ec || canonical.empty()) {
+        error = "evidence directory could not be resolved: " + path;
+        return false;
+    }
+    if (!fs::is_directory(canonical, ec) || ec) {
+        error = "evidence directory is not a directory: " + path;
+        return false;
+    }
+    resolved = canonical.string();
+    error.clear();
+    return true;
 }
 
 RetrievalScope resolveBenchmarkExplicitScope() {

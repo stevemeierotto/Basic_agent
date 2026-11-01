@@ -54,6 +54,10 @@ set(BASIC_AGENT_SOURCES
     src/constraint_checker.cpp
     src/fact_store.cpp
     src/fixed_evidence_containment.cpp
+    src/fixed_evidence_goal_run.cpp
+    src/workspace_index_run.cpp
+    src/memory_snapshot.cpp
+    src/synthetic_ab_pilot.cpp
     src/store_fact_tool.cpp
     src/self_correct_tool.cpp
     src/executive_controller.cpp
