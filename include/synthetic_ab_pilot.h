@@ -13,6 +13,7 @@
 #include "memory_snapshot.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,20 @@ namespace Thoth {
 enum class SyntheticExecution {
     Mock,
     Live
+};
+
+/** Evaluation-arm goal order for one case. Independent of llama.cpp seeds. */
+enum class ArmRunOrder {
+    AThenB,
+    BThenA
+};
+
+/** Per-evaluation-case arm-order audit record. */
+struct EvaluationArmOrderRecord {
+    std::string case_name;
+    ArmRunOrder assigned_order = ArmRunOrder::AThenB;
+    /** Arms for which a goal launch was attempted, in launch order ("A" / "B"). */
+    std::vector<std::string> actual_starts;
 };
 
 struct HashedFile {
@@ -81,6 +96,12 @@ struct SyntheticAbRequest {
     std::vector<SyntheticCase> acquisition;
     std::vector<SyntheticCase> evaluation;
     int engine_timeout_seconds = 45;
+    /**
+     * When set, evaluation cases receive a deterministic balanced A→B / B→A
+     * schedule from this seed. When unset, every case keeps legacy A→B order.
+     * Unseeded mode is not an official EGAR-LX pilot schedule.
+     */
+    std::optional<std::uint64_t> arm_order_seed;
 };
 
 struct SyntheticAbReport {
@@ -99,6 +120,11 @@ struct SyntheticAbReport {
     ArmIdentity arm_a;
     ArmIdentity arm_b;
     std::string report_path;
+    bool arm_order_seeded = false;
+    std::uint64_t arm_order_seed = 0;
+    /** "legacy_fixed_a_then_b" or "seeded_balanced_shuffle_v1". */
+    std::string arm_order_procedure;
+    std::vector<EvaluationArmOrderRecord> evaluation_orders;
 };
 
 bool armIdentitiesMatch(const ArmIdentity& arm_a,
@@ -133,6 +159,15 @@ bool snapshotAfterEngineExit(const EngineProcessStatus& status,
                              const ExperienceTableCounts* required_counts,
                              MemorySnapshot& snapshot,
                              std::string& error);
+
+/**
+ * Build the evaluation arm-order schedule. An empty seed keeps legacy A→B for
+ * every case. A set seed yields an approximately balanced shuffle.
+ */
+std::vector<ArmRunOrder> buildArmOrderSchedule(std::size_t evaluation_count,
+                                               const std::optional<std::uint64_t>& seed);
+
+const char* armRunOrderLabel(ArmRunOrder order);
 
 /**
  * Run sequential synthetic acquisition goals, freeze one experience snapshot,

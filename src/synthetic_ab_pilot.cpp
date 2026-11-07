@@ -19,6 +19,8 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -464,6 +466,42 @@ bool runGoal(const std::string& binary,
         environment);
     status = run.status;
     return engineSucceeded(run, "FIXED_EVIDENCE_GOAL COMPLETED", error);
+}
+
+const char* orderLabel(ArmRunOrder order) {
+    return order == ArmRunOrder::BThenA ? "B_THEN_A" : "A_THEN_B";
+}
+
+nlohmann::json evaluationOrdersJson(const std::vector<EvaluationArmOrderRecord>& orders) {
+    nlohmann::json array = nlohmann::json::array();
+    for (const EvaluationArmOrderRecord& row : orders) {
+        array.push_back({
+            {"case", row.case_name},
+            {"assigned_order", orderLabel(row.assigned_order)},
+            {"actual_starts", row.actual_starts},
+        });
+    }
+    return array;
+}
+
+std::vector<ArmRunOrder> scheduleForEvaluation(
+    std::size_t evaluation_count,
+    const std::optional<std::uint64_t>& seed) {
+    std::vector<ArmRunOrder> orders(evaluation_count, ArmRunOrder::AThenB);
+    if (!seed.has_value() || evaluation_count == 0) {
+        return orders;
+    }
+    const std::size_t b_then_a = evaluation_count / 2;
+    for (std::size_t i = 0; i < b_then_a; ++i) {
+        orders[i] = ArmRunOrder::BThenA;
+    }
+    std::mt19937_64 rng(*seed);
+    for (std::size_t i = evaluation_count; i > 1; --i) {
+        std::uniform_int_distribution<std::size_t> pick(0, i - 1);
+        const std::size_t j = pick(rng);
+        std::swap(orders[i - 1], orders[j]);
+    }
+    return orders;
 }
 
 bool hashModels(const std::vector<std::string>& paths, std::vector<HashedFile>& out, std::string& error) {
@@ -980,6 +1018,16 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
                          SyntheticAbReport& report,
                          std::string& error) {
     report = SyntheticAbReport{};
+    report.arm_order_seeded = request.arm_order_seed.has_value();
+    if (report.arm_order_seeded) {
+        report.arm_order_seed = *request.arm_order_seed;
+        report.arm_order_procedure = "seeded_balanced_shuffle_v1";
+    } else {
+        report.arm_order_seed = 0;
+        report.arm_order_procedure = "legacy_fixed_a_then_b";
+    }
+    const std::vector<ArmRunOrder> arm_orders =
+        scheduleForEvaluation(request.evaluation.size(), request.arm_order_seed);
     if (!casesAreSeparated(request.acquisition, request.evaluation, error)) {
         return false;
     }
@@ -1164,10 +1212,26 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
             return false;
         }
 
+        EvaluationArmOrderRecord order_record;
+        order_record.case_name = item.name;
+        order_record.assigned_order = arm_orders[report.evaluation_orders.size()];
         EngineProcessStatus arm_a_goal;
         EngineProcessStatus arm_b_goal;
-        if (!runGoal(request.engine_binary, arm_a, item, timeout, environment, arm_a_goal, error)
-            || !runGoal(request.engine_binary, arm_b, item, timeout, environment, arm_b_goal, error)) {
+        auto launchGoal = [&](const char* arm_label,
+                              const fs::path& workspace,
+                              EngineProcessStatus& status) -> bool {
+            order_record.actual_starts.push_back(arm_label);
+            return runGoal(
+                request.engine_binary, workspace, item, timeout, environment, status, error);
+        };
+        bool goals_ok = false;
+        if (order_record.assigned_order == ArmRunOrder::BThenA) {
+            goals_ok = launchGoal("B", arm_b, arm_b_goal) && launchGoal("A", arm_a, arm_a_goal);
+        } else {
+            goals_ok = launchGoal("A", arm_a, arm_a_goal) && launchGoal("B", arm_b, arm_b_goal);
+        }
+        report.evaluation_orders.push_back(order_record);
+        if (!goals_ok) {
             return false;
         }
         if (hashFile(frozen_file) != frozen_before) {
@@ -1268,6 +1332,10 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
         {"service_models", serviceModelsJson(report.service_models)},
         {"arm_a", identityJson(report.arm_a)},
         {"arm_b", identityJson(report.arm_b)},
+        {"arm_order_seeded", report.arm_order_seeded},
+        {"arm_order_seed", report.arm_order_seed},
+        {"arm_order_procedure", report.arm_order_procedure},
+        {"evaluation_orders", evaluationOrdersJson(report.evaluation_orders)},
     };
     report.report_path = (root / "ab_report.json").string();
     if (!writeText(report.report_path, body.dump(2) + "\n", error)) {
@@ -1275,6 +1343,15 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
     }
     error.clear();
     return true;
+}
+
+const char* armRunOrderLabel(ArmRunOrder order) {
+    return orderLabel(order);
+}
+
+std::vector<ArmRunOrder> buildArmOrderSchedule(std::size_t evaluation_count,
+                                               const std::optional<std::uint64_t>& seed) {
+    return scheduleForEvaluation(evaluation_count, seed);
 }
 
 } // namespace Thoth
