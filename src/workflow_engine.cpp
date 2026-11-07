@@ -288,7 +288,11 @@ std::string buildLLMSynthesisPrompt(const PlanStep& step,
     }
 
     prompt << "[Task]\n" << instruction << "\n\n";
-    prompt << "Respond in natural language. Do not emit JSON or tool calls.";
+    prompt << "Respond in natural language. Do not emit JSON or tool calls.\n";
+    prompt << "Follow the answer format and stopping point requested in the current goal. ";
+    prompt << "Stop when that requested answer is complete. ";
+    prompt << "Do not continue past it with extra command variations. ";
+    prompt << "When the goal requests a longer explanation, write that explanation and then stop.";
     return prompt.str();
 }
 
