@@ -26,6 +26,7 @@
 #include "../include/memory.h"
 #include "../include/step_metrics_repository.h"
 #include "../include/llm_interface.h"
+#include "../include/synthesis_output_guard.h"
 #include <chrono>
 #include <algorithm>
 #include <iostream>
@@ -814,6 +815,17 @@ StepResult WorkflowEngine::executeLLM(const PlanStep& step,
             result.success = false;
             result.error_message = response.empty() ? "LLM returned an empty response" : response;
             result.data = {{"status", "error"}, {"error_message", result.error_message}};
+            return result;
+        }
+
+        if (Thoth::synthesisOutputLooksUnusableRepetition(response)) {
+            result.success = false;
+            result.error_message = "LLM synthesis rejected: unusable repetitive output";
+            result.data = {{"status", "error"},
+                           {"error_message", result.error_message},
+                           {"generation_id", generated.generation_id},
+                           {"synthesis_prompt_chars", static_cast<int>(prompt.size())},
+                           {"synthesis_context_truncated", contextTruncated}};
             return result;
         }
 

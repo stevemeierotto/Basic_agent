@@ -100,6 +100,7 @@ set(BASIC_AGENT_SOURCES
     src/similarity.cpp
     src/tools.cpp
     src/workflow_engine.cpp
+    src/synthesis_output_guard.cpp
     src/step_metrics_repository.cpp
     src/standard_execution_mode.cpp
     src/scientific_execution_mode.cpp
