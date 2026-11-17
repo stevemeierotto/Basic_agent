@@ -1014,76 +1014,334 @@ bool snapshotAfterEngineExit(const EngineProcessStatus& status,
         source_database, snapshot_directory, required_counts, snapshot, error);
 }
 
-bool runSyntheticAbPilot(const SyntheticAbRequest& request,
-                         SyntheticAbReport& report,
-                         std::string& error) {
-    report = SyntheticAbReport{};
-    report.arm_order_seeded = request.arm_order_seed.has_value();
-    if (report.arm_order_seeded) {
-        report.arm_order_seed = *request.arm_order_seed;
-        report.arm_order_procedure = "seeded_balanced_shuffle_v1";
-    } else {
-        report.arm_order_seed = 0;
-        report.arm_order_procedure = "legacy_fixed_a_then_b";
+const char* phaseLabel(SyntheticAbPhase phase) {
+    switch (phase) {
+    case SyntheticAbPhase::AcquisitionOnly:
+        return "acquisition_only";
+    case SyntheticAbPhase::EvaluationFromFrozen:
+        return "evaluation_from_frozen";
+    case SyntheticAbPhase::Full:
+    default:
+        return "full";
     }
-    const std::vector<ArmRunOrder> arm_orders =
-        scheduleForEvaluation(request.evaluation.size(), request.arm_order_seed);
-    if (!casesAreSeparated(request.acquisition, request.evaluation, error)) {
-        return false;
-    }
-    std::error_code ec;
-    const fs::path binary(request.engine_binary);
-    if (!fs::is_regular_file(binary, ec) || ec) {
-        error = "engine binary is missing: " + request.engine_binary;
-        return false;
-    }
-    const fs::path retrieval_seed(request.retrieval_config_path);
-    if (!fs::is_regular_file(retrieval_seed, ec) || ec) {
-        error = "retrieval config is missing: " + request.retrieval_config_path;
-        return false;
-    }
-    const std::string retrieval_hash = hashFile(retrieval_seed);
-    const std::string binary_hash = hashFile(binary);
-    if (retrieval_hash.empty() || binary_hash.empty()) {
-        error = "pilot identity files could not be hashed";
-        return false;
-    }
-    std::vector<HashedFile> model_hashes;
-    if (!hashModels(request.model_files, model_hashes, error)) {
-        return false;
-    }
-    const bool live = request.execution == SyntheticExecution::Live;
-    report.execution = live ? "live" : "mock";
-    const EngineEnvironment environment = environmentFor(request);
-    std::string library_path;
-    std::string library_hash;
-    std::vector<ServiceModelIdentity> service_models;
-    if (live) {
-        if (request.inference_backend.empty() || request.inference_base_url.empty()
-            || request.embed_base_url.empty()) {
-            error = "live inference endpoint is missing";
-            return false;
-        }
-        if (!resolveLoadedAgentLibrary(request.engine_binary, library_path, error)) {
-            return false;
-        }
-        library_hash = hashFile(library_path);
-        if (library_hash.empty()) {
-            error = "loaded agent library could not be hashed";
-            return false;
-        }
-        if (!readServiceModels(request, service_models, error)) {
-            return false;
-        }
-    }
-    const std::string image_digest = captureEngineImageDigest(request.engine_image);
+}
 
-    const fs::path root(request.work_root);
-    fs::create_directories(root, ec);
-    if (ec) {
-        error = "pilot workspace could not be created: " + ec.message();
+fs::path resolveManifestPath(const SyntheticAbRequest& request) {
+    if (!request.acquisition_manifest_path.empty()) {
+        return fs::path(request.acquisition_manifest_path);
+    }
+    return fs::path(request.work_root) / "acquisition_manifest.json";
+}
+
+nlohmann::json acquisitionCaseHashesJson(const std::vector<SyntheticCase>& cases) {
+    nlohmann::json array = nlohmann::json::array();
+    for (const SyntheticCase& item : cases) {
+        array.push_back({
+            {"name", item.name},
+            {"evidence_name", item.evidence_name},
+            {"goal_sha256", sha256Hex(item.goal_text)},
+            {"evidence_sha256", sha256Hex(item.evidence_text)},
+        });
+    }
+    return array;
+}
+
+bool validatePhaseCases(const SyntheticAbRequest& request, std::string& error) {
+    if (request.phase == SyntheticAbPhase::EvaluationFromFrozen) {
+        if (request.evaluation.empty()) {
+            error = "evaluation-from-frozen requires evaluation cases";
+            return false;
+        }
+        for (const SyntheticCase& item : request.evaluation) {
+            if (!validCase(item, error)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (request.acquisition.empty()) {
+        error = "synthetic pilot requires acquisition cases";
         return false;
     }
+    if (request.phase == SyntheticAbPhase::AcquisitionOnly) {
+        for (const SyntheticCase& item : request.acquisition) {
+            if (!validCase(item, error)) {
+                return false;
+            }
+        }
+        if (request.evaluation.empty()) {
+            return true;
+        }
+        return casesAreSeparated(request.acquisition, request.evaluation, error);
+    }
+    return casesAreSeparated(request.acquisition, request.evaluation, error);
+}
+
+bool writeAcquisitionManifest(const fs::path& path,
+                              const SyntheticAbRequest& request,
+                              const SyntheticAbReport& report,
+                              const std::string& binary_hash,
+                              const std::string& retrieval_hash,
+                              const std::string& library_path,
+                              const std::string& library_hash,
+                              const std::string& image_digest,
+                              const std::vector<HashedFile>& model_hashes,
+                              const std::vector<ServiceModelIdentity>& service_models,
+                              const fs::path& frozen_file,
+                              const fs::path& empty_template,
+                              std::string& error) {
+    nlohmann::json body = {
+        {"schema", "thoth.synthetic_ab.acquisition_manifest.v1"},
+        {"execution", report.execution},
+        {"phase", "acquisition_only"},
+        {"acquisition_sha256", report.acquisition_sha256},
+        {"empty_experience_sha256", report.empty_experience_sha256},
+        {"acquisition_counts",
+         {{"trajectories", report.acquisition_counts.trajectories},
+          {"strategies", report.acquisition_counts.strategies},
+          {"past_plans", report.acquisition_counts.past_plans},
+          {"graph_edges", report.acquisition_counts.graph_edges},
+          {"facts", report.acquisition_counts.facts}}},
+        {"frozen_database", frozen_file.string()},
+        {"empty_template_database", empty_template.string()},
+        {"engine_binary_sha256", binary_hash},
+        {"engine_library_path", library_path},
+        {"engine_library_sha256", library_hash},
+        {"engine_image", request.engine_image},
+        {"engine_image_digest", image_digest},
+        {"retrieval_config_path", request.retrieval_config_path},
+        {"retrieval_config_sha256", retrieval_hash},
+        {"inference_backend", request.inference_backend},
+        {"inference_base_url", request.inference_base_url},
+        {"embed_base_url", request.embed_base_url},
+        {"model_files", hashedFilesJson(model_hashes)},
+        {"service_models", serviceModelsJson(service_models)},
+        {"acquisition_cases", acquisitionCaseHashesJson(request.acquisition)},
+    };
+    return writeText(path, body.dump(2) + "\n", error);
+}
+
+bool loadAcquisitionManifest(const fs::path& path,
+                             nlohmann::json& body,
+                             std::string& error) {
+    std::ifstream in(path);
+    if (!in) {
+        error = "acquisition manifest is missing: " + path.string();
+        return false;
+    }
+    try {
+        in >> body;
+    } catch (const std::exception& ex) {
+        error = std::string("acquisition manifest is invalid JSON: ") + ex.what();
+        return false;
+    }
+    if (!body.is_object() || body.value("schema", "") != "thoth.synthetic_ab.acquisition_manifest.v1") {
+        error = "acquisition manifest schema is unsupported";
+        return false;
+    }
+    return true;
+}
+
+bool serviceModelsFromJson(const nlohmann::json& array,
+                           std::vector<ServiceModelIdentity>& out,
+                           std::string& error) {
+    out.clear();
+    if (!array.is_array()) {
+        error = "acquisition manifest service_models is invalid";
+        return false;
+    }
+    for (const auto& row : array) {
+        ServiceModelIdentity model;
+        model.role = row.value("role", "");
+        model.id = row.value("id", "");
+        model.n_embd = row.value("n_embd", 0);
+        model.size = row.value("size", static_cast<std::int64_t>(0));
+        model.ftype = row.value("ftype", "");
+        out.push_back(model);
+    }
+    return true;
+}
+
+bool hashedFilesFromJson(const nlohmann::json& array,
+                         std::vector<HashedFile>& out,
+                         std::string& error) {
+    out.clear();
+    if (!array.is_array()) {
+        error = "acquisition manifest model_files is invalid";
+        return false;
+    }
+    for (const auto& row : array) {
+        HashedFile file;
+        file.label = row.value("label", "");
+        file.sha256 = row.value("sha256", "");
+        out.push_back(file);
+    }
+    return true;
+}
+
+bool evaluationConflictsWithManifest(const nlohmann::json& manifest,
+                                     const std::vector<SyntheticCase>& evaluation,
+                                     std::string& error) {
+    std::vector<std::string> acquisition_goals;
+    std::vector<std::string> acquisition_evidence;
+    const auto cases = manifest.find("acquisition_cases");
+    if (cases == manifest.end() || !cases->is_array()) {
+        error = "acquisition manifest acquisition_cases is missing";
+        return false;
+    }
+    for (const auto& row : *cases) {
+        acquisition_goals.push_back(row.value("goal_sha256", ""));
+        acquisition_evidence.push_back(row.value("evidence_sha256", ""));
+    }
+    for (const SyntheticCase& item : evaluation) {
+        const std::string goal_hash = sha256Hex(item.goal_text);
+        const std::string evidence_hash = sha256Hex(item.evidence_text);
+        if (std::find(acquisition_goals.begin(), acquisition_goals.end(), goal_hash)
+                != acquisition_goals.end()
+            || std::find(acquisition_evidence.begin(), acquisition_evidence.end(), evidence_hash)
+                != acquisition_evidence.end()) {
+            error = "evaluation repeats acquisition material: " + item.name;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool imageDigestUnavailable(const std::string& digest) {
+    return digest.empty() || digest == "unavailable";
+}
+
+bool verifyImageDigestContinuity(const SyntheticAbRequest& request,
+                                 const nlohmann::json& manifest,
+                                 const std::string& current_digest,
+                                 std::string& error) {
+    const std::string prior = manifest.value("engine_image_digest", "");
+    const bool prior_missing = imageDigestUnavailable(prior);
+    const bool current_missing = imageDigestUnavailable(current_digest);
+    // Host-binary / no Docker metadata: digest continuity is not applicable unless
+    // the caller explicitly requires an engine image (same rule as liveArmIdentitiesMatch).
+    if (request.require_engine_image && (prior_missing || current_missing)) {
+        error = "engine image digest unavailable";
+        return false;
+    }
+    if (prior_missing || current_missing) {
+        return true;
+    }
+    if (prior != current_digest) {
+        error = "engine image digest does not match acquisition manifest";
+        return false;
+    }
+    return true;
+}
+
+bool frozenHasSidecars(const fs::path& frozen_file) {
+    return fs::exists(fs::path(frozen_file.string() + "-wal"))
+        || fs::exists(fs::path(frozen_file.string() + "-shm"))
+        || fs::exists(fs::path(frozen_file.string() + "-journal"));
+}
+
+bool frozenSnapshotUntouched(const fs::path& frozen_file,
+                             const std::string& expected_hash,
+                             std::string& error) {
+    if (hashFile(frozen_file) != expected_hash) {
+        error = "frozen snapshot hash changed during resume verification";
+        return false;
+    }
+    if (frozenHasSidecars(frozen_file)) {
+        error = "frozen snapshot grew journal artifacts during resume verification";
+        return false;
+    }
+    return true;
+}
+
+bool verifyEvaluationIdentity(const SyntheticAbRequest& request,
+                              const nlohmann::json& manifest,
+                              const std::string& binary_hash,
+                              const std::string& retrieval_hash,
+                              const std::string& library_hash,
+                              const std::vector<HashedFile>& model_hashes,
+                              const std::vector<ServiceModelIdentity>& service_models,
+                              const std::string& frozen_hash,
+                              const std::string& empty_template_hash,
+                              const std::string& image_digest,
+                              const ExperienceTableCounts& frozen_counts,
+                              std::string& error) {
+    if (manifest.value("acquisition_sha256", "") != frozen_hash) {
+        error = "frozen snapshot hash does not match acquisition manifest";
+        return false;
+    }
+    if (manifest.value("empty_experience_sha256", "") != empty_template_hash) {
+        error = "empty experience template hash does not match acquisition manifest";
+        return false;
+    }
+    const long long expected_trajectories =
+        manifest["acquisition_counts"].value("trajectories", static_cast<long long>(-1));
+    const long long expected_past_plans =
+        manifest["acquisition_counts"].value("past_plans", static_cast<long long>(-1));
+    if (frozen_counts.trajectories != expected_trajectories
+        || frozen_counts.past_plans != expected_past_plans) {
+        error = "frozen acquisition counts do not match acquisition manifest";
+        return false;
+    }
+    if (manifest.value("engine_binary_sha256", "") != binary_hash) {
+        error = "engine binary does not match acquisition manifest";
+        return false;
+    }
+    if (manifest.value("retrieval_config_sha256", "") != retrieval_hash) {
+        error = "retrieval configuration does not match acquisition manifest";
+        return false;
+    }
+    if (manifest.value("inference_backend", "") != request.inference_backend
+        || manifest.value("inference_base_url", "") != request.inference_base_url
+        || manifest.value("embed_base_url", "") != request.embed_base_url) {
+        error = "inference endpoint configuration does not match acquisition manifest";
+        return false;
+    }
+    if (!verifyImageDigestContinuity(request, manifest, image_digest, error)) {
+        return false;
+    }
+    if (request.execution == SyntheticExecution::Live) {
+        if (manifest.value("engine_library_sha256", "") != library_hash) {
+            error = "loaded agent library does not match acquisition manifest";
+            return false;
+        }
+        std::vector<ServiceModelIdentity> prior_models;
+        if (!serviceModelsFromJson(manifest.at("service_models"), prior_models, error)) {
+            return false;
+        }
+        if (prior_models != service_models) {
+            error = "service model identity does not match acquisition manifest";
+            return false;
+        }
+    }
+    std::vector<HashedFile> prior_models_files;
+    if (!hashedFilesFromJson(manifest.value("model_files", nlohmann::json::array()),
+                             prior_models_files, error)) {
+        return false;
+    }
+    if (!sameHashedFiles(prior_models_files, model_hashes)) {
+        error = "model files do not match acquisition manifest";
+        return false;
+    }
+    return true;
+}
+
+bool runAcquisitionPhase(const SyntheticAbRequest& request,
+                         SyntheticAbReport& report,
+                         const EngineEnvironment& environment,
+                         const fs::path& root,
+                         const fs::path& retrieval_seed,
+                         const std::string& binary_hash,
+                         const std::string& retrieval_hash,
+                         const std::string& library_path,
+                         const std::string& library_hash,
+                         const std::string& image_digest,
+                         const std::vector<HashedFile>& model_hashes,
+                         const std::vector<ServiceModelIdentity>& service_models,
+                         MemorySnapshot& empty_snapshot,
+                         std::string& frozen_before,
+                         std::string& error) {
+    std::error_code ec;
     const fs::path acquisition = root / "acquisition";
     const fs::path frozen_dir = root / "frozen";
     const fs::path init_workspace = root / "arm_a_init";
@@ -1143,7 +1401,6 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
         return false;
     }
     const ExperienceTableCounts empty_counts;
-    MemorySnapshot empty_snapshot;
     if (!snapshotAfterEngineExit(
             init_status,
             (init_workspace / "memory.db").string(),
@@ -1156,17 +1413,65 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
     report.empty_experience_sha256 = empty_snapshot.sha256;
 
     const fs::path frozen_file = frozen_dir / "memory.db";
-    const std::string frozen_before = hashFile(frozen_file);
+    frozen_before = hashFile(frozen_file);
     if (frozen_before != report.acquisition_sha256) {
         error = "frozen snapshot hash changed before evaluation";
         return false;
     }
+    report.frozen_database_path = frozen_file.string();
+    report.empty_template_path = empty_snapshot.database_path;
+    report.engine_library_path = library_path;
+    report.engine_library_sha256 = library_hash;
+    report.service_models = service_models;
+    report.engine_image_digest = image_digest;
+    report.engine_image_verified = !image_digest.empty() && image_digest != "unavailable";
+    report.arm_a.engine_binary_sha256 = binary_hash;
+    report.arm_a.engine_library_sha256 = library_hash;
+    report.arm_a.engine_image_digest = image_digest;
+    report.arm_a.retrieval_config_sha256 = retrieval_hash;
+    report.arm_a.model_files = model_hashes;
+    report.arm_a.service_models = service_models;
+
+    const fs::path manifest_path = resolveManifestPath(request);
+    if (!writeAcquisitionManifest(
+            manifest_path, request, report, binary_hash, retrieval_hash, library_path, library_hash,
+            image_digest, model_hashes, service_models, frozen_file,
+            fs::path(empty_snapshot.database_path), error)) {
+        return false;
+    }
+    report.acquisition_manifest_path = manifest_path.string();
+    return true;
+}
+
+bool runEvaluationPhase(const SyntheticAbRequest& request,
+                        SyntheticAbReport& report,
+                        const EngineEnvironment& environment,
+                        const fs::path& root,
+                        const fs::path& retrieval_seed,
+                        const fs::path& frozen_file,
+                        const fs::path& empty_template,
+                        const ExperienceTableCounts& acquisition_counts,
+                        const std::string& frozen_before,
+                        const std::string& binary_hash,
+                        const std::string& retrieval_hash,
+                        const std::string& library_path,
+                        const std::string& library_hash,
+                        const std::string& image_digest,
+                        const std::vector<HashedFile>& model_hashes,
+                        const std::vector<ServiceModelIdentity>& service_models,
+                        const bool live,
+                        std::string& error) {
+    const std::vector<ArmRunOrder> arm_orders =
+        scheduleForEvaluation(request.evaluation.size(), request.arm_order_seed);
+    const ExperienceTableCounts empty_counts;
+    const int timeout = request.engine_timeout_seconds;
+    const fs::path frozen_dir = frozen_file.parent_path();
 
     for (const SyntheticCase& item : request.evaluation) {
         const fs::path arm_a = root / "arm_a" / item.name;
         const fs::path arm_b = root / "arm_b" / item.name;
-        if (arm_a == arm_b || arm_a == acquisition || arm_b == acquisition
-            || arm_a == frozen_dir || arm_b == frozen_dir) {
+        if (arm_a == arm_b || arm_a == frozen_dir || arm_b == frozen_dir
+            || arm_a == root / "acquisition" || arm_b == root / "acquisition") {
             error = "evaluation workspace is not isolated: " + item.name;
             return false;
         }
@@ -1174,7 +1479,7 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
             || !prepareWorkspace(arm_b, retrieval_seed, error)) {
             return false;
         }
-        if (!restoreMemorySnapshot(empty_snapshot.database_path, (arm_a / "memory.db").string(), error)
+        if (!restoreMemorySnapshot(empty_template.string(), (arm_a / "memory.db").string(), error)
             || !restoreMemorySnapshot(frozen_file.string(), (arm_b / "memory.db").string(), error)) {
             return false;
         }
@@ -1203,7 +1508,7 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
         if (!snapshotAfterEngineExit(
                 arm_b_index, (arm_b / "memory.db").string(),
                 (root / "pre_goal" / "arm_b" / item.name).string(),
-                &report.acquisition_counts, arm_b_check, error)) {
+                &acquisition_counts, arm_b_check, error)) {
             error = "Arm B copy did not preserve the acquisition snapshot: " + error;
             return false;
         }
@@ -1252,7 +1557,8 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
         error = "frozen snapshot changed during evaluation";
         return false;
     }
-    if (hashFile(binary) != binary_hash || hashFile(retrieval_seed) != retrieval_hash) {
+    if (hashFile(request.engine_binary) != binary_hash
+        || hashFile(retrieval_seed) != retrieval_hash) {
         error = "pilot identity files changed during evaluation";
         return false;
     }
@@ -1311,9 +1617,15 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
     if (!report.identities_match) {
         return false;
     }
+    return true;
+}
 
+bool writeFinalReport(const fs::path& root,
+                      SyntheticAbReport& report,
+                      std::string& error) {
     nlohmann::json body = {
         {"execution", report.execution},
+        {"phase", report.phase},
         {"acquisition_sha256", report.acquisition_sha256},
         {"acquisition_counts",
          {{"trajectories", report.acquisition_counts.trajectories},
@@ -1332,13 +1644,182 @@ bool runSyntheticAbPilot(const SyntheticAbRequest& request,
         {"service_models", serviceModelsJson(report.service_models)},
         {"arm_a", identityJson(report.arm_a)},
         {"arm_b", identityJson(report.arm_b)},
+        {"acquisition_manifest_path", report.acquisition_manifest_path},
+        {"frozen_database_path", report.frozen_database_path},
+        {"empty_template_path", report.empty_template_path},
         {"arm_order_seeded", report.arm_order_seeded},
         {"arm_order_seed", report.arm_order_seed},
         {"arm_order_procedure", report.arm_order_procedure},
         {"evaluation_orders", evaluationOrdersJson(report.evaluation_orders)},
     };
     report.report_path = (root / "ab_report.json").string();
-    if (!writeText(report.report_path, body.dump(2) + "\n", error)) {
+    return writeText(report.report_path, body.dump(2) + "\n", error);
+}
+
+bool runSyntheticAbPilot(const SyntheticAbRequest& request,
+                         SyntheticAbReport& report,
+                         std::string& error) {
+    report = SyntheticAbReport{};
+    report.phase = phaseLabel(request.phase);
+    report.arm_order_seeded = request.arm_order_seed.has_value();
+    if (report.arm_order_seeded) {
+        report.arm_order_seed = *request.arm_order_seed;
+        report.arm_order_procedure = "seeded_balanced_shuffle_v1";
+    } else {
+        report.arm_order_seed = 0;
+        report.arm_order_procedure = "legacy_fixed_a_then_b";
+    }
+    if (!validatePhaseCases(request, error)) {
+        return false;
+    }
+    std::error_code ec;
+    const fs::path binary(request.engine_binary);
+    if (!fs::is_regular_file(binary, ec) || ec) {
+        error = "engine binary is missing: " + request.engine_binary;
+        return false;
+    }
+    const fs::path retrieval_seed(request.retrieval_config_path);
+    if (!fs::is_regular_file(retrieval_seed, ec) || ec) {
+        error = "retrieval config is missing: " + request.retrieval_config_path;
+        return false;
+    }
+    const std::string retrieval_hash = hashFile(retrieval_seed);
+    const std::string binary_hash = hashFile(binary);
+    if (retrieval_hash.empty() || binary_hash.empty()) {
+        error = "pilot identity files could not be hashed";
+        return false;
+    }
+    std::vector<HashedFile> model_hashes;
+    if (!hashModels(request.model_files, model_hashes, error)) {
+        return false;
+    }
+    const bool live = request.execution == SyntheticExecution::Live;
+    report.execution = live ? "live" : "mock";
+    const EngineEnvironment environment = environmentFor(request);
+    std::string library_path;
+    std::string library_hash;
+    std::vector<ServiceModelIdentity> service_models;
+    if (live) {
+        if (request.inference_backend.empty() || request.inference_base_url.empty()
+            || request.embed_base_url.empty()) {
+            error = "live inference endpoint is missing";
+            return false;
+        }
+        if (!resolveLoadedAgentLibrary(request.engine_binary, library_path, error)) {
+            return false;
+        }
+        library_hash = hashFile(library_path);
+        if (library_hash.empty()) {
+            error = "loaded agent library could not be hashed";
+            return false;
+        }
+        if (!readServiceModels(request, service_models, error)) {
+            return false;
+        }
+    }
+    const std::string image_digest = captureEngineImageDigest(request.engine_image);
+
+    const fs::path root(request.work_root);
+    fs::create_directories(root, ec);
+    if (ec) {
+        error = "pilot workspace could not be created: " + ec.message();
+        return false;
+    }
+
+    MemorySnapshot empty_snapshot;
+    std::string frozen_before;
+    fs::path frozen_file;
+    fs::path empty_template;
+
+    if (request.phase == SyntheticAbPhase::EvaluationFromFrozen) {
+        const fs::path manifest_path = resolveManifestPath(request);
+        nlohmann::json manifest;
+        if (!loadAcquisitionManifest(manifest_path, manifest, error)) {
+            return false;
+        }
+        report.acquisition_manifest_path = manifest_path.string();
+        if (!evaluationConflictsWithManifest(manifest, request.evaluation, error)) {
+            return false;
+        }
+        report.acquisition_sha256 = manifest.value("acquisition_sha256", "");
+        report.empty_experience_sha256 = manifest.value("empty_experience_sha256", "");
+        frozen_file = fs::path(manifest.value("frozen_database", ""));
+        empty_template = fs::path(manifest.value("empty_template_database", ""));
+        if (!fs::is_regular_file(frozen_file, ec) || ec
+            || !fs::is_regular_file(empty_template, ec) || ec) {
+            error = "acquisition freeze artifacts are missing";
+            return false;
+        }
+        frozen_before = hashFile(frozen_file);
+        if (frozen_before.empty()) {
+            error = "frozen snapshot could not be hashed";
+            return false;
+        }
+        // Hash continuity before any restore/SQL — refuse tampered freezes without opening them.
+        if (manifest.value("acquisition_sha256", "") != frozen_before) {
+            error = "frozen snapshot hash does not match acquisition manifest";
+            return false;
+        }
+        if (frozenHasSidecars(frozen_file)) {
+            error = "frozen snapshot has journal artifacts before resume verification";
+            return false;
+        }
+        // Never open the freeze for SQL inspection — WAL-mode readonly opens create
+        // -wal/-shm beside the source. Inspect a byte copy instead (same as acquisition verify).
+        const fs::path resume_verify = root / "verify_resume" / "memory.db";
+        if (!restoreMemorySnapshot(frozen_file.string(), resume_verify.string(), error)) {
+            return false;
+        }
+        ExperienceTableCounts frozen_counts;
+        if (!readExperienceTableCounts(resume_verify.string(), frozen_counts, error)) {
+            return false;
+        }
+        if (!frozenSnapshotUntouched(frozen_file, frozen_before, error)) {
+            return false;
+        }
+        const std::string empty_template_hash = hashFile(empty_template);
+        if (empty_template_hash.empty()) {
+            error = "empty experience template could not be hashed";
+            return false;
+        }
+        if (!verifyEvaluationIdentity(
+                request, manifest, binary_hash, retrieval_hash, library_hash, model_hashes,
+                service_models, frozen_before, empty_template_hash, image_digest, frozen_counts,
+                error)) {
+            return false;
+        }
+        // Prefer independently inspected frozen counts once they match the manifest.
+        report.acquisition_counts = frozen_counts;
+        report.frozen_database_path = frozen_file.string();
+        report.empty_template_path = empty_template.string();
+        report.engine_image_digest = image_digest;
+        report.engine_image_verified = !imageDigestUnavailable(image_digest);
+    } else {
+        if (!runAcquisitionPhase(
+                request, report, environment, root, retrieval_seed, binary_hash, retrieval_hash,
+                library_path, library_hash, image_digest, model_hashes, service_models,
+                empty_snapshot, frozen_before, error)) {
+            return false;
+        }
+        frozen_file = fs::path(report.frozen_database_path);
+        empty_template = fs::path(report.empty_template_path);
+        if (request.phase == SyntheticAbPhase::AcquisitionOnly) {
+            // Acquisition freeze only — do not synthesize completed A/B evaluation flags.
+            if (!writeFinalReport(root, report, error)) {
+                return false;
+            }
+            error.clear();
+            return true;
+        }
+    }
+
+    if (!runEvaluationPhase(
+            request, report, environment, root, retrieval_seed, frozen_file, empty_template,
+            report.acquisition_counts, frozen_before, binary_hash, retrieval_hash, library_path,
+            library_hash, image_digest, model_hashes, service_models, live, error)) {
+        return false;
+    }
+    if (!writeFinalReport(root, report, error)) {
         return false;
     }
     error.clear();

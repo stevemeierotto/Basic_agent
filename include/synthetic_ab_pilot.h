@@ -24,6 +24,18 @@ enum class SyntheticExecution {
     Live
 };
 
+/**
+ * Pilot phase. Full preserves the historical acquire→freeze→evaluate pipeline.
+ * AcquisitionOnly stops after a validated freeze and writes an acquisition
+ * manifest. EvaluationFromFrozen resumes from that freeze without re-running
+ * acquisition.
+ */
+enum class SyntheticAbPhase {
+    Full,
+    AcquisitionOnly,
+    EvaluationFromFrozen
+};
+
 /** Evaluation-arm goal order for one case. Independent of llama.cpp seeds. */
 enum class ArmRunOrder {
     AThenB,
@@ -88,6 +100,12 @@ struct SyntheticAbRequest {
     std::string retrieval_config_path;
     std::string engine_image = "thoth-engine:local";
     SyntheticExecution execution = SyntheticExecution::Mock;
+    SyntheticAbPhase phase = SyntheticAbPhase::Full;
+    /**
+     * Path to the acquisition manifest written by AcquisitionOnly (or Full).
+     * Empty means work_root/acquisition_manifest.json.
+     */
+    std::string acquisition_manifest_path;
     std::string inference_backend = "llama_cpp";
     std::string inference_base_url = "http://127.0.0.1:8080";
     std::string embed_base_url = "http://127.0.0.1:8081";
@@ -106,11 +124,15 @@ struct SyntheticAbRequest {
 
 struct SyntheticAbReport {
     std::string execution = "mock";
+    /** "full", "acquisition_only", or "evaluation_from_frozen". */
+    std::string phase = "full";
     std::string acquisition_sha256;
     ExperienceTableCounts acquisition_counts;
     std::string empty_experience_sha256;
     std::string frozen_sha256_after_evaluation;
+    /** True only after evaluation confirms the freeze was untouched. False for AcquisitionOnly. */
     bool frozen_unchanged = false;
+    /** True only after evaluation confirms Arm A/B identity match. False for AcquisitionOnly. */
     bool identities_match = false;
     bool engine_image_verified = false;
     std::string engine_image_digest;
@@ -120,6 +142,10 @@ struct SyntheticAbReport {
     ArmIdentity arm_a;
     ArmIdentity arm_b;
     std::string report_path;
+    /** Absolute path of the written acquisition manifest when acquisition ran. */
+    std::string acquisition_manifest_path;
+    std::string frozen_database_path;
+    std::string empty_template_path;
     bool arm_order_seeded = false;
     std::uint64_t arm_order_seed = 0;
     /** "legacy_fixed_a_then_b" or "seeded_balanced_shuffle_v1". */
@@ -170,9 +196,12 @@ std::vector<ArmRunOrder> buildArmOrderSchedule(std::size_t evaluation_count,
 const char* armRunOrderLabel(ArmRunOrder order);
 
 /**
- * Run sequential synthetic acquisition goals, freeze one experience snapshot,
- * then evaluate each synthetic case on a fresh empty Arm A database and an
- * independent Arm B copy of that snapshot.
+ * Run the synthetic pilot according to request.phase.
+ *
+ * Full (default): acquisition, freeze, then evaluation.
+ * AcquisitionOnly: acquisition and validated freeze; writes acquisition_manifest.json.
+ * EvaluationFromFrozen: loads that manifest, verifies frozen hash and identity,
+ * then runs evaluation only.
  */
 bool runSyntheticAbPilot(const SyntheticAbRequest& request,
                          SyntheticAbReport& report,
