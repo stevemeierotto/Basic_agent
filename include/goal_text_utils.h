@@ -90,13 +90,80 @@ inline std::optional<std::string> standaloneProblemSection(const std::string& te
     return std::nullopt;
 }
 
+/** Truncate injection text with an explicit marker (never silent cut). */
+inline std::string capInjectionText(const std::string& text, std::size_t maxChars) {
+    if (maxChars == 0) {
+        return "";
+    }
+    if (text.empty()) {
+        return text;
+    }
+    if (text.size() <= maxChars) {
+        return text;
+    }
+    return text.substr(0, maxChars) + "\n...(truncated)...";
+}
+
 /**
- * Planner trajectory block.
+ * Pull the last LLM step's result.data.response from a stored trajectory JSON.
+ * Returns empty when the record is missing, malformed, or has no synthesis text.
+ */
+inline std::string extractPriorSynthesisExcerpt(const std::string& trajectory_json,
+                                                std::size_t maxChars) {
+    if (trajectory_json.empty() || maxChars == 0) {
+        return "";
+    }
+    try {
+        const nlohmann::json root = nlohmann::json::parse(trajectory_json);
+        if (!root.contains("steps") || !root["steps"].is_array()) {
+            return "";
+        }
+        std::string response;
+        for (const auto& step : root["steps"]) {
+            if (!step.is_object()) {
+                continue;
+            }
+            const bool isLlm = (step.contains("type") && step["type"].is_number_integer()
+                                && step["type"].get<int>() == static_cast<int>(StepType::LLM))
+                               || (step.contains("type") && step["type"].is_string()
+                                   && step["type"].get<std::string>() == "LLM")
+                               || (step.contains("step_type") && step["step_type"].is_string()
+                                   && step["step_type"].get<std::string>() == "LLM");
+            if (!isLlm) {
+                continue;
+            }
+            if (!step.contains("result") || !step["result"].is_object()) {
+                continue;
+            }
+            const auto& result = step["result"];
+            if (!result.contains("data") || !result["data"].is_object()) {
+                continue;
+            }
+            const auto& data = result["data"];
+            if (!data.contains("response") || !data["response"].is_string()) {
+                continue;
+            }
+            const std::string candidate = data["response"].get<std::string>();
+            if (!candidate.empty()) {
+                response = candidate;
+            }
+        }
+        if (response.empty()) {
+            return "";
+        }
+        return capInjectionText(response, maxChars);
+    } catch (...) {
+        return "";
+    }
+}
+
+/**
+ * Legacy planner trajectory block (goal/case + mechanical Success only).
  * A nonempty standalone Problem: section is placed after the header and stored
  * success score so the existing front truncation keeps the case text.
  * Every other goal keeps the historical Goal-then-Success layout.
  */
-inline std::string formatTrajectoryInjection(const std::string& goal, float success_score) {
+inline std::string formatTrajectoryInjectionLegacy(const std::string& goal, float success_score) {
     const std::string cleaned = cleanGoalForStorage(goal);
     std::ostringstream oss;
     oss << "[PAST EXPERIENCE — RELEVANT TRAJECTORY]\n";
@@ -111,18 +178,44 @@ inline std::string formatTrajectoryInjection(const std::string& goal, float succ
     return oss.str();
 }
 
-/** Truncate injection text with an explicit marker (never silent cut). */
-inline std::string capInjectionText(const std::string& text, std::size_t maxChars) {
-    if (maxChars == 0) {
-        return "";
+/**
+ * Planner trajectory block.
+ * When include_prior_synthesis is true and trajectory_json yields an excerpt,
+ * appends labeled prior unverified synthesis text. Otherwise preserves legacy
+ * formatting (mechanical Success only).
+ */
+inline std::string formatTrajectoryInjection(const std::string& goal,
+                                             float success_score,
+                                             const std::string& trajectory_json,
+                                             bool include_prior_synthesis,
+                                             std::size_t maxSynthesisChars) {
+    if (!include_prior_synthesis) {
+        return formatTrajectoryInjectionLegacy(goal, success_score);
     }
-    if (text.empty()) {
-        return text;
+    const std::string excerpt =
+        extractPriorSynthesisExcerpt(trajectory_json, maxSynthesisChars);
+    if (excerpt.empty()) {
+        return formatTrajectoryInjectionLegacy(goal, success_score);
     }
-    if (text.size() <= maxChars) {
-        return text;
+
+    const std::string cleaned = cleanGoalForStorage(goal);
+    std::ostringstream oss;
+    oss << "[PAST EXPERIENCE — RELEVANT TRAJECTORY]\n";
+    const std::optional<std::string> problem = standaloneProblemSection(cleaned);
+    if (problem.has_value()) {
+        oss << "- Case: " << *problem << "\n";
+    } else {
+        oss << "- Goal: " << cleaned << "\n";
     }
-    return text.substr(0, maxChars) + "\n...(truncated)...";
+    oss << "  Mechanical success: " << success_score
+        << " (plan execution completion; not diagnostic verification)\n";
+    oss << "  Verified diagnostic outcome: not recorded\n";
+    oss << "  Prior synthesis (unverified experience, excerpt): " << excerpt << "\n";
+    return oss.str();
+}
+
+inline std::string formatTrajectoryInjection(const std::string& goal, float success_score) {
+    return formatTrajectoryInjectionLegacy(goal, success_score);
 }
 
 inline const char* stepTypeLabel(StepType type) {

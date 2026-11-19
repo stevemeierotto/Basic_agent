@@ -298,7 +298,32 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
         if (!trajectories.empty()) {
             trajectory_count = trajectories.size();
             const auto& t = trajectories.front();
-            past_experience = Thoth::formatTrajectoryInjection(t.goal, t.success_score);
+            float unboosted_similarity = 0.0f;
+            if (!goal_embedding.empty() && !t.embedding.empty()
+                && goal_embedding.size() == t.embedding.size()) {
+                unboosted_similarity =
+                    GragScorer::cosine_similarity(goal_embedding, t.embedding);
+            }
+            // Conservative heuristic only: withhold technical excerpt when the
+            // unboosted goal cosine is below the trajectory floor (boost may
+            // still have selected the row). Not a claim of causal relevance.
+            const bool include_prior_synthesis =
+                unboosted_similarity >= Thoth::PlannerTrajectory::kMinSimilarityFloor;
+            past_experience = Thoth::formatTrajectoryInjection(
+                t.goal,
+                t.success_score,
+                t.trajectory_json,
+                include_prior_synthesis,
+                Thoth::PlannerInjection::kMaxPriorSynthesisChars);
+            const bool synthesis_included =
+                include_prior_synthesis
+                && past_experience.find(
+                       "Prior synthesis (unverified experience, excerpt):") != std::string::npos;
+            const std::size_t synthesis_excerpt_chars = synthesis_included
+                ? Thoth::extractPriorSynthesisExcerpt(
+                      t.trajectory_json, Thoth::PlannerInjection::kMaxPriorSynthesisChars)
+                      .size()
+                : 0;
 
             StructuredLogger::instance().log(LogLevel::Info, "planner", "TRAJECTORY_INJECTION",
                 "Injected scored trajectory into planner prompt",
@@ -306,7 +331,11 @@ Plan LLMPlanner::create_plan(const std::string& goal) {
                  {"trajectory_count", trajectory_count},
                  {"trajectory_id", t.trajectory_id},
                  {"plan_origin", Thoth::normalizePlanOrigin(t.plan_origin)},
-                 {"learning_eligible", true}});
+                 {"learning_eligible", true},
+                 {"unboosted_similarity", unboosted_similarity},
+                 {"synthesis_included", synthesis_included},
+                 {"synthesis_excerpt_chars", synthesis_excerpt_chars},
+                 {"min_unboosted_similarity", Thoth::PlannerTrajectory::kMinSimilarityFloor}});
         }
     }
 

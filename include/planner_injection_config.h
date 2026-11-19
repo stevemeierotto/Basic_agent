@@ -24,7 +24,15 @@ inline constexpr std::size_t kMaxGoalChars = 1024;
 /** Optional experience slots — dropped entirely when over total budget. */
 inline constexpr std::size_t kMaxPlanReuseChars = 1024;
 inline constexpr std::size_t kMaxStrategyContextChars = 512;
-inline constexpr std::size_t kMaxTrajectoryChars = 512;
+/**
+ * Combined trajectory + plan-reuse section cap applied in buildPlanPrompt.
+ * Validated against assemblePlannerPrompt: total budget is at least
+ * kMinPlanPromptBudget (8192), core Rules/Schema/Goal are never truncated, and
+ * leftover experience budget under typical planner prompts exceeds 1536.
+ */
+inline constexpr std::size_t kMaxTrajectoryChars = 1536;
+/** Max characters taken from a stored LLM step result.data.response. */
+inline constexpr std::size_t kMaxPriorSynthesisChars = 768;
 
 /** Minimum total planner prompt budget (chars). */
 inline constexpr std::size_t kMinPlanPromptBudget = 8192;
