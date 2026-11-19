@@ -125,7 +125,7 @@ void printUsage(std::ostream& out) {
         << "\n"
         << "Environment (see docs/GETTING_STARTED.md):\n"
         << "  THOTH_WORKSPACE_PATH, THOTH_LOGS_PATH\n"
-        << "  THOTH_INFERENCE_BASE_URL     llama.cpp chat (default: http://127.0.0.1:8080)\n"
+        << "  THOTH_INFERENCE_BASE_URL     llama.cpp chat (default: http://127.0.0.1:8082)\n"
         << "  THOTH_EMBED_BASE_URL         llama.cpp embeddings (default: http://127.0.0.1:8081)\n"
         << "  THOTH_INFERENCE_BACKEND      llama_cpp | ollama (default: llama_cpp)\n"
         << "  THOTH_ENGINE_BIND, THOTH_ENGINE_PORT\n"

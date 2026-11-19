@@ -17,7 +17,7 @@ namespace Thoth {
 
 namespace {
 
-constexpr const char* kLlamaChatUrl = "http://127.0.0.1:8080";
+constexpr const char* kLlamaChatUrl = "http://127.0.0.1:8082";
 constexpr const char* kLlamaEmbedUrl = "http://127.0.0.1:8081";
 constexpr const char* kOllamaUrl = "http://127.0.0.1:11434";
 

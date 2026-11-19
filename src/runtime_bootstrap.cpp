@@ -113,7 +113,7 @@ std::vector<InferenceMisconfigWarning> detectInferenceBackendMisconfigs(
             warnings.push_back({
                 "backend_url_mismatch",
                 "THOTH_INFERENCE_BACKEND=llama_cpp but inference_base looks like Ollama "
-                    "(use http://llama-server:8080 in Docker or http://127.0.0.1:8080 on host)",
+                    "(use http://llama-server:8080 in Docker or http://127.0.0.1:8082 on host)",
             });
         }
         if (urlHintsOllamaService(endpoints.embed_base_url)) {
